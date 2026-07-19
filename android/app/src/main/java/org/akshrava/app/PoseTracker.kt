@@ -7,7 +7,6 @@ import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.os.SystemClock
 import android.view.Surface
-import android.view.WindowManager
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
@@ -32,7 +31,7 @@ class PoseTracker(context: Context) : SensorEventListener {
     }
 
     private val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
-    private val displayRotation = (context.getSystemService(Context.WINDOW_SERVICE) as WindowManager).defaultDisplay.rotation
+    private val displayRotation = context.currentDisplayRotation()
     private val rotation = FloatArray(9)
     private val remappedRotation = FloatArray(9)
     private val orientation = FloatArray(3)

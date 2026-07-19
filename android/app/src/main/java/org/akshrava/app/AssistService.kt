@@ -15,10 +15,11 @@ import android.os.Build
 import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Size
-import android.view.WindowManager
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -112,13 +113,20 @@ class AssistService : LifecycleService() {
                 val provider = future.get()
                 cameraProvider = provider
                 val analysis = ImageAnalysis.Builder()
-                    .setTargetResolution(Size(640, 480))
+                    .setResolutionSelector(
+                        ResolutionSelector.Builder()
+                            .setResolutionStrategy(
+                                ResolutionStrategy(
+                                    Size(640, 480),
+                                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                                )
+                            )
+                            .build()
+                    )
                     // Ask CameraX for the current display orientation before falling back to
                     // FrameEncoder rotation. This avoids the expensive rotate/decode/re-encode
                     // path on devices whose analysis stream can be delivered already oriented.
-                    .setTargetRotation(
-                        (getSystemService(Context.WINDOW_SERVICE) as WindowManager).defaultDisplay.rotation
-                    )
+                    .setTargetRotation(currentDisplayRotation())
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
                 analysis.setAnalyzer(frameExecutor) { image -> analyzeImage(image) }

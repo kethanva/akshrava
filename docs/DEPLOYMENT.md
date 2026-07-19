@@ -92,6 +92,15 @@ know any cloud-provider credentials:
 process liveness endpoint. Caddy exposes neither `/metrics` nor Grafana/Prometheus publicly; use
 an SSH tunnel or other separately authenticated admin access.
 
+## Schema changes
+
+The current pilot startup supports only the tiny, reviewed additive SQLite compatibility upgrades
+that are tested in `backend/tests/test_storage_migrations.py`; names and SQL types are fixed
+allow-lists, never operator input. Before any production PostgreSQL schema change or non-additive
+upgrade, replace that pilot bridge with an Alembic migration revision, rehearse upgrade and rollback
+against a restored backup, and record the revision in the release log. Do not add ad-hoc runtime
+DDL for future schema changes.
+
 There is no enabled Android fallback. If the network, control plane, or GPU worker fails, the app
 must say vision assistance is unavailable and the user must continue with a cane or guide.
 
@@ -105,6 +114,9 @@ measurement evidence.
 
 ## Scale and failover boundary
 
-One configured remote worker endpoint is adequate for the supervised pilot. Before multi-worker
-or interruptible-GPU operation, add an authenticated endpoint registry, health-checked re-pointing
-and a warm-spare drill. Do not claim automatic GPU failover from this Compose deployment alone.
+One configured remote worker endpoint is adequate for the supervised pilot. The worker's HMAC nonce
+replay cache is intentionally process-local and the image starts one Gunicorn worker; do not put
+multiple replicas behind a load balancer. Before multi-worker or interruptible-GPU operation, add
+an authenticated endpoint registry, health-checked re-pointing, a shared atomic nonce store (for
+example Redis with TTL), and a warm-spare drill. Do not claim automatic GPU failover from this
+Compose deployment alone.
