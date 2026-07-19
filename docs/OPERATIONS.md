@@ -82,7 +82,8 @@ Prometheus must alert on control-plane availability, GPU-worker availability, la
 results, session-admission saturation, and aggregate capture-to-API frame age. These metrics are
 intentionally aggregate: no device, route, or carrier labels are exported from `/metrics`.
 Outside development, `/metrics` requires `METRICS_SCRAPE_TOKEN` (`X-Akshrava-Metrics-Token` or
-Bearer). Caddy and Cloud Run must not expose an unauthenticated scrape path publicly.
+Bearer). Compose injects the token into the API and Prometheus (`authorization.credentials_file`).
+Caddy and Cloud Run must not expose an unauthenticated scrape path publicly.
 Carrier/device p95 is a field-log analysis task after explicit consent, not a public metrics label.
 
 ## Model activation

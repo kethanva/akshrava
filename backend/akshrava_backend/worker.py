@@ -37,6 +37,7 @@ class WorkerSettings:
     nonce_redis_url: str = ""
     yolo_weights_sha256: str = ""
     infer_timeout_seconds: float = 5.0
+    metrics_scrape_token: str = ""
 
     @classmethod
     def from_env(cls):
@@ -53,6 +54,7 @@ class WorkerSettings:
             environment=os.getenv("AKSHRAVA_ENV", "development").lower(),
             nonce_redis_url=os.getenv("NONCE_REDIS_URL", "").strip(),
             infer_timeout_seconds=float(os.getenv("WORKER_INFER_TIMEOUT_SECONDS", "5.0")),
+            metrics_scrape_token=os.getenv("METRICS_SCRAPE_TOKEN", "").strip(),
         )
         if len(settings.shared_secret) < 32:
             raise ValueError("WORKER_SHARED_SECRET must be at least 32 characters")
@@ -74,6 +76,8 @@ class WorkerSettings:
             raise ValueError("YOLO_WEIGHTS_SHA256 is required outside development")
         if settings.environment != "development" and not settings.nonce_redis_url.startswith(("redis://", "rediss://")):
             raise ValueError("NONCE_REDIS_URL is required outside development for shared GPU nonce claims")
+        if settings.environment != "development" and not settings.metrics_scrape_token:
+            raise ValueError("METRICS_SCRAPE_TOKEN is required outside development so worker /metrics is not public")
         return settings
 
 
@@ -199,7 +203,16 @@ def create_worker_app(
         return {"ok": True, "role": "gpu-worker", "detector": "ultralytics"}
 
     @app.get("/metrics", include_in_schema=False)
-    async def prometheus_metrics():
+    async def prometheus_metrics(request: Request):
+        settings_value = app.state.worker_settings
+        if settings_value.environment != "development":
+            expected = settings_value.metrics_scrape_token
+            provided = (request.headers.get("x-akshrava-metrics-token") or "").strip()
+            authorization = request.headers.get("authorization") or ""
+            if not provided and authorization.lower().startswith("bearer "):
+                provided = authorization[7:].strip()
+            if not expected or provided != expected:
+                raise HTTPException(status_code=404, detail="not found")
         return Response(app.state.metrics.render(), media_type="text/plain; version=0.0.4; charset=utf-8")
 
     @app.post("/v1/infer")

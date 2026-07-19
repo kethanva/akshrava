@@ -9,19 +9,26 @@ detector    = "noop"
 # api_image    = "us-central1-docker.pkg.dev/PROJECT/akshrava/akshrava-api@sha256:..."
 # worker_image = "us-central1-docker.pkg.dev/PROJECT/akshrava/akshrava-worker@sha256:..."
 
-# Cloud Run invoker: default is private. For a temporary public pilot edge only:
+# REQUIRED for worn-phone WSS: either grant an edge invoker, or temporarily open public invoke.
+# Empty invokers + api_allow_unauthenticated=false fails terraform plan (phones cannot reach Cloud Run).
+api_invoker_members = ["serviceAccount:edge@PROJECT.iam.gserviceaccount.com"]
+# Temporary public pilot edge only (discouraged):
 # api_allow_unauthenticated = true
-# Or grant specific members:
-# api_invoker_members = ["serviceAccount:edge@PROJECT.iam.gserviceaccount.com"]
 
 # Memorystore in-transit TLS (upgrades to STANDARD_HA + rediss://):
 # redis_transit_encryption = true
 
-# Prefer external PKI so private keys never land in Terraform state:
-# manage_pki_in_terraform = false
-# jwt_public_key_pem  = file("jwt-public.pem")
-# jwt_private_key_pem = file("jwt-private.pem")
-# ... plus worker_*_pem values ...
+# External PKI is the default (manage_pki_in_terraform=false). Supply PEMs before plan:
+manage_pki_in_terraform = false
+jwt_public_key_pem      = file("jwt-public.pem")
+jwt_private_key_pem     = file("jwt-private.pem")
+worker_ca_cert_pem      = file("worker-ca.pem")
+worker_server_cert_pem  = file("worker-server.pem")
+worker_server_key_pem   = file("worker-server-key.pem")
+worker_client_cert_pem  = file("worker-client.pem")
+worker_client_key_pem   = file("worker-client-key.pem")
+# Bootstrap-only (keys land in TF state — rotate if state is copied):
+# manage_pki_in_terraform = true
 
 # When ready for GPU inference:
 # detector            = "remote"

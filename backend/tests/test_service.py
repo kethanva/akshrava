@@ -268,3 +268,41 @@ async def test_spoken_output_uses_the_devices_own_provisioned_language():
     second = await service.analyze(state, _header(2, 1_500), b"jpeg")
     assert second["hazard"] is not None
     assert "आगे" in second["hazard"]["spoken_preview"] or "रुकावट" in second["hazard"]["spoken_preview"]
+
+
+@pytest.mark.asyncio
+async def test_inference_circuit_is_per_device():
+    class SlowDetector:
+        def requires_serial_execution(self):
+            return False
+
+        def detect_for_device(self, device_id, jpeg):
+            import time as _time
+            _time.sleep(0.05)
+            return []
+
+    class PeerDetector:
+        def requires_serial_execution(self):
+            return False
+
+        def detect_for_device(self, device_id, jpeg):
+            return []
+
+    service = VisionService(
+        SlowDetector(),
+        RecordingStore(),
+        inference_timeout_ms=10,
+        inference_executor_workers=2,
+    )
+    service._CIRCUIT_OPEN_AFTER = 2
+    service._CIRCUIT_COOLDOWN_SECONDS = 30.0
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="deadline exceeded"):
+            await service._detect("bad-phone", b"jpeg")
+    with pytest.raises(RuntimeError, match="circuit open"):
+        await service._detect("bad-phone", b"jpeg")
+    service.detector = PeerDetector()
+    service.inference_timeout_seconds = 1.0
+    detections, status = await service._detect("good-phone", b"jpeg")
+    assert detections == []
+    assert status is None

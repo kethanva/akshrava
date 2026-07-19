@@ -42,6 +42,7 @@ class Settings:
     remote_tls_client_key_file: str
     gcp_diagnostics_bucket: str
     metrics_scrape_token: str
+    diagnostic_uploads_enabled: bool
 
     @classmethod
     def from_env(cls):
@@ -80,6 +81,8 @@ class Settings:
             remote_tls_client_key_file=os.getenv("REMOTE_TLS_CLIENT_KEY_FILE", "").strip(),
             gcp_diagnostics_bucket=os.getenv("GCP_DIAGNOSTICS_BUCKET", "").strip(),
             metrics_scrape_token=os.getenv("METRICS_SCRAPE_TOKEN", "").strip(),
+            # Stay false until face/plate blur exists (PRIVACY.md). Consent alone must not upload raw JPEG.
+            diagnostic_uploads_enabled=_env_bool("DIAGNOSTIC_UPLOADS_ENABLED", False),
         )
         if settings.environment not in {"development", "pilot", "production"}:
             raise ValueError("AKSHRAVA_ENV must be development, pilot or production")

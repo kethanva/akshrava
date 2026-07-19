@@ -9,13 +9,17 @@ import time
 from abc import ABC, abstractmethod
 
 
-DEFAULT_LEASE_SECONDS = 12 * 60 * 60
+DEFAULT_LEASE_SECONDS = 180  # Short lease; clients renew via ping / frame traffic.
 
 
 class SessionAdmission(ABC):
     @abstractmethod
     async def try_open(self, session_id: str) -> bool:
         """Reserve capacity for a session id."""
+
+    @abstractmethod
+    async def renew(self, session_id: str) -> bool:
+        """Extend an active session lease. Return False if the lease is gone."""
 
     @abstractmethod
     async def close(self, session_id: str) -> None:
@@ -46,6 +50,11 @@ class InMemorySessionAdmission(SessionAdmission):
             self._active += 1
             self._sessions.add(session_id)
             return True
+
+    async def renew(self, session_id: str) -> bool:
+        # In-memory admission has no TTL; presence is enough.
+        async with self._lock:
+            return session_id in self._sessions
 
     async def close(self, session_id: str) -> None:
         async with self._lock:
@@ -88,6 +97,20 @@ redis.call('EXPIRE', key, lease_seconds)
 return 1
 """
 
+    _RENEW_SCRIPT = """
+local key = KEYS[1]
+local session_id = ARGV[1]
+local now = tonumber(ARGV[2])
+local lease_seconds = tonumber(ARGV[3])
+redis.call('ZREMRANGEBYSCORE', key, '-inf', now)
+if not redis.call('ZSCORE', key, session_id) then
+  return 0
+end
+redis.call('ZADD', key, now + lease_seconds, session_id)
+redis.call('EXPIRE', key, lease_seconds)
+return 1
+"""
+
     def __init__(self, url: str, maximum: int, namespace: str = "akshrava:session-admission"):
         self.url = url
         self.maximum = maximum
@@ -108,6 +131,12 @@ return 1
         # time is monotonic and process-local; mixing it into Redis would desync expiry.
         now = time.time()
         result = await client.eval(self._SCRIPT, 1, self.namespace, session_id, now, self.lease_seconds, self.maximum)
+        return bool(result)
+
+    async def renew(self, session_id: str) -> bool:
+        client = await self._client_for_use()
+        now = time.time()
+        result = await client.eval(self._RENEW_SCRIPT, 1, self.namespace, session_id, now, self.lease_seconds)
         return bool(result)
 
     async def close(self, session_id: str) -> None:

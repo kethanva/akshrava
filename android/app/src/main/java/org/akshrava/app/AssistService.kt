@@ -121,6 +121,7 @@ class AssistService : LifecycleService() {
             onHighAlert = {
                 capturePolicy.markHighAlert(SystemClock.elapsedRealtime())
             },
+            language = config.language,
             http = http
         )
         client.connect()

@@ -166,10 +166,17 @@ terraform -chdir=gcp output websocket_url
 `gcp_migrate_then_deploy.sh` runs `terraform apply` then `gcloud run jobs execute akshrava-migrate
 --wait` so Alembic must succeed before you treat the new API revision as live.
 
-Cloud Run defaults to **authenticated invokers only** (`api_allow_unauthenticated=false`). Grant
-`api_invoker_members` for an edge proxy, or set `api_allow_unauthenticated=true` only for a
-temporary public pilot. `/healthz` and `/readyz` remain usable for probes; `/metrics` requires
-`METRICS_SCRAPE_TOKEN` (Secret Manager) via `X-Akshrava-Metrics-Token` or `Authorization: Bearer`.
+Cloud Run defaults to **authenticated invokers only** (`api_allow_unauthenticated=false`).
+`terraform plan` and `scripts/gcp_preflight.sh` **fail** if both `api_invoker_members` is empty and
+`api_allow_unauthenticated` is false — phones cannot reach private Cloud Run without an edge.
+Grant `api_invoker_members` for an edge proxy SA/group, or set `api_allow_unauthenticated=true`
+only for a temporary documented public pilot. `/healthz` and `/readyz` remain usable for probes;
+`/metrics` requires `METRICS_SCRAPE_TOKEN` (Secret Manager) via `X-Akshrava-Metrics-Token` or
+`Authorization: Bearer`.
+
+PKI: `manage_pki_in_terraform` defaults to **false**. Supply external PEM variables (see
+`terraform.tfvars.example`). Bootstrap-only may set `manage_pki_in_terraform=true` (keys land in
+state — rotate if state is copied).
 
 WSS reliability: the API service uses `cpu_idle=false` and `min_instance_count=1`.
 

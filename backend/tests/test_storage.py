@@ -144,10 +144,41 @@ async def test_device_revocation_uses_redis_cache():
     try:
         await store.upsert_device("test-device-redis", "r0")
         assert not await store.is_device_revoked("test-device-redis")
-        assert mock_client.data.get("revocation:test-device-redis") == b"0"
+        assert "revocation:test-device-redis" not in mock_client.data
         mock_client.data["revocation:test-device-redis"] = b"1"
         assert await store.is_device_revoked("test-device-redis")
         assert await store.revoke_device("test-device-redis")
-        assert "revocation:test-device-redis" not in mock_client.data
+        assert mock_client.data.get("revocation:test-device-redis") == b"1"
+        assert await store.is_device_revoked("test-device-redis")
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_revocation_does_not_publish_false_to_redis():
+    class MockRedis:
+        def __init__(self):
+            self.data = {}
+
+        async def get(self, key):
+            return self.data.get(key)
+
+        async def set(self, key, value, ex=None):
+            self.data[key] = value
+
+        async def delete(self, key):
+            self.data.pop(key, None)
+
+        async def close(self):
+            pass
+
+    mock_client = MockRedis()
+    store = Store("sqlite+aiosqlite:///:memory:", redis_url="redis://localhost:6379")
+    store._redis_client = mock_client
+    await store.initialize()
+    try:
+        await store.upsert_device("active-device", "r0")
+        assert not await store.is_device_revoked("active-device")
+        assert "revocation:active-device" not in mock_client.data
     finally:
         await store.close()

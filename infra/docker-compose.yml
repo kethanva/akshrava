@@ -89,6 +89,8 @@ services:
       INFERENCE_EXECUTOR_WORKERS: ${INFERENCE_EXECUTOR_WORKERS:-2}
       MAX_ACTIVE_SESSIONS: ${MAX_ACTIVE_SESSIONS:-200}
       DATABASE_SCHEMA_REVISION: ${DATABASE_SCHEMA_REVISION:-20260719_01}
+      METRICS_SCRAPE_TOKEN: ${METRICS_SCRAPE_TOKEN:?set METRICS_SCRAPE_TOKEN in .env}
+      DIAGNOSTIC_UPLOADS_ENABLED: ${DIAGNOSTIC_UPLOADS_ENABLED:-false}
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
@@ -132,6 +134,7 @@ services:
       REQUIRE_GPU: "true"
       AKSHRAVA_ENV: ${AKSHRAVA_ENV:-pilot}
       NONCE_REDIS_URL: ${NONCE_REDIS_URL:-redis://:${REDIS_PASSWORD}@redis:6379/1}
+      METRICS_SCRAPE_TOKEN: ${METRICS_SCRAPE_TOKEN:?set METRICS_SCRAPE_TOKEN in .env}
     volumes:
       - ${MODEL_DIR:-../models}:/models:ro
     ports:
@@ -178,15 +181,23 @@ services:
   prometheus:
     image: prom/prometheus:v3.13.0
     profiles: ["monitoring"]
+    environment:
+      METRICS_SCRAPE_TOKEN: ${METRICS_SCRAPE_TOKEN:?set METRICS_SCRAPE_TOKEN in .env}
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./prometheus-alerts.yml:/etc/prometheus/alerts.yml:ro
       - ./prometheus-targets:/etc/prometheus/targets:ro
       - prometheus-data:/prometheus
+    entrypoint: ["/bin/sh", "-c"]
     command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-      - '--storage.tsdb.retention.time=15d'
+      - |
+        install -d -m 0755 /run/secrets
+        printf '%s' "$$METRICS_SCRAPE_TOKEN" > /run/secrets/metrics_scrape_token
+        chmod 0400 /run/secrets/metrics_scrape_token
+        exec /bin/prometheus \
+          --config.file=/etc/prometheus/prometheus.yml \
+          --storage.tsdb.path=/prometheus \
+          --storage.tsdb.retention.time=15d
     ports:
       - "127.0.0.1:9090:9090"
     depends_on:

@@ -68,10 +68,14 @@ person's signature as consent evidence.
 ## 4. Opt-in diagnostic samples
 
 - Require **separate, revocable** voice-confirmed consent (distinct from operational consent).
+- **Uploads are disabled by default** (`DIAGNOSTIC_UPLOADS_ENABLED=false`). JWT `diagnostic_consent`
+  alone must not upload raw frames. Do not set the flag until face/plate blur exists.
+- `scripts/mint_device_token.py --diagnostic-consent` refuses unless `DIAGNOSTIC_UPLOADS_ENABLED=true`
+  (lab-only override: `--force-unsafe-diagnostic-consent`; API still will not upload until enabled).
 - **Blur on phone before upload**: use detector-based face/plate blur plus manual review.
 - Automated blur is imperfect — never promise perfect anonymisation.
 - Retain for 30 days maximum, then auto-delete unless a specific incident consent extends.
-- Do not upload diagnostic samples without active consent flag in device config.
+- Do not upload diagnostic samples without active consent flag **and** `DIAGNOSTIC_UPLOADS_ENABLED`.
 
 ---
 

@@ -3,7 +3,8 @@
 # Private keys created by the tls provider are stored in Terraform state. Prefer generating
 # long-lived PKI outside Terraform (openssl / cert-manager / Cloud KMS) and supplying PEMs via
 # the jwt_* / worker_*_pem variables below so private key bytes never enter state. When
-# manage_pki_in_terraform=true (default for greenfield bootstrap), keys are generated here and
+# manage_pki_in_terraform=true (bootstrap only): keys are generated here and land in Terraform
+# state — rotate if state is copied. Prefer manage_pki_in_terraform=false with external PEMs.
 # immediately copied into Secret Manager — rotate them if state is ever copied or leaked.
 #
 # Rotation after a state copy: replace Secret Manager versions for jwt-private, worker TLS keys,

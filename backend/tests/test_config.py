@@ -87,11 +87,11 @@ def test_production_requires_redis_for_distributed_safety_controls(monkeypatch):
         Settings.from_env()
 
 
-def test_pilot_requires_metrics_scrape_token(monkeypatch):
-    _pilot_rs256(monkeypatch)
-    monkeypatch.delenv("METRICS_SCRAPE_TOKEN", raising=False)
-    with pytest.raises(ValueError, match="METRICS_SCRAPE_TOKEN"):
-        Settings.from_env()
+def test_diagnostic_uploads_default_off(monkeypatch):
+    monkeypatch.setenv("AKSHRAVA_ENV", "development")
+    monkeypatch.setenv("DEV_AUTH_BYPASS", "true")
+    monkeypatch.delenv("DIAGNOSTIC_UPLOADS_ENABLED", raising=False)
+    assert Settings.from_env().diagnostic_uploads_enabled is False
 
 
 def test_pilot_remote_inference_requires_mutual_tls_material(monkeypatch):

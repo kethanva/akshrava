@@ -33,6 +33,11 @@ def test_iac_app_structure():
     assert re.search(r'name\s*=\s*"METRICS_SCRAPE_TOKEN"', tf_content), "METRICS_SCRAPE_TOKEN is missing from Cloud Run"
     assert "cpu_idle = false" in tf_content, "Cloud Run should keep CPU allocated for WSS"
     assert "api_allow_unauthenticated" in tf_content, "Public invoker must be gated"
+    assert "phone_wss_reachability" in tf_content, "Phone reachability check must be present"
+    # PKI must not default into Terraform state for pilot/production.
+    assert 'variable "manage_pki_in_terraform"' in tf_content
+    manage_block = tf_content.split('variable "manage_pki_in_terraform"', 1)[1].split("variable ", 1)[0]
+    assert "default     = false" in manage_block or "default = false" in manage_block
     
     # Test GPU Worker VM
     assert 'resource "google_compute_instance" "worker"' in tf_content, "GPU Worker instance is missing"

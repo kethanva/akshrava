@@ -274,11 +274,52 @@ def test_websocket_consent_query_alone_does_not_upload_without_jwt_claim(monkeyp
     mock_upload.assert_not_called()
 
 
-def test_websocket_consent_triggers_gcp_upload(monkeypatch):
+def test_websocket_consent_does_not_upload_without_blur_gate(monkeypatch):
+    """JWT/query consent alone must not upload raw JPEG until DIAGNOSTIC_UPLOADS_ENABLED."""
     from unittest.mock import AsyncMock
     mock_upload = AsyncMock(return_value="http://storage/mock.jpg")
     monkeypatch.setattr(main.gcp_storage, "upload_frame", mock_upload)
-    monkeypatch.setattr(main, "settings", replace(main.settings, gcp_diagnostics_bucket="test-bucket"))
+    monkeypatch.setattr(
+        main,
+        "settings",
+        replace(main.settings, gcp_diagnostics_bucket="test-bucket", diagnostic_uploads_enabled=False),
+    )
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/session?token=dev-device-token&consent=true") as websocket:
+            websocket.receive_json()
+            websocket.send_json(
+                {
+                    "type": "frame",
+                    "id": 1,
+                    "capture_mono_ms": 100,
+                    "w": 1,
+                    "h": 1,
+                    "jpeg_bytes": len(JPEG),
+                    "camera_calibration_id": "test-r0",
+                }
+            )
+            websocket.send_bytes(JPEG)
+            assert websocket.receive_json()["type"] == "result"
+            websocket.receive_json()
+            time.sleep(0.1)
+
+    mock_upload.assert_not_called()
+
+
+def test_websocket_consent_triggers_gcp_upload_when_enabled(monkeypatch):
+    from unittest.mock import AsyncMock
+    mock_upload = AsyncMock(return_value="http://storage/mock.jpg")
+    monkeypatch.setattr(main.gcp_storage, "upload_frame", mock_upload)
+    monkeypatch.setattr(
+        main,
+        "settings",
+        replace(
+            main.settings,
+            gcp_diagnostics_bucket="test-bucket",
+            diagnostic_uploads_enabled=True,
+        ),
+    )
 
     with TestClient(app) as client:
         with client.websocket_connect("/v1/session?token=dev-device-token&consent=true") as websocket:

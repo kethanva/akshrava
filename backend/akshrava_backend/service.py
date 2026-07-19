@@ -94,8 +94,9 @@ class VisionService:
         # underlying thread; isolation + a bounded worker count fail closed under saturation.
         self._local_executor = self._new_executor("akshrava-local-infer")
         self._remote_executor = self._new_executor("akshrava-remote-infer")
-        self._timeout_streak = 0
-        self._circuit_open_until = 0.0
+        # Per-device breakers: one hung phone/GPU path must not silence the fleet.
+        self._timeout_streak: Dict[str, int] = {}
+        self._circuit_open_until: Dict[str, float] = {}
         # Alert persistence / diagnostic uploads must never block the phone WebSocket reply.
         self._persist_tracker = BackgroundTaskTracker("alert-persistence")
         self._upload_tracker = BackgroundTaskTracker("diagnostic-uploads")
@@ -224,6 +225,8 @@ class VisionService:
     async def release_session(self, session_key: str) -> None:
         """Drop per-connection tracker state on disconnect/revocation."""
         self._trackers.pop(session_key, None)
+        # Circuit keys are device-scoped; callers pass session_key — clear nothing here.
+        # Device-level breaker clears on success; disconnect must not wipe another phone's state.
 
     def shutdown(self) -> None:
         # cancel_futures is Python 3.9+, while the package intentionally supports Python 3.8.
@@ -250,31 +253,35 @@ class VisionService:
             else:
                 close_method()
 
-    def _circuit_allows(self) -> None:
-        if time.monotonic() < self._circuit_open_until:
+    def _circuit_allows(self, device_id: str) -> None:
+        until = self._circuit_open_until.get(device_id, 0.0)
+        if time.monotonic() < until:
             raise RuntimeError("inference circuit open after repeated timeouts")
 
-    def _note_timeout(self) -> None:
-        self._timeout_streak += 1
-        if self._timeout_streak >= self._CIRCUIT_OPEN_AFTER:
-            self._circuit_open_until = time.monotonic() + self._CIRCUIT_COOLDOWN_SECONDS
-            self._timeout_streak = 0
+    def _note_timeout(self, device_id: str) -> None:
+        streak = self._timeout_streak.get(device_id, 0) + 1
+        self._timeout_streak[device_id] = streak
+        if streak >= self._CIRCUIT_OPEN_AFTER:
+            self._circuit_open_until[device_id] = time.monotonic() + self._CIRCUIT_COOLDOWN_SECONDS
+            self._timeout_streak[device_id] = 0
             logger.warning(
-                "inference circuit opened for %.1fs after repeated timeouts",
+                "inference circuit opened for device=%s for %.1fs after repeated timeouts",
+                device_id,
                 self._CIRCUIT_COOLDOWN_SECONDS,
             )
 
-    def _note_success(self) -> None:
-        self._timeout_streak = 0
+    def _note_success(self, device_id: str) -> None:
+        self._timeout_streak.pop(device_id, None)
+        self._circuit_open_until.pop(device_id, None)
 
     async def _detect(self, device_id: str, jpeg: bytes):
-        """Run detection with timeout + circuit break.
+        """Run detection with timeout + per-device circuit break.
 
         Remote HTTP adapters are preferred on the async path (request timeouts are killable).
         Local/sync detectors run on an isolated thread pool: wait_for cannot cancel a worker
         thread, so pool separation limits blast radius when one path hangs.
         """
-        self._circuit_allows()
+        self._circuit_allows(device_id)
         loop = asyncio.get_running_loop()
 
         # Remote workers: async HTTP with follow_redirects=False; timeout is meaningful.
@@ -286,16 +293,16 @@ class VisionService:
                         async_for_device(device_id, jpeg),
                         timeout=self.inference_timeout_seconds,
                     )
-                    self._note_success()
+                    self._note_success(device_id)
                     return result, None
                 result = await asyncio.wait_for(
                     self.detector.detect_async(jpeg),
                     timeout=self.inference_timeout_seconds,
                 )
-                self._note_success()
+                self._note_success(device_id)
                 return result, None
             except asyncio.TimeoutError as exc:
-                self._note_timeout()
+                self._note_timeout(device_id)
                 raise RuntimeError("inference deadline exceeded") from exc
 
         # CloudFallbackDetector exposes provider + local; keep async for the availability bit.
@@ -305,10 +312,10 @@ class VisionService:
                     self.detector.detect_async_with_status_for_device(device_id, jpeg),
                     timeout=self.inference_timeout_seconds,
                 )
-                self._note_success()
+                self._note_success(device_id)
                 return result
             except asyncio.TimeoutError as exc:
-                self._note_timeout()
+                self._note_timeout(device_id)
                 raise RuntimeError("inference deadline exceeded") from exc
 
         # Local YOLO / noop: sync detect on the isolated local pool (not the default executor).
@@ -327,10 +334,10 @@ class VisionService:
                 loop.run_in_executor(self._local_executor, function, jpeg),
                 timeout=self.inference_timeout_seconds,
             )
-            self._note_success()
+            self._note_success(device_id)
             return result if method is not None else (result, None)
         except asyncio.TimeoutError as exc:
-            self._note_timeout()
+            self._note_timeout(device_id)
             raise RuntimeError("inference deadline exceeded") from exc
 
     def _pose_discontinuity(self, state: SessionState, header: FrameHeader) -> bool:

@@ -58,3 +58,40 @@ async def test_redis_session_admission_uses_atomic_shared_budget(monkeypatch):
     assert before - 1 <= now <= after + 1
     assert now > 1_000_000_000
     assert calls[1] == ("zrem", "akshrava:session-admission", "session-1")
+
+
+@pytest.mark.asyncio
+async def test_redis_session_admission_renew_refreshes_lease_only(monkeypatch):
+    calls = []
+
+    class FakeRedis:
+        async def eval(self, script, keys, *argv):
+            calls.append((script, keys) + argv)
+            return 1
+
+        async def zrem(self, namespace, session_id):
+            calls.append(("zrem", namespace, session_id))
+
+    admission = RedisSessionAdmission("redis://example.invalid/0", maximum=3)
+    admission.lease_seconds = 180
+
+    async def fake_client():
+        return FakeRedis()
+
+    monkeypatch.setattr(admission, "_client_for_use", fake_client)
+    assert await admission.renew("session-alive")
+    script, keys, namespace, session_id, now, lease_seconds = calls[0]
+    assert "ZCARD" not in script
+    assert "ZSCORE" in script
+    assert keys == 1
+    assert session_id == "session-alive"
+    assert lease_seconds == 180
+    assert now > 1_000_000_000
+
+
+@pytest.mark.asyncio
+async def test_inmemory_renew_requires_open_session():
+    admission = InMemorySessionAdmission(2)
+    assert not await admission.renew("missing")
+    assert await admission.try_open("a")
+    assert await admission.renew("a")

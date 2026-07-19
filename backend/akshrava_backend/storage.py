@@ -193,14 +193,20 @@ class Store:
                 return False
             device.revoked_at = datetime.now(timezone.utc)
             await session.commit()
-            self._revocation_cache.pop(device_id, None)
+            import time
+            # Positive write-through: never delete-to-miss (replicas would re-read a stale False).
+            self._revocation_cache[device_id] = (True, time.monotonic() + self._cache_ttl)
             if self.redis_url:
                 try:
                     client = await self._get_redis_client()
                     if client:
-                        await client.delete("revocation:%s" % device_id)
+                        await client.set(
+                            "revocation:%s" % device_id,
+                            b"1",
+                            ex=max(int(self._cache_ttl), 60),
+                        )
                 except Exception:
-                    logger.warning("Redis cache delete failed during revocation", exc_info=True)
+                    logger.warning("Redis cache write failed during revocation", exc_info=True)
             return True
 
     async def is_device_revoked(self, device_id: str) -> bool:
@@ -218,18 +224,29 @@ class Store:
         now = time.monotonic()
         if device_id in self._revocation_cache:
             revoked, expiry = self._revocation_cache[device_id]
-            if now < expiry:
-                return revoked
+            # Never honour a cached False across replicas — only positive (revoked) may be sticky.
+            if revoked and now < expiry:
+                return True
+            if not revoked and now < expiry:
+                # Short-lived local negative only when Redis is unavailable.
+                if not self.redis_url:
+                    return False
         async with self.sessions() as session:
             device = await session.get(Device, device_id)
             revoked = bool(device and device.revoked_at is not None)
-        self._revocation_cache[device_id] = (revoked, now + self._cache_ttl)
+        if revoked:
+            self._revocation_cache[device_id] = (True, now + self._cache_ttl)
+        elif not self.redis_url:
+            self._revocation_cache[device_id] = (False, now + self._cache_ttl)
+        else:
+            self._revocation_cache.pop(device_id, None)
 
-        if self.redis_url:
+        if revoked and self.redis_url:
             try:
                 client = await self._get_redis_client()
                 if client:
-                    await client.set("revocation:%s" % device_id, b"1" if revoked else b"0", ex=int(self._cache_ttl))
+                    # Write-through positives only; never publish False (avoids revoke lag).
+                    await client.set("revocation:%s" % device_id, b"1", ex=max(int(self._cache_ttl), 60))
             except Exception:
                 logger.warning("Redis cache save failed for revocation", exc_info=True)
         return revoked

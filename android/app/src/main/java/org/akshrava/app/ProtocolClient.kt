@@ -38,6 +38,7 @@ class ProtocolClient(
     private val onFrameSettled: () -> Unit,
     private val onQuality: (Quality) -> Unit,
     private val onHighAlert: () -> Unit = {},
+    private val language: String = "en",
     private val http: OkHttpClient = OkHttpClient.Builder().pingInterval(20, TimeUnit.SECONDS).build()
 ) : WebSocketListener() {
     internal companion object {
@@ -54,6 +55,10 @@ class ProtocolClient(
 
         /** Device revocation is an operator action, not a network condition to retry. */
         fun isPermanentAccessClose(code: Int): Boolean = code == 4401 || code == 4403
+
+        /** Wire contract uses en|hi; AppConfig stores BCP-47 tags like en-IN / hi-IN. */
+        fun wireLanguage(tag: String): String =
+            if (tag.lowercase().startsWith("hi")) "hi" else "en"
     }
     private val reconnect: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
     private val inFlight = AtomicBoolean(false)
@@ -132,6 +137,7 @@ class ProtocolClient(
             .put("pose_age_ms", pose.ageMs)
             .put("mode", if (look) "priority" else mode)
             .put("priority", look)
+            .put("language", wireLanguage(language))
             .put("trace_id", "frame-$frameId-$captureMonoMs")
         // Header and JPEG are a pair in the server protocol.  OkHttp queues WebSocket messages
         // independently, so if it accepts the header but rejects the JPEG we must tear down the

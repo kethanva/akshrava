@@ -141,6 +141,27 @@ def test_gpu_worker_empty_detection_does_not_count_as_an_alert():
     assert "akshrava_alerts_emitted_total 0" in metrics_text
 
 
+def test_gpu_worker_metrics_require_token_outside_development():
+    settings = WorkerSettings(
+        SECRET,
+        "unused.pt",
+        200_000,
+        1280,
+        30,
+        require_gpu=False,
+        environment="pilot",
+        metrics_scrape_token="worker-metrics-token",
+        nonce_redis_url="redis://localhost:6379/1",
+        yolo_weights_sha256="a" * 64,
+    )
+    app = create_worker_app(settings, FixedDetector())
+    with TestClient(app) as client:
+        assert client.get("/metrics").status_code == 404
+        ok = client.get("/metrics", headers={"Authorization": "Bearer worker-metrics-token"})
+        assert ok.status_code == 200
+        assert "akshrava_alerts_emitted_total" in ok.text
+
+
 def test_gpu_worker_infer_fails_fast_instead_of_hanging_on_a_stuck_detector():
     # Regression test: `await future` had no timeout, so a stuck detector call (model hang,
     # GPU driver wedge) left the HTTP request waiting forever instead of failing within the

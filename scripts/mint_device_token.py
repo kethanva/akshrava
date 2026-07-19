@@ -15,9 +15,22 @@ def main():
     parser.add_argument(
         "--diagnostic-consent",
         action="store_true",
-        help="Embed diagnostic_consent=true so the API may upload opted-in frames (fail-closed otherwise).",
+        help="Embed diagnostic_consent=true (blocked unless DIAGNOSTIC_UPLOADS_ENABLED=true and blur exists).",
+    )
+    parser.add_argument(
+        "--force-unsafe-diagnostic-consent",
+        action="store_true",
+        help="Lab-only: mint diagnostic_consent without DIAGNOSTIC_UPLOADS_ENABLED (uploads still blocked server-side).",
     )
     args = parser.parse_args()
+    if args.diagnostic_consent:
+        uploads_enabled = os.environ.get("DIAGNOSTIC_UPLOADS_ENABLED", "").lower() in {"1", "true", "yes", "on"}
+        if not uploads_enabled and not args.force_unsafe_diagnostic_consent:
+            sys.exit(
+                "Refusing --diagnostic-consent: face/plate blur is not ready. "
+                "Set DIAGNOSTIC_UPLOADS_ENABLED=true only after PRIVACY.md blur gate, "
+                "or pass --force-unsafe-diagnostic-consent for lab tokens (API still will not upload)."
+            )
     algorithm = os.environ.get("JWT_ALGORITHM", "RS256").upper()
     if algorithm == "RS256":
         key_file = os.environ.get("JWT_PRIVATE_KEY_FILE", "")

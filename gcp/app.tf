@@ -234,6 +234,10 @@ resource "google_cloud_run_v2_service" "api" {
         value = google_storage_bucket.diagnostics.name
       }
       env {
+        name  = "DIAGNOSTIC_UPLOADS_ENABLED"
+        value = "false"
+      }
+      env {
         name  = "DATABASE_SCHEMA_REVISION"
         value = var.database_schema_revision
       }

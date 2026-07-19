@@ -282,6 +282,10 @@ async def session(websocket: WebSocket):
                             await websocket.send_json(resp["response"])
                         await websocket.close(code=resp["code"])
                         return
+                    # Keep admission lease alive on ping / control traffic.
+                    if not await session_admission.renew(session_id):
+                        await websocket.close(code=1013)
+                        return
                     await websocket.send_json(resp)
             elif message.get("bytes") is not None:
                 resp = await handler.handle_binary_frame(message["bytes"])
@@ -293,6 +297,9 @@ async def session(websocket: WebSocket):
                 elif resp.get("_action") == "continue":
                     continue
                 elif resp.get("_action") == "analyze":
+                    if not await session_admission.renew(session_id):
+                        await websocket.close(code=1013)
+                        return
                     header = resp["header"]
                     decode_ms = resp["decode_ms"]
                     jpeg = message["bytes"]
@@ -318,7 +325,12 @@ async def session(websocket: WebSocket):
                     if result.get("late_suppressed"):
                         metrics.late_suppressed()
                     await websocket.send_json(result)
-                    if state.diagnostic_consent and settings.gcp_diagnostics_bucket:
+                    # Fail-closed: JWT consent + bucket are not enough until blur exists (PRIVACY.md).
+                    if (
+                        settings.diagnostic_uploads_enabled
+                        and state.diagnostic_consent
+                        and settings.gcp_diagnostics_bucket
+                    ):
                         file_name = f"{device_id}/{header.frame_id}_{header.capture_mono_ms}.jpg"
 
                         async def _upload_diagnostic(name=file_name, payload=jpeg):

@@ -81,8 +81,8 @@ variable "redis_transit_encryption" {
 
 variable "manage_pki_in_terraform" {
   type        = bool
-  default     = true
-  description = "When true, generate JWT/worker TLS keys in Terraform (lands in state). Prefer false + external PEMs for pilot/production."
+  default     = false
+  description = "When true, generate JWT/worker TLS keys in Terraform (lands in state). Keep false for pilot/production and supply external PEMs."
 }
 
 variable "jwt_public_key_pem" {
@@ -127,6 +127,13 @@ variable "worker_client_key_pem" {
   type      = string
   default   = ""
   sensitive = true
+}
+
+check "phone_wss_reachability" {
+  assert {
+    condition     = var.api_allow_unauthenticated || length(var.api_invoker_members) > 0
+    error_message = "Phones cannot reach private Cloud Run. Set api_invoker_members (edge SA/group) or temporarily api_allow_unauthenticated=true with a documented public edge."
+  }
 }
 
 check "remote_requires_weights_sha" {
