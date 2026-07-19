@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: Akshrava
+    orgId: 1
+    folder: Akshrava
+    type: file
+    disableDeletion: true
+    editable: false
+    options:
+      path: /etc/grafana/provisioning/dashboards/json

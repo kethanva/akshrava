@@ -1,0 +1,24 @@
+groups:
+  - name: akshrava-availability
+    rules:
+      - alert: AkshravaControlPlaneDown
+        expr: up{job="akshrava-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Akshrava control plane is not scrapeable"
+      - alert: AkshravaGpuWorkerDown
+        expr: up{job="akshrava-gpu-worker"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Akshrava GPU worker is not scrapeable"
+      - alert: AkshravaLateResults
+        expr: increase(akshrava_late_suppressed_total[10m]) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Inference is exceeding the speaking freshness budget"

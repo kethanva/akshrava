@@ -1,0 +1,20 @@
+# The control-plane image stays small and CPU-only. This image is intentionally separate so the
+# GPU worker gets a CUDA-enabled PyTorch build rather than a CPU wheel with a misleading GPU flag.
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+COPY pyproject.toml ./
+COPY akshrava_backend ./akshrava_backend
+RUN pip install --upgrade "pip<25" && pip install "gunicorn>=23,<24" ".[yolo]" && \
+    groupadd --system appgroup && useradd --system --gid appgroup --create-home appuser && \
+    chown -R appuser:appgroup /app
+
+USER appuser
+EXPOSE 8000
+
+CMD ["gunicorn", "akshrava_backend.worker:app", "--workers", "1", "--worker-class", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--timeout", "30", "--graceful-timeout", "30", "--access-logfile", "-", "--error-logfile", "-"]

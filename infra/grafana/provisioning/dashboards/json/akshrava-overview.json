@@ -1,0 +1,40 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "akshrava-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0},
+      "id": 1,
+      "targets": [{"expr": "sum(rate(akshrava_frames_processed_total[5m]))", "refId": "A"}],
+      "title": "Frames processed / second",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "akshrava-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ms"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0},
+      "id": 2,
+      "targets": [{"expr": "rate(akshrava_inference_duration_milliseconds_sum[5m]) / rate(akshrava_inference_duration_milliseconds_count[5m])", "refId": "A"}],
+      "title": "Average inference time",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "akshrava-prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0},
+      "id": 3,
+      "targets": [{"expr": "sum(increase(akshrava_late_suppressed_total[10m]))", "refId": "A"}],
+      "title": "Late results, last 10 minutes",
+      "type": "stat"
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["akshrava"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "title": "Akshrava Overview",
+  "uid": "akshrava-overview",
+  "version": 1
+}

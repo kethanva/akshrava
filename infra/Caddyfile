@@ -1,0 +1,16 @@
+{$DOMAIN} {
+    encode zstd gzip
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+    }
+    # Prometheus is on the Docker network. Do not publish operational counters through the
+    # phone-facing endpoint, even though the metrics have no device labels.
+    route {
+        @metrics path /metrics
+        respond @metrics "not found" 404
+        reverse_proxy api:8000
+    }
+}

@@ -1,0 +1,4 @@
+<network-security-config>
+    <!-- Local emulator/device development only. Release builds require WSS. -->
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

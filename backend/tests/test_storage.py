@@ -1,0 +1,81 @@
+from datetime import datetime, timedelta, timezone
+
+import pytest
+from sqlalchemy import DateTime, text
+
+from akshrava_backend.storage import AlertEvent, CalibrationProfileRecord, Device, Store
+
+
+def test_every_timestamp_column_is_declared_timezone_aware():
+    # asyncpg raises DataError writing a tz-aware Python datetime into a naive TIMESTAMP
+    # column. Every model in this codebase uses datetime.now(timezone.utc) as its default,
+    # so every DateTime column MUST be declared timezone=True or the very first Postgres
+    # write in production (the documented docker-compose deployment) fails. SQLite ignores
+    # the distinction, so this regression is invisible to every SQLite-backed test above —
+    # assert against the mapped column type directly instead.
+    for model in (Device, AlertEvent):
+        for column in model.__table__.columns:
+            if isinstance(column.type, DateTime):
+                assert column.type.timezone is True, (
+                    "%s.%s must be DateTime(timezone=True)" % (model.__tablename__, column.name)
+                )
+
+
+@pytest.mark.asyncio
+async def test_alert_retention_purges_only_expired_alert_events(tmp_path):
+    store = Store("sqlite+aiosqlite:///%s" % (tmp_path / "retention.db"))
+    await store.initialize()
+    try:
+        async with store.sessions() as session:
+            session.add_all(
+                [
+                    AlertEvent(
+                        device_id="old-device", frame_id=1, kind="obstacle", level="caution",
+                        bearing="ahead", confidence=0.8,
+                        created_at=datetime.now(timezone.utc) - timedelta(days=31),
+                    ),
+                    AlertEvent(
+                        device_id="fresh-device", frame_id=2, kind="obstacle", level="caution",
+                        bearing="ahead", confidence=0.8,
+                        created_at=datetime.now(timezone.utc) - timedelta(days=1),
+                    ),
+                ]
+            )
+            await session.commit()
+
+        assert await store.purge_alert_events_older_than(30) == 1
+        assert len(await store.recent_events("old-device")) == 0
+        assert len(await store.recent_events("fresh-device")) == 1
+    finally:
+        await store.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_store_enables_wal_for_concurrent_pilot_writes(tmp_path):
+    store = Store("sqlite+aiosqlite:///%s" % (tmp_path / "wal.db"))
+    await store.initialize()
+    try:
+        async with store.engine.connect() as connection:
+            assert (await connection.execute(text("PRAGMA journal_mode"))).scalar().lower() == "wal"
+    finally:
+        await store.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_geometry_profile_is_unavailable_until_explicitly_verified(tmp_path):
+    store = Store("sqlite+aiosqlite:///%s" % (tmp_path / "profiles.db"))
+    await store.initialize()
+    try:
+        async with store.sessions() as session:
+            session.add(CalibrationProfileRecord(calibration_id="r0", focal_px=500.0, camera_height_m=1.35))
+            await session.commit()
+        assert await store.geometry_profile("r0") is None
+        async with store.sessions() as session:
+            record = await session.get(CalibrationProfileRecord, "r0")
+            record.verified = True
+            await session.commit()
+        profile = await store.geometry_profile("r0")
+        assert profile is not None
+        assert profile.calibration_id == "r0"
+    finally:
+        await store.engine.dispose()
