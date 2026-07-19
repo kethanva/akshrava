@@ -56,3 +56,32 @@ async def test_phone_trace_id_is_preserved_for_cross_tier_correlation():
         b"jpeg",
     )
     assert result["trace_id"] == "frame-1-100"
+
+
+@pytest.mark.asyncio
+async def test_session_language_is_cached_from_the_devices_own_header():
+    # Regression test: language is a per-device provisioning setting (plan §6.2), not a
+    # fleet-wide server default. A frame carrying a valid language must update the session so
+    # VisionService renders speech in the phone's own provisioned language.
+    store, vision = Store(), Vision()
+    app = SessionApplicationService(store, vision)
+    state = SessionState(device_id="phone")
+    await app.analyze_frame(
+        state,
+        FrameHeader(1, 100, None, 1, 1, 1, "r0", None, None, None, "normal", language="hi"),
+        b"jpeg",
+    )
+    assert state.language == "hi"
+
+
+@pytest.mark.asyncio
+async def test_unsupported_language_never_overwrites_a_prior_valid_one():
+    store, vision = Store(), Vision()
+    app = SessionApplicationService(store, vision)
+    state = SessionState(device_id="phone", language="hi")
+    await app.analyze_frame(
+        state,
+        FrameHeader(2, 200, None, 1, 1, 1, "r0", None, None, None, "normal", language="xx"),
+        b"jpeg",
+    )
+    assert state.language == "hi"

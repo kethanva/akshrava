@@ -40,6 +40,7 @@ class Settings:
     remote_tls_ca_file: str
     remote_tls_client_cert_file: str
     remote_tls_client_key_file: str
+    gcp_diagnostics_bucket: str
 
     @classmethod
     def from_env(cls):
@@ -76,6 +77,7 @@ class Settings:
             remote_tls_ca_file=os.getenv("REMOTE_TLS_CA_FILE", "").strip(),
             remote_tls_client_cert_file=os.getenv("REMOTE_TLS_CLIENT_CERT_FILE", "").strip(),
             remote_tls_client_key_file=os.getenv("REMOTE_TLS_CLIENT_KEY_FILE", "").strip(),
+            gcp_diagnostics_bucket=os.getenv("GCP_DIAGNOSTICS_BUCKET", "").strip(),
         )
         if settings.environment not in {"development", "pilot", "production"}:
             raise ValueError("AKSHRAVA_ENV must be development, pilot or production")

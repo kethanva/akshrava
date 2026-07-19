@@ -23,6 +23,7 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
         const val BUSY_WINDOW_MS = 10_000L
         const val BUSY_COUNT = 3
         const val SUMMARY_COOLDOWN_MS = 5_000L
+        const val REPEATABLE_WINDOW_MS = 30_000L
     }
 
     private var tts: TextToSpeech? = TextToSpeech(context, this)
@@ -33,6 +34,9 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
     private val recentUtterances = ArrayDeque<Long>()
     private var lastUtteranceMs = 0L
     private var lastSummaryMs = 0L
+    @Volatile private var mutedUntilMs = 0L
+    @Volatile private var lastAlertText: String? = null
+    @Volatile private var lastAlertAtMs = 0L
     private data class PendingStatus(val text: String, val onComplete: (() -> Unit)?)
 
     private val completionLock = Any()
@@ -85,11 +89,38 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
 
         lastSpoken[cooldownKey] = now
         markUtterance(now)
-        vibrate(haptic)
-        
         val text = template(messageKey, bearing)
+        lastAlertText = text
+        lastAlertAtMs = now
+        // Muting silences speech, per the user's explicit request, but never haptics: the S1
+        // buzz needs no words and is exactly the channel a muted user still relies on (§6.4).
+        vibrate(haptic)
+        if (now < mutedUntilMs) return
         // S1 cuts the current utterance mid-word; interruption itself signals urgency.
         speak(text, flush = urgent, id = cooldownKey)
+    }
+
+    /** Double-press headset mute. Auto-unmutes after [durationMs] so it can never be left silently dead. */
+    fun muteFor(durationMs: Long) {
+        mutedUntilMs = SystemClock.elapsedRealtime() + durationMs
+        speak(
+            if (isHindi) "पंद्रह मिनट के लिए म्यूट" else "Muted for fifteen minutes",
+            flush = true, id = nextStatusId()
+        )
+    }
+
+    /** Single-press headset repeat: replays the last spoken alert if it is still recent. */
+    fun repeatLast() {
+        val text = lastAlertText
+        val now = SystemClock.elapsedRealtime()
+        if (text == null || now - lastAlertAtMs > REPEATABLE_WINDOW_MS) {
+            speak(
+                if (isHindi) "कोई हाल का अलर्ट नहीं" else "No recent alert",
+                flush = true, id = nextStatusId()
+            )
+            return
+        }
+        speak(text, flush = true, id = nextStatusId())
     }
 
     fun status(text: String, onComplete: (() -> Unit)? = null) {
@@ -113,6 +144,19 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
         val now = SystemClock.elapsedRealtime()
         markUtterance(now)
         speak(text, flush = urgent, id = "look-${++statusSequence}")
+    }
+
+    /** Every control action must be confirmed by voice (§6.4): an explicit look that never got
+     * an answer -- send failure, or no priority result within its timeout -- must not resolve
+     * into silence just because nothing came back. */
+    fun announceLookFailed() {
+        speakComposed(if (isHindi) "लुक विफल, फिर कोशिश करें" else "Look failed, try again")
+    }
+
+    /** Immediate confirmation that a long-press was registered, independent of network state --
+     * the answer (or failure) may take up to LOOK_TIMEOUT_MS to arrive. */
+    fun acknowledgeLook() {
+        vibrate("single")
     }
 
     private fun summarize(now: Long) {

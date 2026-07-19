@@ -17,6 +17,7 @@ class FrameHeader:
     mode: str
     priority: bool = False
     trace_id: str = ""
+    language: str = ""
 
 
 @dataclass(frozen=True)
@@ -71,3 +72,4 @@ class SessionState:
     last_pitch_cdeg: Optional[int] = None
     last_roll_cdeg: Optional[int] = None
     geometry_profile: Optional[GeometryProfile] = None
+    language: str = ""

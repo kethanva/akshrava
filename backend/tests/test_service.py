@@ -52,6 +52,18 @@ class RecordingStore:
         self.alerts.append((device_id, frame_id, hazard))
 
 
+class SlowRecordingStore(RecordingStore):
+    def __init__(self, delay_s=0.05):
+        super().__init__()
+        self.delay_s = delay_s
+        self.started = asyncio.Event()
+
+    async def record_alert(self, device_id, frame_id, hazard):
+        self.started.set()
+        await asyncio.sleep(self.delay_s)
+        await super().record_alert(device_id, frame_id, hazard)
+
+
 def _header(frame_id, capture_mono_ms, priority=False, mode="normal"):
     return FrameHeader(
         frame_id=frame_id,
@@ -83,6 +95,26 @@ async def test_detector_to_hazard_result_uses_the_phone_audio_message_contract()
     assert first["hazard"] is None
     assert second["hazard"]["message_key"] == "obstacle_ahead"
     assert second["hazard"]["range_valid"] is False
+    assert second["pipeline_stage_ms"]["persist"] == 0
+    await service.drain_persists()
+    assert store.alerts[0][0:2] == ("device-1", 2)
+
+
+@pytest.mark.asyncio
+async def test_alert_persistence_does_not_block_websocket_result():
+    store = SlowRecordingStore(delay_s=0.08)
+    service = VisionService(FixedPersonDetector(), store, alert_max_age_ms=1_000)
+    state = SessionState(device_id="device-1")
+    await service.analyze(state, _header(1, 1_000), b"jpeg")
+    started = time.monotonic()
+    second = await service.analyze(state, _header(2, 1_500), b"jpeg")
+    elapsed = time.monotonic() - started
+    assert second["hazard"] is not None
+    assert elapsed < 0.05, "DB write must not sit on the phone reply path"
+    # Yield so the scheduled persist task can enter record_alert before we assert.
+    await asyncio.sleep(0)
+    assert store.started.is_set()
+    await service.drain_persists()
     assert store.alerts[0][0:2] == ("device-1", 2)
 
 
@@ -190,3 +222,32 @@ async def test_priority_look_bypasses_cooldown_and_returns_look_summary():
     assert "approach" not in look["look_summary"].lower()
     assert "safe" not in look["look_summary"].lower()
     assert first["look_summary"] is None
+
+
+@pytest.mark.asyncio
+async def test_late_suppressed_priority_look_says_unchecked_not_clear():
+    # Regression test: a look answered while the server is behind its freshness budget used to
+    # say "No clear hazard in this view" -- a confident false claim, since the frame was never
+    # scored at all (late_suppressed skips scoring). A user who explicitly asked "what's ahead"
+    # must be told the check didn't happen, not reassured that it came back empty.
+    service = VisionService(SlowFixedPersonDetector(delay_s=0.02), RecordingStore(), alert_max_age_ms=1)
+    state = SessionState(device_id="device-1")
+    look = await service.analyze(state, _header(1, 1_000, priority=True, mode="priority"), b"jpeg")
+    assert look["late_suppressed"] is True
+    assert look["hazard"] is None
+    assert "clear" not in look["look_summary"].lower()
+
+
+@pytest.mark.asyncio
+async def test_spoken_output_uses_the_devices_own_provisioned_language():
+    # Regression test: VisionService.language used to be one fleet-wide value shared by every
+    # connected device (plan §6.2 -- language is a per-device provisioning setting). A phone
+    # whose session is provisioned in Hindi must get Hindi speech even though the server's own
+    # constructor default is English. (application.py sets state.language from the phone's own
+    # frame header -- see test_application.py; this pins VisionService's side of the contract.)
+    service = VisionService(FixedPersonDetector(), RecordingStore(), language="en")
+    state = SessionState(device_id="device-1", language="hi")
+    await service.analyze(state, _header(1, 1_000), b"jpeg")
+    second = await service.analyze(state, _header(2, 1_500), b"jpeg")
+    assert second["hazard"] is not None
+    assert "आगे" in second["hazard"]["spoken_preview"] or "रुकावट" in second["hazard"]["spoken_preview"]

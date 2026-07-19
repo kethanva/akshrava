@@ -11,6 +11,7 @@ import okio.ByteString.Companion.toByteString
 import org.json.JSONObject
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.min
@@ -44,6 +45,8 @@ class ProtocolClient(
         /** Look answers use the full freshness budget even when the hazard is S1. */
         const val LOOK_FRESHNESS_MS = 500L
         const val URGENT_FRESHNESS_MS = 250L
+        /** Every control action must be confirmed by voice (§6.4) -- including a failed one. */
+        const val LOOK_TIMEOUT_MS = 2_000L
 
         /** Device revocation is an operator action, not a network condition to retry. */
         fun isPermanentAccessClose(code: Int): Boolean = code == 4401 || code == 4403
@@ -59,6 +62,7 @@ class ProtocolClient(
     @Volatile private var visionEnabled = false
     @Volatile private var reconnectAttempt = 0
     @Volatile private var cloudFallbackWarningAnnounced = false
+    @Volatile private var pendingLookTimeout: ScheduledFuture<*>? = null
 
     fun connect() {
         if (endpoint.isBlank() || token.isBlank()) {
@@ -88,12 +92,12 @@ class ProtocolClient(
         mode: String = "normal",
         priority: Boolean = false
     ): Boolean {
-        val ws = socket ?: return false
+        val look = priority || mode == "priority"
+        val ws = socket ?: return failSendFrame(look)
         // Do not produce traffic or imply an active service before the authenticated server has
         // explicitly confirmed that a real detector, rather than bench-mode NoopDetector, is live.
-        if (!canStream()) return false
-        if (!inFlight.compareAndSet(false, true)) return false
-        val look = priority || mode == "priority"
+        if (!canStream()) return failSendFrame(look)
+        if (!inFlight.compareAndSet(false, true)) return failSendFrame(look)
         val header = JSONObject()
             .put("type", "frame")
             .put("id", frameId)
@@ -114,14 +118,40 @@ class ProtocolClient(
         // socket rather than let the next JPEG attach to this header.
         if (!ws.send(header.toString())) {
             settleFrame()
-            return false
+            return failSendFrame(look)
         }
         if (!ws.send(frame.jpeg.toByteString())) {
             ws.close(1011, "incomplete frame")
             settleFrame()
-            return false
+            return failSendFrame(look)
         }
+        if (look) scheduleLookTimeout()
         return true
+    }
+
+    /** Every control action must be confirmed by voice (§6.4): an explicit look that never
+     * even made it onto the wire must not resolve into silence just because it wasn't sent. */
+    private fun failSendFrame(isLook: Boolean): Boolean {
+        if (isLook) {
+            cancelLookTimeout()
+            alertManager.announceLookFailed()
+        }
+        return false
+    }
+
+    private fun scheduleLookTimeout() {
+        cancelLookTimeout()
+        pendingLookTimeout = runCatching {
+            reconnect.schedule({
+                pendingLookTimeout = null
+                alertManager.announceLookFailed()
+            }, LOOK_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        }.getOrNull()
+    }
+
+    private fun cancelLookTimeout() {
+        pendingLookTimeout?.cancel(false)
+        pendingLookTimeout = null
     }
 
     override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -178,6 +208,9 @@ class ProtocolClient(
                 val frameMono = payload.optLong("capture_mono_ms", -1)
                 val age = if (frameMono >= 0) SystemClock.elapsedRealtime() - frameMono else Long.MAX_VALUE
                 val priority = payload.optBoolean("priority", false)
+                // Any priority result -- even one arriving too stale to speak -- means the look
+                // was answered, so the pending "look failed" timeout must not also fire on top.
+                if (priority) cancelLookTimeout()
                 val hazard = payload.optJSONObject("hazard")
                 val isUrgent = hazard?.optString("level") == "urgent"
                 // Look answers use 500 ms even if the hazard is S1 — a user-pulled query must
@@ -253,6 +286,7 @@ class ProtocolClient(
 
     private fun handlePermanentFailure(message: String) {
         settleFrame()
+        cancelLookTimeout()
         sessionReady = false
         visionEnabled = false
         closedByUser = true
@@ -263,6 +297,7 @@ class ProtocolClient(
 
     private fun handleDrop() {
         settleFrame()
+        cancelLookTimeout()
         sessionReady = false
         visionEnabled = false
         if (closedByUser) return
@@ -291,6 +326,7 @@ class ProtocolClient(
 
     fun close() {
         closedByUser = true
+        cancelLookTimeout()
         sessionReady = false
         visionEnabled = false
         socket?.close(1000, "user stopped")

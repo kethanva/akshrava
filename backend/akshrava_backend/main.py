@@ -27,6 +27,14 @@ logger = logging.getLogger(__name__)
 
 NORMAL_FRAME_BURST = 2.0
 NORMAL_FRAME_RATE_PER_SECOND = 1.2
+# On-demand look frames used to bypass ALL rate limiting (header.priority is client-asserted).
+# Any authenticated device -- including one stolen kit still inside its 30-day token window --
+# could stamp priority=true on every frame and stream at socket speed, each frame paying a full
+# validation + inference cost on the shared GPU and starving every other device's freshness
+# budget. A human physically cannot long-press a headset button faster than this; the ":priority"
+# key suffix gives it a separate bucket so a look burst never eats the ambient frame budget.
+PRIORITY_FRAME_RATE_PER_SECOND = 0.5
+PRIORITY_FRAME_BURST = 2.0
 MAX_CONTROL_MESSAGE_BYTES = 4096
 
 settings = Settings.from_env()
@@ -88,10 +96,15 @@ async def lifespan(app):
             await retention_task
         except asyncio.CancelledError:
             pass
+        # Drain alert writes before disposing the DB engine so background persists are not cut off.
+        shutdown_async = getattr(vision, "shutdown_async", None)
+        if shutdown_async is not None:
+            await shutdown_async()
+        else:
+            shutdown = getattr(vision, "shutdown", None)
+            if shutdown is not None:
+                shutdown()
         await store.engine.dispose()
-        shutdown = getattr(vision, "shutdown", None)
-        if shutdown is not None:
-            shutdown()
         await device_rate_limiter.close()
         await session_admission.shutdown()
 
@@ -203,7 +216,8 @@ async def session(websocket: WebSocket):
     pending_header = None
     discard_next_binary = False
     local_limiter = FrameRateLimiter(NORMAL_FRAME_RATE_PER_SECOND, NORMAL_FRAME_BURST)
-    
+    priority_local_limiter = FrameRateLimiter(PRIORITY_FRAME_RATE_PER_SECOND, PRIORITY_FRAME_BURST)
+
     # Normal walking sessions are bounded at 1.2 FPS with a two-frame burst. This matches the
     # freshness policy and prevents one authenticated device from turning server queue time into
     # stale speech for everyone else.
@@ -251,22 +265,41 @@ async def session(websocket: WebSocket):
                             # Headers and JPEGs are paired without an acknowledgement. Consume the
                             # corresponding JPEG so a rejected header cannot desynchronise the socket.
                             discard_next_binary = True
-                        elif not header.priority:
+                        else:
+                            # Priority (on-demand look) frames get their own, tighter bucket
+                            # instead of bypassing rate limiting entirely -- header.priority is
+                            # client-asserted, so an unbounded bypass would let any authenticated
+                            # device (including a lost/stolen kit still inside its token window)
+                            # flood the shared GPU at socket speed. The ":priority" key suffix
+                            # keeps this bucket fully separate from the ambient-frame bucket, so
+                            # a look burst never eats into ordinary walking-session budget.
+                            if header.priority:
+                                rate_id = "%s:priority" % device_id
+                                rate_per_second, burst = PRIORITY_FRAME_RATE_PER_SECOND, PRIORITY_FRAME_BURST
+                                dev_limiter = priority_local_limiter
+                            else:
+                                rate_id = device_id
+                                rate_per_second, burst = NORMAL_FRAME_RATE_PER_SECOND, NORMAL_FRAME_BURST
+                                dev_limiter = local_limiter
                             try:
                                 rate_allowed = (
-                                    await device_rate_limiter.allow(
-                                        device_id, NORMAL_FRAME_RATE_PER_SECOND, NORMAL_FRAME_BURST
-                                    )
+                                    await device_rate_limiter.allow(rate_id, rate_per_second, burst)
                                     if settings.environment == "production"
-                                    else local_limiter.allow()
+                                    else dev_limiter.allow()
                                 )
                             except Exception:
                                 logger.exception("frame admission control unavailable")
                                 await websocket.send_json({"type": "error", "code": "vision_unavailable"})
                                 await websocket.close(code=1011)
                                 return
+                            # A look frame right after an ambient frame is the whole point of the
+                            # feature (the standing-still blind spot), so the min-interval floor
+                            # -- which exists to bound ambient upload cadence -- does not apply
+                            # to priority frames; the priority token bucket above already bounds
+                            # how often a look can happen.
                             if not rate_allowed or (
-                                previous is not None
+                                not header.priority
+                                and previous is not None
                                 and header.capture_mono_ms - previous < settings.min_frame_interval_ms
                             ):
                                 metrics.reject_frame()
@@ -274,8 +307,6 @@ async def session(websocket: WebSocket):
                                 discard_next_binary = True
                             else:
                                 pending_header = header
-                        else:
-                            pending_header = header
                 elif message_type == "status":
                     await websocket.send_json({"type": "status_ack"})
                 elif message_type == "look":

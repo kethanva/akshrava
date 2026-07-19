@@ -201,6 +201,41 @@ def test_priority_look_includes_summary(tmp_path, monkeypatch):
             assert websocket.receive_json()["type"] == "quality"
 
 
+def test_priority_frames_get_their_own_bounded_rate_limit_not_an_unbounded_bypass():
+    # Regression test: header.priority is client-asserted. Priority frames used to skip ALL
+    # server-side rate limiting entirely, so any authenticated device (including a lost/stolen
+    # kit still inside its token window) could flood the shared GPU at socket speed by stamping
+    # priority=true on every frame. PRIORITY_FRAME_BURST=2.0 means the third rapid-fire priority
+    # frame in the same instant must be rejected, not silently admitted.
+    def priority_header(frame_id, capture_mono_ms):
+        return {
+            "type": "frame",
+            "id": frame_id,
+            "capture_mono_ms": capture_mono_ms,
+            "w": 1,
+            "h": 1,
+            "jpeg_bytes": len(JPEG),
+            "camera_calibration_id": "test-r0",
+            "priority": True,
+            "mode": "priority",
+        }
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/session?token=dev-device-token") as websocket:
+            assert websocket.receive_json()["type"] == "ready"
+            codes = []
+            for index in range(4):
+                websocket.send_json(priority_header(index + 1, 100 + index))
+                websocket.send_bytes(JPEG)
+                first = websocket.receive_json()
+                if first["type"] == "error":
+                    codes.append(first["code"])
+                    continue
+                assert first["type"] == "result"
+                assert websocket.receive_json()["type"] == "quality"
+            assert "frame_rate_limited" in codes, "an unbounded priority flood must eventually be rejected"
+
+
 def test_inference_failure_explicitly_disables_vision(monkeypatch):
     class BrokenVision:
         async def analyze(self, state, header, jpeg):

@@ -7,10 +7,8 @@ defence in depth, not a replacement for network isolation.
 """
 
 import asyncio
-import base64
 import hashlib
 import hmac
-import json
 import os
 import time
 from contextlib import asynccontextmanager
@@ -38,6 +36,7 @@ class WorkerSettings:
     environment: str = "development"
     nonce_redis_url: str = ""
     yolo_weights_sha256: str = ""
+    infer_timeout_seconds: float = 5.0
 
     @classmethod
     def from_env(cls):
@@ -53,6 +52,7 @@ class WorkerSettings:
             batch_wait_ms=int(os.getenv("WORKER_BATCH_WAIT_MS", "12")),
             environment=os.getenv("AKSHRAVA_ENV", "development").lower(),
             nonce_redis_url=os.getenv("NONCE_REDIS_URL", "").strip(),
+            infer_timeout_seconds=float(os.getenv("WORKER_INFER_TIMEOUT_SECONDS", "5.0")),
         )
         if len(settings.shared_secret) < 32:
             raise ValueError("WORKER_SHARED_SECRET must be at least 32 characters")
@@ -66,6 +66,8 @@ class WorkerSettings:
             raise ValueError("WORKER_BATCH_MAX_SIZE must be between 1 and 64")
         if not 0 <= settings.batch_wait_ms <= 50:
             raise ValueError("WORKER_BATCH_WAIT_MS must be between 0 and 50")
+        if not 0.5 <= settings.infer_timeout_seconds <= 30.0:
+            raise ValueError("WORKER_INFER_TIMEOUT_SECONDS must be between 0.5 and 30")
         if settings.environment not in {"development", "pilot", "production"}:
             raise ValueError("AKSHRAVA_ENV must be development, pilot or production")
         if settings.environment != "development" and not settings.yolo_weights_sha256:
@@ -171,6 +173,15 @@ def create_worker_app(
                 await app.state.batch_task
             except asyncio.CancelledError:
                 pass
+            # Cancelling the batch loop only stops it from dequeuing further work; any
+            # (jpeg, future) pairs still sitting in the queue at that moment are otherwise
+            # never resolved, so the request coroutine still awaiting that future (`await
+            # future` below) would hang until the ASGI server forcibly drops the connection
+            # instead of getting a clean error during graceful shutdown.
+            while not app.state.inference_queue.empty():
+                _, pending_future = app.state.inference_queue.get_nowait()
+                if not pending_future.done():
+                    pending_future.set_exception(RuntimeError("worker shutting down"))
             await app.state.nonce_store.close()
 
     app = FastAPI(title="Akshrava GPU inference worker", version="0.1.0", lifespan=lifespan)
@@ -195,7 +206,7 @@ def create_worker_app(
     async def infer(request: Request):
         body = await request.body()
         settings_value = app.state.worker_settings
-        if len(body) > settings_value.max_image_bytes * 2:
+        if len(body) > settings_value.max_image_bytes:
             raise HTTPException(status_code=413, detail="worker request too large")
         nonce = _authenticated_body(request, body, settings_value)
         try:
@@ -208,20 +219,20 @@ def create_worker_app(
             raise HTTPException(status_code=409, detail="replayed worker request")
         try:
             content_type = request.headers.get("content-type", "").split(";", 1)[0].lower()
-            if content_type == "image/jpeg":
-                jpeg = body
-            else:
-                payload = json.loads(body)
-                image_b64 = payload["image_b64"]
-                if not isinstance(image_b64, str):
-                    raise ValueError("image_b64 must be text")
-                jpeg = base64.b64decode(image_b64, validate=True)
+            if content_type not in {"image/jpeg", "application/octet-stream"}:
+                raise HTTPException(
+                    status_code=415,
+                    detail="worker accepts only raw JPEG bodies (image/jpeg)",
+                )
+            jpeg = body
             if len(jpeg) > settings_value.max_image_bytes:
                 raise ValueError("image too large")
             width, height = jpeg_dimensions(jpeg)
             if width > settings_value.max_frame_side or height > settings_value.max_frame_side:
                 raise ValueError("image dimensions too large")
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        except HTTPException:
+            raise
+        except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail="invalid inference image") from exc
 
         started = time.monotonic()
@@ -230,9 +241,16 @@ def create_worker_app(
             app.state.inference_queue.put_nowait((jpeg, future))
         except asyncio.QueueFull as exc:
             raise HTTPException(status_code=503, detail="worker inference queue full") from exc
-        detections = await future
+        try:
+            # Unbounded here previously: a stuck detector call, or a future left in the queue
+            # when the batch loop is cancelled during shutdown, would hang this request forever
+            # instead of failing within the control plane's own remote_inference_timeout_ms.
+            detections = await asyncio.wait_for(future, timeout=settings_value.infer_timeout_seconds)
+        except asyncio.TimeoutError as exc:
+            future.cancel()
+            raise HTTPException(status_code=504, detail="worker inference deadline exceeded") from exc
         inference_ms = int((time.monotonic() - started) * 1000)
-        app.state.metrics.observe_result(inference_ms, False)
+        app.state.metrics.observe_result(inference_ms, bool(detections))
         return {
             "detections": [
                 {"label": item.label, "confidence": item.confidence, "box": list(item.box)}

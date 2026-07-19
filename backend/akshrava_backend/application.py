@@ -7,6 +7,7 @@ storage, making it reusable from a future WebTransport or broker gateway.
 
 import hashlib
 
+from .protocol import SUPPORTED_LANGUAGES
 from .domain import FrameHeader, SessionState
 
 
@@ -20,6 +21,11 @@ class SessionApplicationService:
             state.calibration_id = header.calibration_id
             await self.store.upsert_device(state.device_id, header.calibration_id)
             state.geometry_profile = await self.store.geometry_profile(header.calibration_id)
+        # Language is a per-device provisioning setting (plan §6.2), not a fleet-wide server
+        # default. The phone sends it with every frame header; cache the last valid value on
+        # the session so a malformed/absent value on one frame never erases a good prior one.
+        if header.language in SUPPORTED_LANGUAGES:
+            state.language = header.language
         state.last_capture_mono_ms = header.capture_mono_ms
         result = await self.vision.analyze(state, header, jpeg)
         # Correlates phone/API/GPU logs without exposing a device ID in telemetry or results.

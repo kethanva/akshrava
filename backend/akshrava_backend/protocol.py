@@ -7,6 +7,13 @@ class ProtocolError(ValueError):
     pass
 
 
+# Server-rendered speech (spoken_preview, look_summary) must match the phone's own provisioned
+# language (plan §6.2 — language is a per-device setting), not a fleet-wide server default.
+# Allowlisted rather than free text: an unrecognised value silently falls back to English in
+# composer.render() rather than ever being used to build a lookup key or format string.
+SUPPORTED_LANGUAGES = {"en", "hi"}
+
+
 def _integer(payload: Dict[str, Any], key: str, minimum=0, required=True):
     value = payload.get(key)
     if value is None and not required:
@@ -36,6 +43,7 @@ def parse_frame_header(payload: Dict[str, Any]) -> FrameHeader:
         priority=bool(payload.get("priority", False))
         or str(payload.get("mode", "")) == "priority",
         trace_id=str(payload.get("trace_id", ""))[:64],
+        language=str(payload.get("language", ""))[:2].lower(),
     )
 
 

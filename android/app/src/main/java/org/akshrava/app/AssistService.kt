@@ -107,9 +107,9 @@ class AssistService : LifecycleService() {
         reflexEngine = ReflexFactory.create(this)
         headsetControls = HeadsetControls(
             this,
-            onRepeat = { alertManager.status("Repeat unavailable offline") },
-            onMute = { alertManager.status("Muted for fifteen minutes") },
-            onLook = { lookRequested.set(true) }
+            onRepeat = { alertManager.repeatLast() },
+            onMute = { alertManager.muteFor(15 * 60_000L) },
+            onLook = { lookRequested.set(true); alertManager.acknowledgeLook() }
         ).also { it.start() }
         bindCamera()
         SessionFlags.setActive(this, true)

@@ -1,7 +1,8 @@
 import asyncio
+import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Callable, Dict
+from typing import Callable, Dict, Set
 
 from .composer import hazard_payload, look_summary
 from .alert_policy import AlertPolicy
@@ -9,6 +10,8 @@ from .detector import Detector
 from .domain import FrameHeader, SessionState
 from .hazards import HazardScorer
 from .tracker import SimpleTracker
+
+logger = logging.getLogger(__name__)
 
 
 class VisionService:
@@ -44,6 +47,9 @@ class VisionService:
         self.inference_timeout_seconds = inference_timeout_ms / 1000.0
         self._inference_executor_workers = inference_executor_workers
         self._executor = self._new_executor()
+        # Alert persistence must never block the phone WebSocket reply. Keep strong refs so
+        # fire-and-forget tasks are not garbage-collected mid-flight.
+        self._persist_tasks: Set[asyncio.Task] = set()
 
     def _new_executor(self) -> ThreadPoolExecutor:
         return ThreadPoolExecutor(
@@ -115,18 +121,55 @@ class VisionService:
             "late_suppressed": late_suppressed,
             "pipeline_stage_ms": {"detect": detect_ms, "track_score": track_score_ms},
         }
+        # Language is a per-device provisioning setting (plan §6.2), not a fleet-wide server
+        # default; state.language is set from the phone's own frame header (application.py).
+        # self.language only covers a session that hasn't sent a header yet.
+        language = state.language or self.language
         if cloud_fallback_unavailable is not None:
             result["cloud_fallback_unavailable"] = cloud_fallback_unavailable
         if hazard is not None:
-            persist_started = time.monotonic()
-            await self.store.record_alert(state.device_id, header.frame_id, hazard)
-            result["pipeline_stage_ms"]["persist"] = int((time.monotonic() - persist_started) * 1000)
-            result["hazard"] = hazard_payload(hazard, self.language)
+            # Schedule persistence off the reply path so DB latency cannot delay a safety alert.
+            result["pipeline_stage_ms"]["persist"] = 0
+            self._schedule_record_alert(state.device_id, header.frame_id, hazard)
+            result["hazard"] = hazard_payload(hazard, language)
         if is_priority:
             # Look answers even when late-suppressed (clear / delayed view) so the explicit
-            # query is never silent; stale hazards are still not invented when late.
-            result["look_summary"] = look_summary(hazard, self.language)
+            # query is never silent; stale hazards are still not invented when late. But a
+            # late-suppressed look never SCORED the frame at all (scoring is skipped above), so
+            # hazard=None here means "we didn't check", not "we checked and it was clear" --
+            # look_summary must say so rather than confidently claiming no hazard exists.
+            result["look_summary"] = look_summary(hazard, language, checked=not late_suppressed)
         return result
+
+    def _schedule_record_alert(self, device_id: str, frame_id: int, hazard) -> None:
+        task = asyncio.create_task(self._record_alert_background(device_id, frame_id, hazard))
+        self._persist_tasks.add(task)
+        task.add_done_callback(self._persist_tasks.discard)
+
+    async def _record_alert_background(self, device_id: str, frame_id: int, hazard) -> None:
+        try:
+            await self.store.record_alert(device_id, frame_id, hazard)
+        except Exception:
+            logger.exception(
+                "background alert persistence failed device_id=%s frame_id=%s",
+                device_id,
+                frame_id,
+            )
+
+    async def drain_persists(self, timeout: float = 2.0) -> None:
+        """Wait for in-flight alert writes (tests + graceful shutdown)."""
+        pending = list(self._persist_tasks)
+        if not pending:
+            return
+        done, still_pending = await asyncio.wait(pending, timeout=timeout)
+        for task in still_pending:
+            task.cancel()
+        if still_pending:
+            await asyncio.gather(*still_pending, return_exceptions=True)
+        for task in done:
+            exc = task.exception() if not task.cancelled() else None
+            if exc is not None:
+                logger.error("background alert persistence task failed: %s", exc)
 
     async def release_session(self, device_id: str) -> None:
         """Drop per-connection tracker state on disconnect/revocation."""
@@ -136,10 +179,17 @@ class VisionService:
         # cancel_futures is Python 3.9+, while the package intentionally supports Python 3.8.
         # The bounded executor prevents unbounded queued work; wait=False lets shutdown proceed
         # while a non-interruptible native model call finishes on its worker thread.
+        for task in list(self._persist_tasks):
+            task.cancel()
+        self._persist_tasks.clear()
         self._executor.shutdown(wait=False)
         # TestClient can start a fresh lifespan over the imported application. Recreate the
         # bounded pool lazily instead of retaining an executor that has already been shut down.
         self._executor = self._new_executor()
+
+    async def shutdown_async(self) -> None:
+        await self.drain_persists()
+        self.shutdown()
 
     async def _detect(self, device_id: str, jpeg: bytes):
         device_method = getattr(self.detector, "detect_with_status_for_device", None)

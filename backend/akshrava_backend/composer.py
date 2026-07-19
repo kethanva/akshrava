@@ -10,6 +10,7 @@ TEMPLATES_EN = {
     "vehicle_nearby": "Vehicle nearby, {bearing}",
     "busy_road": "Busy road, careful",
     "look_clear": "No clear hazard in this view",
+    "look_unavailable": "Could not check just now, try again",
 }
 
 TEMPLATES_HI = {
@@ -17,6 +18,7 @@ TEMPLATES_HI = {
     "vehicle_nearby": "वाहन {bearing_hi}",
     "busy_road": "व्यस्त सड़क, सावधान",
     "look_clear": "इस दृश्य में कोई स्पष्ट खतरा नहीं",
+    "look_unavailable": "अभी जांच नहीं हो सकी, फिर कोशिश करें",
 }
 
 BEARING_HI = {"left": "बाईं ओर है", "right": "दाईं ओर है", "ahead": "आगे है"}
@@ -48,8 +50,16 @@ def hazard_payload(hazard: Hazard, language: str = "en") -> Dict:
     }
 
 
-def look_summary(hazard: Optional[Hazard], language: str = "en") -> str:
-    """On-demand look: one composed sentence for this moment."""
+def look_summary(hazard: Optional[Hazard], language: str = "en", checked: bool = True) -> str:
+    """On-demand look: one composed sentence for this moment.
+
+    `checked=False` means the frame was never scored (e.g. late-suppressed past the freshness
+    budget) -- hazard=None in that case does not mean "we looked and it was clear", it means
+    "we didn't look". Confidently reporting "no hazard" from unchecked evidence is exactly the
+    failure mode the plan forbids for distance claims (§5.1); the same principle applies here.
+    """
+    if not checked:
+        return render("look_unavailable", language)
     if hazard is None:
         return render("look_clear", language)
     return render(hazard.message_key, language, hazard.bearing)

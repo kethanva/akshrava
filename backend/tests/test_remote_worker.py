@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -38,6 +39,25 @@ class BatchDetector(FixedDetector):
         return super().detect_batch(jpegs)
 
 
+class EmptyDetector(Detector):
+    def detect(self, jpeg):
+        return []
+
+
+class HangingDetector(Detector):
+    """Simulates a stuck GPU call (model hang, driver wedge) that outlasts the request timeout.
+
+    Sleeps only long enough to exceed the test's infer_timeout_seconds, not indefinitely: a
+    real hang (or time.sleep(3600)) would run on concurrent.futures' default ThreadPoolExecutor,
+    whose worker threads are joined at interpreter exit -- an indefinite sleep here would hang
+    the whole test process shutdown, not just this one request.
+    """
+
+    def detect(self, jpeg):
+        time.sleep(2)
+        return []
+
+
 def _signed_headers(body):
     timestamp = str(int(time.time()))
     nonce = "worker-test-nonce-1234"
@@ -56,26 +76,107 @@ def _signed_headers(body):
 def test_gpu_worker_accepts_only_signed_images_and_returns_boxes():
     settings = WorkerSettings(SECRET, "unused.pt", 200_000, 1280, 30, require_gpu=False)
     app = create_worker_app(settings, FixedDetector())
-    body = json.dumps({"image_b64": base64.b64encode(JPEG).decode("ascii")}).encode("utf-8")
+    headers = {**_signed_headers(JPEG), "Content-Type": "image/jpeg"}
     with TestClient(app) as client:
-        assert client.post("/v1/infer", content=body).status_code == 401
-        response = client.post("/v1/infer", content=body, headers=_signed_headers(body))
+        assert client.post("/v1/infer", content=JPEG).status_code == 401
+        response = client.post("/v1/infer", content=JPEG, headers=headers)
         assert response.status_code == 200
         assert response.json() == {
             "detections": [{"label": "person", "confidence": 0.9, "box": [1, 2, 3, 4]}]
         }
-        assert client.post("/v1/infer", content=body, headers=_signed_headers(body)).status_code == 409
+        assert client.post("/v1/infer", content=JPEG, headers=headers).status_code == 409
+
+
+def test_gpu_worker_rejects_legacy_base64_json_bodies():
+    settings = WorkerSettings(SECRET, "unused.pt", 200_000, 1280, 30, require_gpu=False)
+    app = create_worker_app(settings, FixedDetector())
+    body = json.dumps({"image_b64": base64.b64encode(JPEG).decode("ascii")}).encode("utf-8")
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/infer",
+            content=body,
+            headers={**_signed_headers(body), "Content-Type": "application/json"},
+        )
+        assert response.status_code == 415
 
 
 def test_gpu_worker_uses_detector_batch_contract():
     detector = BatchDetector()
     settings = WorkerSettings(SECRET, "unused.pt", 200_000, 1280, 30, require_gpu=False, batch_wait_ms=0)
     app = create_worker_app(settings, detector)
-    body = json.dumps({"image_b64": base64.b64encode(JPEG).decode("ascii")}).encode("utf-8")
     with TestClient(app) as client:
-        response = client.post("/v1/infer", content=body, headers=_signed_headers(body))
+        response = client.post(
+            "/v1/infer",
+            content=JPEG,
+            headers={**_signed_headers(JPEG), "Content-Type": "image/jpeg"},
+        )
         assert response.status_code == 200
     assert detector.batch_sizes == [1]
+
+
+def test_gpu_worker_metrics_reflect_whether_detections_were_actually_found():
+    # Regression test: the worker used to call observe_result(inference_ms, False)
+    # unconditionally, so akshrava_alerts_emitted_total on the GPU worker was a permanent,
+    # meaningless zero on any operator dashboard regardless of what the detector actually found.
+    settings = WorkerSettings(SECRET, "unused.pt", 200_000, 1280, 30, require_gpu=False)
+    app = create_worker_app(settings, FixedDetector())
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/infer", content=JPEG, headers={**_signed_headers(JPEG), "Content-Type": "image/jpeg"}
+        )
+        assert response.status_code == 200
+        metrics_text = client.get("/metrics").text
+    assert "akshrava_alerts_emitted_total 1" in metrics_text
+
+
+def test_gpu_worker_empty_detection_does_not_count_as_an_alert():
+    settings = WorkerSettings(SECRET, "unused.pt", 200_000, 1280, 30, require_gpu=False)
+    app = create_worker_app(settings, EmptyDetector())
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/infer", content=JPEG, headers={**_signed_headers(JPEG), "Content-Type": "image/jpeg"}
+        )
+        assert response.status_code == 200
+        metrics_text = client.get("/metrics").text
+    assert "akshrava_alerts_emitted_total 0" in metrics_text
+
+
+def test_gpu_worker_infer_fails_fast_instead_of_hanging_on_a_stuck_detector():
+    # Regression test: `await future` had no timeout, so a stuck detector call (model hang,
+    # GPU driver wedge) left the HTTP request waiting forever instead of failing within the
+    # control plane's own remote_inference_timeout_ms budget.
+    settings = WorkerSettings(
+        SECRET, "unused.pt", 200_000, 1280, 30, require_gpu=False, infer_timeout_seconds=0.2
+    )
+    app = create_worker_app(settings, HangingDetector())
+    with TestClient(app) as client:
+        started = time.monotonic()
+        response = client.post(
+            "/v1/infer", content=JPEG, headers={**_signed_headers(JPEG), "Content-Type": "image/jpeg"}
+        )
+        elapsed = time.monotonic() - started
+    assert response.status_code == 504
+    assert elapsed < 2.0, "a stuck detector must not hang the request past its own timeout"
+
+
+def test_gpu_worker_drains_queued_futures_on_shutdown_instead_of_hanging_them():
+    # Regression test: cancelling the batch loop on shutdown only stopped it from dequeuing
+    # further work -- any (jpeg, future) pairs still sitting in the queue at that moment were
+    # never resolved, so a request still awaiting one would hang until the ASGI server
+    # forcibly dropped the connection instead of getting a clean error during graceful shutdown.
+    settings = WorkerSettings(SECRET, "unused.pt", 200_000, 1280, 30, require_gpu=False, batch_wait_ms=50)
+    app = create_worker_app(settings, FixedDetector())
+
+    async def scenario():
+        async with app.router.lifespan_context(app):
+            future = asyncio.get_running_loop().create_future()
+            app.state.inference_queue.put_nowait((JPEG, future))
+            # Exit the lifespan context (simulating shutdown) while the future is still queued.
+        return future
+
+    future = asyncio.run(scenario())
+    assert future.done()
+    assert isinstance(future.exception(), RuntimeError)
 
 
 def test_gpu_worker_readiness_fails_when_replay_protection_is_unavailable(monkeypatch):

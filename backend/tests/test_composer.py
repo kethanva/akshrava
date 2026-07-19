@@ -23,6 +23,17 @@ def test_hindi_look_clear_language():
     assert "खतरा" in look_summary(None, "hi") or "स्पष्ट" in look_summary(None, "hi")
 
 
+def test_unchecked_look_never_claims_the_view_was_clear():
+    # Regression test: hazard=None from a late-suppressed frame means "we never scored it", not
+    # "we scored it and it was clear". Confidently reporting "no hazard" from unchecked evidence
+    # is the same failure class the plan forbids for invented distance claims (§5.1).
+    unchecked = look_summary(None, "en", checked=False)
+    assert "clear" not in unchecked.lower()
+    assert "no hazard" not in unchecked.lower()
+    checked_clear = look_summary(None, "en", checked=True)
+    assert "clear" in checked_clear.lower()
+
+
 def test_hazard_payload_includes_spoken_preview():
     hazard = Hazard(
         kind="obstacle",
