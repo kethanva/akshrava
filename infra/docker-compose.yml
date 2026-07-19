@@ -1,0 +1,170 @@
+services:
+  db:
+    image: postgres:16-alpine
+    profiles: ["control-plane"]
+    environment:
+      POSTGRES_DB: akshrava
+      POSTGRES_USER: akshrava
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U akshrava -d akshrava"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  api:
+    profiles: ["control-plane"]
+    build:
+      context: ../backend
+      args:
+        INSTALL_YOLO: ${INSTALL_YOLO:-false}
+        INSTALL_CLOUD_PROVIDER: ${CLOUD_FALLBACK_PROVIDER:-none}
+    environment:
+      AKSHRAVA_ENV: ${AKSHRAVA_ENV:-pilot}
+      DATABASE_URL: postgresql+asyncpg://akshrava:${POSTGRES_PASSWORD}@db:5432/akshrava
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      DETECTOR: ${DETECTOR:-noop}
+      YOLO_WEIGHTS: ${YOLO_WEIGHTS:-/models/yolo11s.pt}
+      DEV_AUTH_BYPASS: ${DEV_AUTH_BYPASS:-false}
+      MIN_FRAME_INTERVAL_MS: ${MIN_FRAME_INTERVAL_MS:-200}
+      ALERT_MAX_AGE_MS: ${ALERT_MAX_AGE_MS:-500}
+      ALERT_RETENTION_DAYS: ${ALERT_RETENTION_DAYS:-30}
+      CLOUD_FALLBACK_PROVIDER: ${CLOUD_FALLBACK_PROVIDER:-none}
+      CLOUD_MIN_CONFIDENCE: ${CLOUD_MIN_CONFIDENCE:-0.55}
+      AWS_REGION: ${AWS_REGION:-}
+      AZURE_VISION_ENDPOINT: ${AZURE_VISION_ENDPOINT:-}
+      AZURE_VISION_KEY: ${AZURE_VISION_KEY:-}
+      REMOTE_INFERENCE_URL: ${REMOTE_INFERENCE_URL:-}
+      REMOTE_WORKER_SECRET: ${REMOTE_WORKER_SECRET:-}
+      REMOTE_INFERENCE_TIMEOUT_MS: ${REMOTE_INFERENCE_TIMEOUT_MS:-450}
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ${MODEL_DIR:-../models}:/models:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # This is intentionally a separate role from the phone-facing API. It has no database,
+  # WebSocket endpoint, Caddy configuration, or device JWT. Deploy it on the GPU host only.
+  api-gpu:
+    profiles: ["gpu-worker"]
+    build:
+      context: ../backend
+      dockerfile: Dockerfile.gpu
+    environment:
+      YOLO_WEIGHTS: ${YOLO_WEIGHTS:-/models/yolo11s.pt}
+      WORKER_SHARED_SECRET: ${REMOTE_WORKER_SECRET:-}
+      MAX_IMAGE_BYTES: ${MAX_IMAGE_BYTES:-200000}
+      MAX_FRAME_SIDE: ${MAX_FRAME_SIDE:-1280}
+      WORKER_REQUEST_MAX_AGE_SECONDS: ${WORKER_REQUEST_MAX_AGE_SECONDS:-30}
+      REQUIRE_GPU: "true"
+    volumes:
+      - ${MODEL_DIR:-../models}:/models:ro
+    ports:
+      - "${GPU_WORKER_BIND_ADDRESS:-127.0.0.1}:8000:8000"
+    gpus: all
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  edge:
+    image: caddy:2.8-alpine
+    profiles: ["edge"]
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN for the public TLS endpoint}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  prometheus:
+    image: prom/prometheus:v3.13.0
+    profiles: ["monitoring"]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus-alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ./prometheus-targets:/etc/prometheus/targets:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+    ports:
+      - "127.0.0.1:9090:9090"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  grafana:
+    image: grafana/grafana:13.0.3
+    profiles: ["monitoring"]
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:?set GRAFANA_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      prometheus:
+        condition: service_started
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  postgres-data:
+  caddy-data:
+  caddy-config:
+  prometheus-data:
+  grafana-data:

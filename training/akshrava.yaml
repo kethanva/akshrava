@@ -1,0 +1,42 @@
+# Akshrava fine-tune dataset config — Ultralytics format (build plan §5.2).
+#
+# Referenced directly by the plan's toolchain commands:
+#   Train:  yolo detect train model=yolo11s.pt data=akshrava.yaml imgsz=640 epochs=80 batch=16 mosaic=1.0
+#   Export: yolo export model=best_11n.pt format=tflite int8=True imgsz=320 data=akshrava.yaml
+#
+# The image folders below are NOT committed (frames are not persisted in this repo — Part 10).
+# Populate them locally from IDD + your own chest-mounted walking footage. See README.md.
+#
+# LICENCE WARNING (plan Part 1): YOLO/Ultralytics code and weights are AGPL-3.0 unless an
+# Enterprise licence is purchased. Resolve licensing before training a shippable model.
+
+# Dataset root, relative to this file. Kept outside the repo tree on purpose.
+path: ../../datasets/akshrava
+
+# Route-disjoint splits (§5.2.6): train/val/test MUST come from different walked routes,
+# or near-duplicate frames leak across splits and produce fictional accuracy.
+train: images/train
+val: images/val
+test: images/test
+
+# 12 classes (§5.2.1). Every class must map to a DISTINCT spoken alert; classes that would
+# produce the same sentence are merged (hence bus_truck, animal_dog vs animal_cattle, etc.).
+names:
+  0: person
+  1: bicycle
+  2: motorcycle
+  3: auto_rickshaw
+  4: car
+  5: bus_truck
+  6: animal_dog
+  7: animal_cattle
+  8: pothole_drain
+  9: pole_barrier
+  10: hawker_cart_obstruction
+  11: stairs_kerb
+
+# Phase-1 SPOKEN scope is pinned to four outcomes (§8): person, two-wheeler, car/auto-like
+# vehicle, large central obstruction. The model may detect all 12 classes, but the backend
+# hazard scorer intentionally voices only the pinned subset and logs the rest until each
+# class has its own validated data. Widening the spoken set is a per-class decision, not a
+# side effect of adding a training label.

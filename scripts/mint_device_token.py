@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+"""Mint a short-lived device JWT for volunteer provisioning; never commit its output."""
+import argparse
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+
+import jwt
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("device_id")
+    parser.add_argument("--days", type=int, default=30)
+    args = parser.parse_args()
+    secret = os.environ.get("JWT_SECRET")
+    if not secret:
+        sys.exit("Set JWT_SECRET before minting a token.")
+    now = datetime.now(timezone.utc)
+    token = jwt.encode(
+        {
+            "sub": args.device_id,
+            "aud": "akshrava-device",
+            "iat": now,
+            "exp": now + timedelta(days=args.days),
+        },
+        secret,
+        algorithm="HS256",
+    )
+    print(token)
+
+
+if __name__ == "__main__":
+    main()

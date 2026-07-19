@@ -1,0 +1,12 @@
+<resources>
+    <string name="app_name">Akshrava</string>
+    <string name="notification_channel_name">Navigation assistance</string>
+    <string name="notification_title">Akshrava assistance active</string>
+    <string name="notification_text">Tap Stop to stop camera assistance.</string>
+    <string name="action_stop">Stop</string>
+    <string name="action_start">Start assistance</string>
+    <string name="watchdog_channel_name">Assistance watchdog</string>
+    <string name="watchdog_channel_desc">Alerts you if camera assistance was stopped by the phone.</string>
+    <string name="watchdog_title">Akshrava assistance stopped</string>
+    <string name="watchdog_text">Open Akshrava and press Start assistance again. Keep using your cane.</string>
+</resources>
