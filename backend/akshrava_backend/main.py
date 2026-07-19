@@ -107,6 +107,8 @@ async def lifespan(app):
             shutdown = getattr(vision, "shutdown", None)
             if shutdown is not None:
                 shutdown()
+        # Close GCS storage executor
+        gcp_storage.close()
         await store.engine.dispose()
         await device_rate_limiter.close()
         await session_admission.shutdown()
@@ -261,8 +263,11 @@ async def session(websocket: WebSocket):
                     if await store.is_device_revoked(device_id):
                         await websocket.close(code=4403)
                         return
-                    if pending_header is not None:
-                        await websocket.send_json({"type": "error", "code": "frame_header_pending"})
+                    if pending_header is not None or discard_next_binary:
+                        logger.error("Protocol violation: received header before prior binary payload was resolved")
+                        await websocket.send_json({"type": "error", "code": "protocol_violation", "detail": "Header out of sequence"})
+                        await websocket.close(code=4400)
+                        return
                     else:
                         header = parse_frame_header(payload)
                         previous = state.last_capture_mono_ms
@@ -324,6 +329,11 @@ async def session(websocket: WebSocket):
                     await websocket.send_json({"type": "error", "code": "unknown_message"})
             elif message.get("bytes") is not None:
                 decode_started = time.monotonic()
+                if not (pending_header is not None or discard_next_binary):
+                    logger.error("Protocol violation: received binary bytes without pending header")
+                    await websocket.send_json({"type": "error", "code": "protocol_violation", "detail": "Binary payload out of sequence"})
+                    await websocket.close(code=4400)
+                    return
                 if discard_next_binary:
                     discard_next_binary = False
                     continue

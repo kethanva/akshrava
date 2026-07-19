@@ -48,6 +48,16 @@ class Detector(ABC):
         """
         return self.detect(jpeg)
 
+    async def detect_async(self, jpeg: bytes) -> List[Detection]:
+        import asyncio
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self.detect, jpeg)
+
+    async def detect_async_for_device(self, device_id: str, jpeg: bytes) -> List[Detection]:
+        import asyncio
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self.detect_for_device, device_id, jpeg)
+
 
 def jpeg_dimensions(jpeg: bytes):
     """Validate that untrusted bytes are a bounded JPEG before a detector sees them."""
@@ -103,6 +113,18 @@ class RemoteWorkerDetector(Detector):
         if tls_ca_file:
             self._ssl_context = ssl.create_default_context(cafile=tls_ca_file)
             self._ssl_context.load_cert_chain(tls_client_cert_file, tls_client_key_file)
+        self._async_client = None
+
+    async def _get_async_client(self):
+        if self._async_client is None:
+            import httpx
+            limits = httpx.Limits(max_keepalive_connections=100, max_connections=200)
+            self._async_client = httpx.AsyncClient(
+                verify=self._ssl_context or True,
+                timeout=self.timeout_seconds,
+                limits=limits,
+            )
+        return self._async_client
 
     def detect(self, jpeg: bytes) -> List[Detection]:
         body = jpeg
@@ -140,8 +162,52 @@ class RemoteWorkerDetector(Detector):
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise RemoteInferenceError("invalid remote worker response") from exc
 
+    async def detect_async(self, jpeg: bytes) -> List[Detection]:
+        client = await self._get_async_client()
+        body = jpeg
+        timestamp = str(int(time.time()))
+        nonce = secrets.token_urlsafe(18)
+        signature = hmac.new(
+            self.shared_secret,
+            timestamp.encode("ascii") + b"." + nonce.encode("ascii") + b"." + body,
+            hashlib.sha256,
+        ).hexdigest()
+        try:
+            response = await client.post(
+                self.endpoint,
+                content=body,
+                headers={
+                    "Content-Type": "image/jpeg",
+                    "X-Akshrava-Timestamp": timestamp,
+                    "X-Akshrava-Nonce": nonce,
+                    "X-Akshrava-Signature": signature,
+                },
+            )
+            response.raise_for_status()
+            raw = response.content
+        except Exception as exc:
+            import httpx
+            if isinstance(exc, httpx.HTTPStatusError):
+                raise RemoteInferenceError("remote worker failed status=%d" % exc.response.status_code) from exc
+            raise RemoteInferenceError("remote worker unavailable") from exc
+        if len(raw) > self._MAX_RESPONSE_BYTES:
+            raise RemoteInferenceError("remote worker response too large")
+        try:
+            payload = json.loads(raw)
+            items = payload["detections"]
+            if not isinstance(items, list) or len(items) > self._MAX_DETECTIONS:
+                raise ValueError("invalid detections")
+            return [self._parse_detection(item) for item in items]
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RemoteInferenceError("invalid remote worker response") from exc
+
     def requires_serial_execution(self) -> bool:
         return False
+
+    async def close(self) -> None:
+        if self._async_client is not None:
+            await self._async_client.aclose()
+            self._async_client = None
 
     @staticmethod
     def _parse_detection(item) -> Detection:
@@ -246,8 +312,24 @@ class RegistryRemoteWorkerDetector(Detector):
                 errors.append(exc)
         raise RemoteInferenceError("all configured remote workers are unavailable") from errors[-1]
 
+    async def detect_async(self, jpeg: bytes) -> List[Detection]:
+        return await self.detect_async_for_device("", jpeg)
+
+    async def detect_async_for_device(self, device_id: str, jpeg: bytes) -> List[Detection]:
+        errors = []
+        for endpoint in self.registry.ordered_for_device(device_id):
+            try:
+                return await self._workers[endpoint.id].detect_async(jpeg)
+            except RemoteInferenceError as exc:
+                errors.append(exc)
+        raise RemoteInferenceError("all configured remote workers are unavailable") from errors[-1]
+
     def requires_serial_execution(self) -> bool:
         return False
+
+    async def close(self) -> None:
+        import asyncio
+        await asyncio.gather(*(worker.close() for worker in self._workers.values()))
 
 
 class UltralyticsDetector(Detector):

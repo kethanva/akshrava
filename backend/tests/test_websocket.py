@@ -290,3 +290,56 @@ def test_websocket_consent_triggers_gcp_upload(monkeypatch):
     assert "dev-device" in args[0]
     assert args[1] == JPEG
 
+
+def test_websocket_protocol_violation_multiple_headers():
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/session?token=dev-device-token") as websocket:
+            assert websocket.receive_json()["type"] == "ready"
+            # Send first header (this is fine)
+            websocket.send_json(
+                {
+                    "type": "frame",
+                    "id": 1,
+                    "capture_mono_ms": 100,
+                    "w": 1,
+                    "h": 1,
+                    "jpeg_bytes": len(JPEG),
+                    "camera_calibration_id": "test-r0",
+                }
+            )
+            # Send second header immediately before sending binary payload (violates protocol)
+            websocket.send_json(
+                {
+                    "type": "frame",
+                    "id": 2,
+                    "capture_mono_ms": 200,
+                    "w": 1,
+                    "h": 1,
+                    "jpeg_bytes": len(JPEG),
+                    "camera_calibration_id": "test-r0",
+                }
+            )
+            
+            err = websocket.receive_json()
+            assert err["type"] == "error"
+            assert err["code"] == "protocol_violation"
+            with pytest.raises(WebSocketDisconnect) as disconnect:
+                websocket.receive_json()
+            assert disconnect.value.code == 4400
+
+
+def test_websocket_protocol_violation_bytes_first():
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/session?token=dev-device-token") as websocket:
+            assert websocket.receive_json()["type"] == "ready"
+            # Send binary bytes first without header (violates protocol)
+            websocket.send_bytes(JPEG)
+            err = websocket.receive_json()
+            assert err["type"] == "error"
+            assert err["code"] == "protocol_violation"
+            with pytest.raises(WebSocketDisconnect) as disconnect:
+                websocket.receive_json()
+            assert disconnect.value.code == 4400
+
+
+

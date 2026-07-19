@@ -58,6 +58,8 @@ class Store:
     def __init__(self, url, *, bootstrap_schema: bool = True, expected_schema_revision: Optional[str] = None):
         self.engine = create_async_engine(url, future=True)
         self.bootstrap_schema = bootstrap_schema
+        self._revocation_cache = {}  # device_id -> (revoked_bool, expiry_timestamp)
+        self._cache_ttl = 15.0
         self.expected_schema_revision = expected_schema_revision
         if url.startswith("sqlite"):
             @event.listens_for(self.engine.sync_engine, "connect")
@@ -167,12 +169,21 @@ class Store:
                 return False
             device.revoked_at = datetime.now(timezone.utc)
             await session.commit()
+            self._revocation_cache.pop(device_id, None)
             return True
 
     async def is_device_revoked(self, device_id: str) -> bool:
+        import time
+        now = time.monotonic()
+        if device_id in self._revocation_cache:
+            revoked, expiry = self._revocation_cache[device_id]
+            if now < expiry:
+                return revoked
         async with self.sessions() as session:
             device = await session.get(Device, device_id)
-            return bool(device and device.revoked_at is not None)
+            revoked = bool(device and device.revoked_at is not None)
+        self._revocation_cache[device_id] = (revoked, now + self._cache_ttl)
+        return revoked
 
     async def ping(self):
         async with self.engine.connect() as connection:

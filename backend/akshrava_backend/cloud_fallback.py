@@ -113,10 +113,52 @@ class CloudFallbackDetector(Detector):
                 detections.append(Detection(label=label, confidence=item.confidence, box=box))
         return detections, False
 
+    async def detect_async_with_status(self, jpeg: bytes) -> Tuple[List[Detection], bool]:
+        return await self.detect_async_with_status_for_device("", jpeg)
+
+    async def detect_async_with_status_for_device(self, device_id: str, jpeg: bytes) -> Tuple[List[Detection], bool]:
+        local_detections = await self.local.detect_async_for_device(device_id, jpeg)
+        if local_detections:
+            return local_detections, False
+        import asyncio
+        loop = asyncio.get_running_loop()
+        try:
+            result = await loop.run_in_executor(None, self.provider.analyze, jpeg)
+        except Exception:
+            with self._log_lock:
+                now = time.monotonic()
+                if now - self._last_logged_failure_at >= self._LOG_INTERVAL_S:
+                    self._last_logged_failure_at = now
+                    logger.warning("cloud fallback provider %s failed", self.provider.name, exc_info=True)
+            return [], True
+        detections = []
+        width = height = 0
+        for item in result.labels:
+            label = _SAFE_LABELS.get(item.label.lower())
+            if label and item.box is not None and item.confidence >= self.min_confidence:
+                box = item.box
+                if item.normalized:
+                    if not width:
+                        with Image.open(io.BytesIO(jpeg)) as image:
+                            width, height = image.size
+                    box = (box[0] * width, box[1] * height, box[2] * width, box[3] * height)
+                detections.append(Detection(label=label, confidence=item.confidence, box=box))
+        return detections, False
+
     def requires_serial_execution(self) -> bool:
         # Frame-local status is returned by detect_with_status(), so independent sessions no
         # longer share a mutable outcome flag and may use remote inference concurrently.
         return self.local.requires_serial_execution()
+
+    async def close(self) -> None:
+        import asyncio
+        close_method = getattr(self.local, "close", None)
+        if close_method is not None:
+            if asyncio.iscoroutinefunction(close_method):
+                await close_method()
+            else:
+                close_method()
+
 
 class AwsRekognitionProvider(CloudImageProvider):
     name = "aws"

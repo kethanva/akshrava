@@ -177,12 +177,12 @@ class VisionService:
 
     def shutdown(self) -> None:
         # cancel_futures is Python 3.9+, while the package intentionally supports Python 3.8.
-        # The bounded executor prevents unbounded queued work; wait=False lets shutdown proceed
-        # while a non-interruptible native model call finishes on its worker thread.
+        # The bounded executor prevents unbounded queued work. Using wait=True ensures
+        # all thread pools join during lifecycle teardowns and test runs.
         for task in list(self._persist_tasks):
             task.cancel()
         self._persist_tasks.clear()
-        self._executor.shutdown(wait=False)
+        self._executor.shutdown(wait=True)
         # TestClient can start a fresh lifespan over the imported application. Recreate the
         # bounded pool lazily instead of retaining an executor that has already been shut down.
         self._executor = self._new_executor()
@@ -190,8 +190,45 @@ class VisionService:
     async def shutdown_async(self) -> None:
         await self.drain_persists()
         self.shutdown()
+        close_method = getattr(self.detector, "close", None)
+        if close_method is not None:
+            if asyncio.iscoroutinefunction(close_method):
+                await close_method()
+            else:
+                close_method()
 
     async def _detect(self, device_id: str, jpeg: bytes):
+        async_device_method = getattr(self.detector, "detect_async_with_status_for_device", None)
+        async_method = async_device_method or getattr(self.detector, "detect_async_with_status", None)
+        
+        if async_device_method is not None:
+            try:
+                result = await asyncio.wait_for(
+                    async_device_method(device_id, jpeg),
+                    timeout=self.inference_timeout_seconds,
+                )
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError("inference deadline exceeded") from exc
+            return result
+        elif async_method is not None:
+            try:
+                result = await asyncio.wait_for(
+                    async_method(jpeg),
+                    timeout=self.inference_timeout_seconds,
+                )
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError("inference deadline exceeded") from exc
+            return result
+        elif hasattr(self.detector, "detect_async_for_device"):
+            try:
+                result = await asyncio.wait_for(
+                    self.detector.detect_async_for_device(device_id, jpeg),
+                    timeout=self.inference_timeout_seconds,
+                )
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError("inference deadline exceeded") from exc
+            return result, None
+
         device_method = getattr(self.detector, "detect_with_status_for_device", None)
         method = device_method or getattr(self.detector, "detect_with_status", None)
         loop = asyncio.get_running_loop()
@@ -211,6 +248,7 @@ class VisionService:
         except asyncio.TimeoutError as exc:
             raise RuntimeError("inference deadline exceeded") from exc
         return result if method is not None else (result, None)
+
 
     def _pose_discontinuity(self, state: SessionState, header: FrameHeader) -> bool:
         if header.pose_age_ms is None or header.pose_age_ms > 100:
