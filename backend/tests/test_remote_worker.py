@@ -6,7 +6,13 @@ import time
 
 from fastapi.testclient import TestClient
 
-from akshrava_backend.detector import Detector, FailoverRemoteWorkerDetector, RemoteWorkerDetector
+from akshrava_backend.detector import (
+    Detector,
+    InferenceEndpoint,
+    RegistryRemoteWorkerDetector,
+    RemoteWorkerDetector,
+    StaticInferenceEndpointRegistry,
+)
 from akshrava_backend.domain import Detection
 from akshrava_backend.worker import WorkerSettings, create_worker_app
 
@@ -98,6 +104,8 @@ def test_remote_detector_signs_and_validates_worker_response(monkeypatch):
 
     def fake_urlopen(request, timeout, context=None):
         captured["signature"] = request.headers["X-akshrava-signature"]
+        captured["content_type"] = request.headers["Content-type"]
+        captured["body"] = request.data
         captured["timeout"] = timeout
         return Response()
 
@@ -105,10 +113,24 @@ def test_remote_detector_signs_and_validates_worker_response(monkeypatch):
     detector = RemoteWorkerDetector("https://worker.internal/v1/infer", SECRET, 450)
     assert detector.detect(JPEG) == [Detection("car", 0.8, (1.0, 2.0, 3.0, 4.0))]
     assert captured["signature"]
+    assert captured["content_type"] == "image/jpeg"
+    assert captured["body"] == JPEG
     assert captured["timeout"] == 0.45
 
 
-def test_remote_detector_fails_over_to_warm_worker(monkeypatch):
+def test_gpu_worker_accepts_signed_binary_jpeg_without_base64():
+    settings = WorkerSettings(SECRET, "unused.pt", 200_000, 1280, 30, require_gpu=False)
+    app = create_worker_app(settings, FixedDetector())
+    with TestClient(app) as client:
+        response = client.post("/v1/infer", content=JPEG, headers={
+            **_signed_headers(JPEG),
+            "Content-Type": "image/jpeg",
+        })
+        assert response.status_code == 200
+        assert response.json()["detections"][0]["label"] == "person"
+
+
+def test_remote_detector_routes_device_stickily_and_fails_over_to_warm_worker(monkeypatch):
     calls = []
 
     class Response:
@@ -123,14 +145,31 @@ def test_remote_detector_fails_over_to_warm_worker(monkeypatch):
 
     def fake_urlopen(request, timeout, context=None):
         calls.append(request.full_url)
-        if "one.internal" in request.full_url:
+        if len(calls) == 1:
             from urllib.error import URLError
             raise URLError("preempted")
         return Response()
 
     monkeypatch.setattr("akshrava_backend.detector.urlopen", fake_urlopen)
-    detector = FailoverRemoteWorkerDetector(
-        ["https://one.internal/v1/infer", "https://two.internal/v1/infer"], SECRET, 450
+    registry = StaticInferenceEndpointRegistry([
+        InferenceEndpoint("one", "https://one.internal/v1/infer"),
+        InferenceEndpoint("two", "https://two.internal/v1/infer"),
+    ])
+    detector = RegistryRemoteWorkerDetector(
+        registry, SECRET, 450
     )
-    assert detector.detect(JPEG) == []
-    assert calls == ["https://one.internal/v1/infer", "https://two.internal/v1/infer"]
+    routed = registry.ordered_for_device("pilot-phone-1")
+    assert detector.detect_for_device("pilot-phone-1", JPEG) == []
+    assert calls == [endpoint.url for endpoint in routed[:2]]
+
+
+def test_static_endpoint_registry_filters_disabled_entries_and_keeps_stable_order():
+    registry = StaticInferenceEndpointRegistry.from_json(
+        '[{"id":"one","url":"https://one.internal/v1/infer","enabled":false},'
+        '{"id":"two","url":"https://two.internal/v1/infer"},'
+        '{"id":"three","url":"https://three.internal/v1/infer"}]'
+    )
+    first = registry.ordered_for_device("pilot-phone-1")
+    second = registry.ordered_for_device("pilot-phone-1")
+    assert [endpoint.id for endpoint in first] == [endpoint.id for endpoint in second]
+    assert "one" not in [endpoint.id for endpoint in first]

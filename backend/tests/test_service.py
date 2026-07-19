@@ -32,6 +32,18 @@ class EmptyDetector(Detector):
         return []
 
 
+class DeviceAwareDetector(Detector):
+    def __init__(self):
+        self.device_ids = []
+
+    def detect(self, jpeg):
+        raise AssertionError("VisionService should pass device id to device-aware detectors")
+
+    def detect_for_device(self, device_id, jpeg):
+        self.device_ids.append(device_id)
+        return []
+
+
 class RecordingStore:
     def __init__(self):
         self.alerts = []
@@ -117,6 +129,14 @@ async def test_remote_safe_detector_requests_do_not_wait_on_an_unrelated_phone()
         service.analyze(SessionState(device_id="device-2"), _header(1, 1_000), b"jpeg"),
     )
     assert time.monotonic() - started < 0.14
+
+
+@pytest.mark.asyncio
+async def test_vision_service_passes_device_id_to_device_aware_detector():
+    detector = DeviceAwareDetector()
+    service = VisionService(detector, RecordingStore())
+    await service.analyze(SessionState(device_id="pilot-phone-1"), _header(1, 1_000), b"jpeg")
+    assert detector.device_ids == ["pilot-phone-1"]
 
 
 @pytest.mark.asyncio

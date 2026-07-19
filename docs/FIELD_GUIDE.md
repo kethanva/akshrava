@@ -20,7 +20,7 @@ off by a named release owner. Passing code tests never authorizes independent st
 
 - Backend tests, Android tests, signed release artifact, deployment preflight, backups/restore,
   readyz recovery, retention, and protected monitoring access all pass.
-- Production uses WSS, `DEV_AUTH_BYPASS=false`, RS256 device-token verification, per-device
+- Pilot/production use WSS, `DEV_AUTH_BYPASS=false`, RS256 device-token verification, per-device
   revocation, and an approved secrets-rotation procedure.
 - The detector licence, exact weight SHA-256, latency evidence, model rollback image, verified
   calibration profile, controlled-course evidence, and private GPU-worker checks are recorded.

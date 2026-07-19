@@ -10,6 +10,7 @@ from typing import Dict
 
 class Metrics:
     _INFERENCE_BUCKETS = (50, 100, 180, 250, 350, 500)
+    _FRAME_AGE_BUCKETS = (100, 250, 500, 750, 1000, 2000)
     _PIPELINE_STAGES = ("decode", "detect", "track_score", "persist")
 
     def __init__(self):
@@ -19,10 +20,14 @@ class Metrics:
         self._rejected_frames_total = 0
         self._late_suppressed_total = 0
         self._sessions_active = 0
+        self._session_admission_rejected_total = 0
         self._inference_failures_total = 0
         self._inference_counts: Dict[int, int] = {bucket: 0 for bucket in self._INFERENCE_BUCKETS}
         self._inference_sum_ms = 0
         self._inference_count = 0
+        self._frame_age_counts: Dict[int, int] = {bucket: 0 for bucket in self._FRAME_AGE_BUCKETS}
+        self._frame_age_sum_ms = 0
+        self._frame_age_count = 0
         self._stage_counts = {stage: {bucket: 0 for bucket in self._INFERENCE_BUCKETS} for stage in self._PIPELINE_STAGES}
         self._stage_sums = {stage: 0 for stage in self._PIPELINE_STAGES}
         self._stage_totals = {stage: 0 for stage in self._PIPELINE_STAGES}
@@ -46,6 +51,21 @@ class Metrics:
                     if elapsed <= bucket:
                         self._stage_counts[stage][bucket] += 1
 
+    def observe_frame_age(self, age_ms: int) -> None:
+        """Observe capture-to-server age when the phone supplies capture_epoch_ms.
+
+        This is aggregate only: no device, route, or carrier labels. The phone remains the
+        authority for glass-to-ear freshness, but this tells operators when uplink/server ingress
+        age is already too high before speech arbitration sees the result.
+        """
+        age_ms = max(0, int(age_ms))
+        with self._lock:
+            self._frame_age_sum_ms += age_ms
+            self._frame_age_count += 1
+            for bucket in self._FRAME_AGE_BUCKETS:
+                if age_ms <= bucket:
+                    self._frame_age_counts[bucket] += 1
+
     def reject_frame(self) -> None:
         with self._lock:
             self._rejected_frames_total += 1
@@ -67,6 +87,10 @@ class Metrics:
     def session_closed(self) -> None:
         with self._lock:
             self._sessions_active = max(0, self._sessions_active - 1)
+
+    def session_admission_rejected(self) -> None:
+        with self._lock:
+            self._session_admission_rejected_total += 1
 
     def inference_failed(self) -> None:
         with self._lock:
@@ -90,6 +114,9 @@ class Metrics:
                 "# HELP akshrava_sessions_active Active authenticated WebSocket sessions on this API instance.",
                 "# TYPE akshrava_sessions_active gauge",
                 "akshrava_sessions_active %s" % self._sessions_active,
+                "# HELP akshrava_session_admission_rejected_total Authenticated sessions rejected because fleet capacity was exhausted.",
+                "# TYPE akshrava_session_admission_rejected_total counter",
+                "akshrava_session_admission_rejected_total %s" % self._session_admission_rejected_total,
                 "# HELP akshrava_inference_failures_total Inference failures that fail closed.",
                 "# TYPE akshrava_inference_failures_total counter",
                 "akshrava_inference_failures_total %s" % self._inference_failures_total,
@@ -107,6 +134,25 @@ class Metrics:
                     % self._inference_count,
                     "akshrava_inference_duration_milliseconds_sum %s" % self._inference_sum_ms,
                     "akshrava_inference_duration_milliseconds_count %s" % self._inference_count,
+                ]
+            )
+            lines.extend(
+                [
+                    "# HELP akshrava_frame_age_milliseconds Capture epoch to API result age when supplied by the phone; aggregate only.",
+                    "# TYPE akshrava_frame_age_milliseconds histogram",
+                ]
+            )
+            for bucket in self._FRAME_AGE_BUCKETS:
+                lines.append(
+                    'akshrava_frame_age_milliseconds_bucket{le="%s"} %s'
+                    % (bucket, self._frame_age_counts[bucket])
+                )
+            lines.extend(
+                [
+                    'akshrava_frame_age_milliseconds_bucket{le="+Inf"} %s'
+                    % self._frame_age_count,
+                    "akshrava_frame_age_milliseconds_sum %s" % self._frame_age_sum_ms,
+                    "akshrava_frame_age_milliseconds_count %s" % self._frame_age_count,
                 ]
             )
             lines.extend(

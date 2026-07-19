@@ -38,9 +38,6 @@ class AssistService : LifecycleService() {
         private const val THERMAL_CHECK_INTERVAL_MS = 30_000L
         private const val THERMAL_THROTTLE_C = 43f
         private const val THERMAL_CLEAR_C = 41f
-        private const val THROTTLED_FPS = 0.5
-        private const val STATIONARY_FPS = 0.2
-        private const val MAX_FPS = 3.0
         private const val HEARTBEAT_INTERVAL_MS = 30_000L
     }
 
@@ -64,8 +61,8 @@ class AssistService : LifecycleService() {
     private var lastHeartbeatMs = 0L
     private var consecutiveBlurredFrames = 0
     private var previousThumbnail: IntArray? = null
+    private val capturePolicy = CapturePolicy()
     @Volatile private var thermalThrottled = false
-    @Volatile private var highAlertUntilMs = 0L
     @Volatile private var batteryLow = false
     @Volatile private var batteryCritical = false
     @Volatile private var captureSuspendedForBattery = false
@@ -98,10 +95,12 @@ class AssistService : LifecycleService() {
             alertManager = alertManager,
             onState = { status -> updateNotification(status) },
             onFrameSettled = { framePending.set(false) },
-            onQuality = { updated -> quality = updated },
+            onQuality = { updated ->
+                quality = updated
+                capturePolicy.quality = updated
+            },
             onHighAlert = {
-                // Set high alert for 10 seconds
-                highAlertUntilMs = SystemClock.elapsedRealtime() + 10_000L
+                capturePolicy.markHighAlert(SystemClock.elapsedRealtime())
             }
         )
         client.connect()
@@ -232,14 +231,7 @@ class AssistService : LifecycleService() {
 
     private fun captureIntervalMs(): Long {
         val now = SystemClock.elapsedRealtime()
-        val targetFps = when {
-            thermalThrottled -> THROTTLED_FPS
-            batteryLow -> 0.2 // Override when battery is low
-            now < highAlertUntilMs -> 2.0 // High alert 2 FPS
-            poseTracker.motionState() == MotionState.STATIONARY -> STATIONARY_FPS
-            else -> quality.fps
-        }.coerceIn(STATIONARY_FPS, MAX_FPS)
-        return (1000.0 / targetFps).toLong()
+        return capturePolicy.captureIntervalMs(now, poseTracker.motionState())
     }
 
     private fun maybeCheckThermal(now: Long) {
@@ -248,9 +240,11 @@ class AssistService : LifecycleService() {
         val temperature = batteryTemperatureC()
         if (temperature >= THERMAL_THROTTLE_C && !thermalThrottled) {
             thermalThrottled = true
+            capturePolicy.thermalThrottled = true
             alertManager.status("Akshrava is running slower to cool down")
         } else if (temperature in 0f..THERMAL_CLEAR_C && thermalThrottled) {
             thermalThrottled = false
+            capturePolicy.thermalThrottled = false
         }
         
         // Check battery level
@@ -263,6 +257,7 @@ class AssistService : LifecycleService() {
                 if (!batteryCritical) {
                     batteryCritical = true
                     batteryLow = true
+                    capturePolicy.batteryLow = true
                     // suspendCaptureForCriticalBattery() speaks its own status message; a
                     // second status() call here would immediately flush (cut off) it, so the
                     // first utterance would never actually be heard.
@@ -272,6 +267,7 @@ class AssistService : LifecycleService() {
                 batteryCritical = false
                 if (!batteryLow) {
                     batteryLow = true
+                    capturePolicy.batteryLow = true
                     if (now - lastBatteryWarningMs > 120_000L) {
                         alertManager.status("Battery low. Vision alerts may stop soon.")
                         lastBatteryWarningMs = now
@@ -280,6 +276,7 @@ class AssistService : LifecycleService() {
             } else {
                 batteryLow = false
                 batteryCritical = false
+                capturePolicy.batteryLow = false
             }
         }
     }

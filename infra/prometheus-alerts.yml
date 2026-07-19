@@ -22,3 +22,17 @@ groups:
           severity: warning
         annotations:
           summary: "Inference is exceeding the speaking freshness budget"
+      - alert: AkshravaSessionAdmissionSaturated
+        expr: increase(akshrava_session_admission_rejected_total[10m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Authenticated walking sessions are being rejected because fleet capacity is exhausted"
+      - alert: AkshravaFrameIngressAgeHigh
+        expr: histogram_quantile(0.95, rate(akshrava_frame_age_milliseconds_bucket[10m])) > 500
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Phone capture-to-API frame age p95 is above the freshness budget"

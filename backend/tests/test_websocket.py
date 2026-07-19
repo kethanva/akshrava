@@ -1,6 +1,7 @@
 import base64
 import json
 import asyncio
+import time
 from dataclasses import replace
 
 import pytest
@@ -91,8 +92,35 @@ def test_metrics_endpoint_exposes_aggregate_operational_metrics():
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/plain")
     assert "akshrava_frames_processed_total" in response.text
+    assert "akshrava_session_admission_rejected_total" in response.text
+    assert "akshrava_frame_age_milliseconds_bucket" in response.text
     assert "akshrava_inference_duration_milliseconds_bucket" in response.text
     assert 'akshrava_pipeline_stage_duration_milliseconds_bucket{stage="decode"' in response.text
+
+
+def test_metrics_observe_phone_supplied_frame_age_from_websocket_result():
+    before = int(time.time() * 1000) - 120
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/session?token=dev-device-token") as websocket:
+            websocket.receive_json()
+            websocket.send_json(
+                {
+                    "type": "frame",
+                    "id": 77,
+                    "capture_mono_ms": 100,
+                    "capture_epoch_ms": before,
+                    "w": 1,
+                    "h": 1,
+                    "jpeg_bytes": len(JPEG),
+                    "camera_calibration_id": "test-r0",
+                }
+            )
+            websocket.send_bytes(JPEG)
+            assert websocket.receive_json()["type"] == "result"
+            websocket.receive_json()
+        metrics_text = client.get("/metrics").text
+    assert "akshrava_frame_age_milliseconds_count" in metrics_text
+    assert 'akshrava_frame_age_milliseconds_bucket{le="500"}' in metrics_text
 
 
 def test_readiness_requires_a_usable_database_connection():

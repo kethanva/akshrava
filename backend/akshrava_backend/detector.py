@@ -1,14 +1,12 @@
 import io
-import base64
 import hashlib
 import hmac
 import json
 import secrets
 import ssl
 import time
-from threading import Lock
 from abc import ABC, abstractmethod
-from pathlib import Path
+from dataclasses import dataclass
 from typing import List
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -16,6 +14,7 @@ from urllib.request import Request, urlopen
 from PIL import Image
 
 from .domain import Detection
+from .model_integrity import verify_model_sha256
 
 
 class Detector(ABC):
@@ -40,6 +39,14 @@ class Detector(ABC):
         sessions or making the control plane hold a global inference lock.
         """
         return [self.detect(jpeg) for jpeg in jpegs]
+
+    def detect_for_device(self, device_id: str, jpeg: bytes) -> List[Detection]:
+        """Detect for an authenticated device.
+
+        Most detectors are device-agnostic. Remote adapters may use the stable device id to keep
+        a walking session sticky to one warm inference endpoint while still failing through peers.
+        """
+        return self.detect(jpeg)
 
 
 def jpeg_dimensions(jpeg: bytes):
@@ -98,10 +105,7 @@ class RemoteWorkerDetector(Detector):
             self._ssl_context.load_cert_chain(tls_client_cert_file, tls_client_key_file)
 
     def detect(self, jpeg: bytes) -> List[Detection]:
-        body = json.dumps(
-            {"image_b64": base64.b64encode(jpeg).decode("ascii")},
-            separators=(",", ":"),
-        ).encode("utf-8")
+        body = jpeg
         timestamp = str(int(time.time()))
         nonce = secrets.token_urlsafe(18)
         signature = hmac.new(
@@ -114,7 +118,7 @@ class RemoteWorkerDetector(Detector):
             data=body,
             method="POST",
             headers={
-                "Content-Type": "application/json",
+                "Content-Type": "image/jpeg",
                 "X-Akshrava-Timestamp": timestamp,
                 "X-Akshrava-Nonce": nonce,
                 "X-Akshrava-Signature": signature,
@@ -162,23 +166,82 @@ class RemoteWorkerDetector(Detector):
         return Detection(label=label, confidence=float(confidence), box=parsed_box)
 
 
-class FailoverRemoteWorkerDetector(Detector):
-    """Stable round-robin worker selection with immediate failover to configured warm peers."""
+@dataclass(frozen=True)
+class InferenceEndpoint:
+    id: str
+    url: str
+    enabled: bool = True
 
-    def __init__(self, endpoints, shared_secret: str, timeout_ms: int, **tls):
-        self._workers = [RemoteWorkerDetector(endpoint, shared_secret, timeout_ms, **tls) for endpoint in endpoints]
-        self._next = 0
-        self._lock = Lock()
+
+class StaticInferenceEndpointRegistry:
+    """Static endpoint registry used until a dynamic fleet control plane exists.
+
+    The registry gives the control plane explicit endpoint identities and stable device placement.
+    It is still configured at deploy time, but it is no longer a blind comma-separated retry list.
+    """
+
+    def __init__(self, endpoints: List[InferenceEndpoint]):
+        enabled = [endpoint for endpoint in endpoints if endpoint.enabled]
+        if not enabled:
+            raise ValueError("at least one enabled inference endpoint is required")
+        self._endpoints = enabled
+
+    @classmethod
+    def from_urls(cls, urls: List[str]):
+        endpoints = [
+            InferenceEndpoint(id="worker-%d" % (index + 1), url=url)
+            for index, url in enumerate(urls)
+        ]
+        return cls(endpoints)
+
+    @classmethod
+    def from_json(cls, raw: str):
+        try:
+            items = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError("REMOTE_INFERENCE_REGISTRY_JSON must be valid JSON") from exc
+        if not isinstance(items, list):
+            raise ValueError("REMOTE_INFERENCE_REGISTRY_JSON must be a list")
+        endpoints = []
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                raise ValueError("REMOTE_INFERENCE_REGISTRY_JSON entries must be objects")
+            url = str(item.get("url", "")).strip().rstrip("/")
+            endpoint_id = str(item.get("id") or "worker-%d" % (index + 1)).strip()
+            enabled = bool(item.get("enabled", True))
+            if not url or not endpoint_id:
+                raise ValueError("REMOTE_INFERENCE_REGISTRY_JSON entries require id and url")
+            endpoints.append(InferenceEndpoint(endpoint_id, url, enabled))
+        return cls(endpoints)
+
+    @property
+    def endpoints(self) -> List[InferenceEndpoint]:
+        return list(self._endpoints)
+
+    def ordered_for_device(self, device_id: str) -> List[InferenceEndpoint]:
+        digest = hashlib.sha256(device_id.encode("utf-8")).digest()
+        start = int.from_bytes(digest[:8], "big") % len(self._endpoints)
+        return self._endpoints[start:] + self._endpoints[:start]
+
+
+class RegistryRemoteWorkerDetector(Detector):
+    """Device-sticky worker selection with immediate fail-through to warm peers."""
+
+    def __init__(self, registry: StaticInferenceEndpointRegistry, shared_secret: str, timeout_ms: int, **tls):
+        self.registry = registry
+        self._workers = {
+            endpoint.id: RemoteWorkerDetector(endpoint.url, shared_secret, timeout_ms, **tls)
+            for endpoint in registry.endpoints
+        }
 
     def detect(self, jpeg: bytes) -> List[Detection]:
-        with self._lock:
-            start = self._next
-            self._next = (self._next + 1) % len(self._workers)
+        return self.detect_for_device("", jpeg)
+
+    def detect_for_device(self, device_id: str, jpeg: bytes) -> List[Detection]:
         errors = []
-        for offset in range(len(self._workers)):
-            worker = self._workers[(start + offset) % len(self._workers)]
+        for endpoint in self.registry.ordered_for_device(device_id):
             try:
-                return worker.detect(jpeg)
+                return self._workers[endpoint.id].detect(jpeg)
             except RemoteInferenceError as exc:
                 errors.append(exc)
         raise RemoteInferenceError("all configured remote workers are unavailable") from errors[-1]
@@ -190,9 +253,8 @@ class FailoverRemoteWorkerDetector(Detector):
 class UltralyticsDetector(Detector):
     """Optional detector. Enable only after licence/weights review and benchmarking."""
 
-    def __init__(self, weights: str):
-        if not Path(weights).is_file():
-            raise RuntimeError("YOLO_WEIGHTS must name a local, baked-in or read-only mounted model file")
+    def __init__(self, weights: str, expected_sha256: str = "", require_sha256: bool = False):
+        verify_model_sha256(weights, expected_sha256, required=require_sha256)
         try:
             from ultralytics import YOLO
         except ImportError as exc:
@@ -232,16 +294,23 @@ def make_detector(
     remote_tls_ca_file: str = "",
     remote_tls_client_cert_file: str = "",
     remote_tls_client_key_file: str = "",
+    remote_inference_registry_json: str = "",
+    yolo_weights_sha256: str = "",
+    require_yolo_sha256: bool = False,
 ) -> Detector:
     if kind == "noop":
         detector = NoopDetector()
     elif kind == "ultralytics":
-        detector = UltralyticsDetector(weights)
+        detector = UltralyticsDetector(weights, yolo_weights_sha256, require_yolo_sha256)
     elif kind == "remote":
         endpoints = [url.strip().rstrip("/") for url in remote_inference_url.split(",") if url.strip()]
-        detector_type = FailoverRemoteWorkerDetector if len(endpoints) > 1 else RemoteWorkerDetector
-        detector = detector_type(
-            endpoints if detector_type is FailoverRemoteWorkerDetector else endpoints[0],
+        registry = (
+            StaticInferenceEndpointRegistry.from_json(remote_inference_registry_json)
+            if remote_inference_registry_json
+            else StaticInferenceEndpointRegistry.from_urls(endpoints)
+        )
+        detector = RegistryRemoteWorkerDetector(
+            registry,
             remote_worker_secret,
             remote_inference_timeout_ms,
             tls_ca_file=remote_tls_ca_file,

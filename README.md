@@ -48,7 +48,7 @@ detector validation, device calibration and controlled-course evidence are relea
 | `infra/` | PostgreSQL, API and optional Caddy/TLS deployment |
 | `docs/` | Wire protocol, privacy policies, provisioning, and trial protocols |
 | `scripts/` | Backend test/run and token provisioning helpers |
-| `RECYCLED_PHONE_ASSISTIVE_VISION_BUILD_PLAN.md` | The guiding v1.4 product and safety plan |
+| `Important Architecture.md` | Authoritative end-to-end product, safety, and architecture boundary |
 | `NOT_NOW.md` | Deferred device-agnostic features (GPS memory, looming detector, foveated upload) |
 
 ## Run locally
@@ -58,7 +58,7 @@ detector validation, device calibration and controlled-course evidence are relea
 ./scripts/run_backend_dev.sh
 ```
 
-Then visit `http://127.0.0.1:8000/healthz`. The development WebSocket accepts only `dev-device-token`; production requires a signed JWT. Note: `python3` must be used if `python` is unavailable in your environment.
+Then visit `http://127.0.0.1:8000/healthz`. The development WebSocket accepts only `dev-device-token`; pilot/production require RS256 signed JWTs with the public key mounted on the API. Note: `python3` must be used if `python` is unavailable in your environment.
 
 ## Build the Android app
 

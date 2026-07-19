@@ -13,6 +13,9 @@
 backend/akshrava.db
 backend/akshrava.db-shm
 backend/akshrava.db-wal
+akshrava.db
+akshrava.db-shm
+akshrava.db-wal
 android/local.properties
 infra/.env
 graphify-out/
