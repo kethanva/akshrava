@@ -5,7 +5,7 @@ resource "google_sql_database_instance" "postgres" {
   depends_on       = [google_service_networking_connection.private_connection]
 
   settings {
-    tier = "db-f1-micro"
+    tier = "db-f1-micro" # Highly cost-effective micro instance, perfect for 100 devices
     ip_configuration {
       ipv4_enabled    = false
       private_network = google_compute_network.vpc.id
@@ -21,13 +21,4 @@ resource "google_sql_database_instance" "postgres" {
 resource "google_sql_database" "database" {
   name     = "akshrava"
   instance = google_sql_database_instance.postgres.name
-}
-
-resource "google_redis_instance" "redis" {
-  name               = "akshrava-redis"
-  tier               = "BASIC"
-  memory_size_gb     = 1
-  authorized_network = google_compute_network.vpc.id
-  redis_version      = "REDIS_7_0"
-  region             = var.region
 }

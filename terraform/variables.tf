@@ -9,7 +9,8 @@ variable "region" {
   description = "The GCP region for regional resources."
 }
 
-variable "domain" {
+variable "zone" {
   type        = string
-  description = "The public domain name mapped to the Akshrava gateway API."
+  default     = "us-central1-a"
+  description = "The GCP zone for the GCE worker VM."
 }

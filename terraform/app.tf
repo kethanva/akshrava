@@ -13,6 +13,7 @@ resource "google_service_account" "worker_sa" {
 resource "google_cloud_run_v2_service" "api" {
   name     = "akshrava-api"
   location = var.region
+  ingress  = "INGRESS_TRAFFIC_ALL" # Allow public internet clients directly (with free auto-managed SSL)
 
   template {
     service_account = google_service_account.api_sa.email
@@ -25,6 +26,12 @@ resource "google_cloud_run_v2_service" "api" {
       ports {
         container_port = 8000
       }
+      resources {
+        limits = {
+          cpu    = "1"
+          memory = "2Gi"
+        }
+      }
       env {
         name  = "AKSHRAVA_ENV"
         value = "pilot"
@@ -34,8 +41,12 @@ resource "google_cloud_run_v2_service" "api" {
         value = "postgresql+asyncpg://akshrava:${google_sql_database_instance.postgres.private_ip_address}/akshrava"
       }
       env {
-        name  = "REDIS_URL"
-        value = "redis://${google_redis_instance.redis.host}:6379/0"
+        name  = "DETECTOR"
+        value = "remote"
+      }
+      env {
+        name  = "REMOTE_INFERENCE_URL"
+        value = "http://${google_compute_instance.worker.network_interface[0].network_ip}:8000/v1/infer"
       }
       env {
         name = "JWT_SECRET"
@@ -46,20 +57,31 @@ resource "google_cloud_run_v2_service" "api" {
           }
         }
       }
+      env {
+        name = "REMOTE_WORKER_SECRET"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.worker_secret.secret_id
+            version = "latest"
+          }
+        }
+      }
     }
   }
 }
 
-# GCE GPU Worker VM Template
-resource "google_compute_instance_template" "worker_template" {
-  name_prefix  = "akshrava-gpu-worker-"
-  machine_type = "g2-standard-4"
-  region       = var.region
+# Standalone Compute Engine VM for GPU Inference (NVIDIA L4)
+resource "google_compute_instance" "worker" {
+  name         = "akshrava-gpu-worker"
+  machine_type = "g2-standard-4" # 4 vCPUs, 16GB RAM, 1x NVIDIA L4 GPU (cost-efficient, high throughput for 100 FPS)
+  zone         = var.zone
+  tags         = ["akshrava-worker"]
 
-  disk {
-    source_image = "cos-cloud/cos-stable"
-    auto_delete  = true
-    boot         = true
+  boot_disk {
+    initialize_params {
+      image = "cos-cloud/cos-stable"
+      size  = 50 # 50GB boot disk for OS & Docker images
+    }
   }
 
   guest_accelerator {
@@ -69,6 +91,7 @@ resource "google_compute_instance_template" "worker_template" {
 
   network_interface {
     subnetwork = google_compute_subnetwork.subnet_workers.id
+    # No public IP assigned to the VM; fully private. Incoming traffic only from VPC/Cloud Run.
   }
 
   service_account {
@@ -77,6 +100,7 @@ resource "google_compute_instance_template" "worker_template" {
   }
 
   metadata = {
+    # Startup script automatically installs GPU drivers and spins up the Worker docker container
     user-data = <<EOF
 #cloud-config
 runcmd:
@@ -85,85 +109,23 @@ runcmd:
 EOF
   }
 
-  lifecycle {
-    create_before_destroy = true
+  # Ensure the VM is schedulable on GPU hosts
+  scheduling {
+    on_host_maintenance = "TERMINATE" # Required for GPUs on GCP
+    automatic_restart   = true
   }
 }
 
-# GPU Managed Instance Group (MIG) with Auto-Scaling
-resource "google_compute_region_instance_group_manager" "worker_mig" {
-  name               = "akshrava-worker-mig"
-  region             = var.region
-  base_instance_name = "akshrava-worker"
-  target_size        = 1
+# Allow HTTP traffic from the Serverless VPC Connector to the Worker VM
+resource "google_compute_firewall" "allow_run_to_worker" {
+  name    = "akshrava-allow-run-to-worker"
+  network = google_compute_network.vpc.name
 
-  version {
-    instance_template = google_compute_instance_template.worker_template.id
+  allow {
+    protocol = "tcp"
+    ports    = ["8000"]
   }
 
-  named_port {
-    name = "http"
-    port = 8000
-  }
-}
-
-resource "google_compute_region_autoscaler" "worker_autoscaler" {
-  name   = "akshrava-worker-autoscaler"
-  region = var.region
-  target = google_compute_region_instance_group_manager.worker_mig.id
-
-  autoscaling_policy {
-    max_replicas    = 5
-    min_replicas    = 1
-    cooldown_period = 60
-
-    cpu_utilization {
-      target = 0.8
-    }
-  }
-}
-
-# Google Cloud HTTPS Load Balancer with Cloud Run backend
-resource "google_compute_region_network_endpoint_group" "serverless_neg" {
-  name                  = "akshrava-serverless-neg"
-  network_endpoint_type = "SERVERLESS"
-  region                = var.region
-  cloud_run {
-    service = google_cloud_run_v2_service.api.name
-  }
-}
-
-resource "google_compute_backend_service" "lb_backend" {
-  name                  = "akshrava-lb-backend"
-  protocol              = "HTTPS"
-  load_balancing_scheme = "EXTERNAL_MANAGED"
-  backend {
-    group = google_compute_region_network_endpoint_group.serverless_neg.id
-  }
-}
-
-resource "google_compute_url_map" "url_map" {
-  name            = "akshrava-url-map"
-  default_service = google_compute_backend_service.lb_backend.id
-}
-
-resource "google_compute_managed_ssl_certificate" "cert" {
-  name = "akshrava-ssl-cert"
-  managed {
-    domains = [var.domain]
-  }
-}
-
-resource "google_compute_target_https_proxy" "https_proxy" {
-  name             = "akshrava-https-proxy"
-  url_map          = google_compute_url_map.url_map.id
-  ssl_certificates = [google_compute_managed_ssl_certificate.cert.id]
-}
-
-resource "google_compute_global_forwarding_rule" "forwarding_rule" {
-  name                  = "akshrava-lb-forwarding-rule"
-  ip_protocol           = "TCP"
-  load_balancing_scheme = "EXTERNAL_MANAGED"
-  port_range            = "443"
-  target                = google_compute_target_https_proxy.https_proxy.id
+  source_ranges = [google_vpc_access_connector.connector.ip_cidr_range]
+  target_tags   = ["akshrava-worker"]
 }

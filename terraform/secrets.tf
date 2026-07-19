@@ -11,3 +11,10 @@ resource "google_secret_manager_secret" "db_password" {
     auto {}
   }
 }
+
+resource "google_secret_manager_secret" "worker_secret" {
+  secret_id = "akshrava-worker-secret"
+  replication {
+    auto {}
+  }
+}
