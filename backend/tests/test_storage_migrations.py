@@ -1,6 +1,6 @@
 import pytest
 
-from akshrava_backend.storage import _alert_event_add_column_sql
+from akshrava_backend.storage import _alert_event_add_column_sql, _device_add_column_sql
 
 
 def test_alert_event_migration_sql_uses_only_reviewed_fragments():
@@ -10,3 +10,12 @@ def test_alert_event_migration_sql_uses_only_reviewed_fragments():
 def test_alert_event_migration_sql_rejects_unknown_columns():
     with pytest.raises(ValueError):
         _alert_event_add_column_sql("track_id; DROP TABLE alert_events")
+
+
+def test_device_migration_sql_uses_only_reviewed_fragments():
+    assert _device_add_column_sql("revoked_at") == "ALTER TABLE devices ADD COLUMN revoked_at TIMESTAMP WITH TIME ZONE"
+
+
+def test_device_migration_sql_rejects_unknown_columns():
+    with pytest.raises(ValueError):
+        _device_add_column_sql("revoked_at; DROP TABLE devices")

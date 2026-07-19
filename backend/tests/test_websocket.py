@@ -1,5 +1,7 @@
 import base64
 import json
+import asyncio
+from dataclasses import replace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -74,6 +76,17 @@ def test_readiness_requires_a_usable_database_connection():
         response = client.get("/readyz")
     assert response.status_code == 200
     assert response.json()["ok"] is True
+
+
+def test_readiness_times_out_instead_of_hanging(monkeypatch):
+    async def slow_ping():
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr(main.store, "ping", slow_ping)
+    monkeypatch.setattr(main, "settings", replace(main.settings, ready_timeout_ms=100))
+    with TestClient(app) as client:
+        response = client.get("/readyz")
+    assert response.status_code == 503
 
 
 def test_websocket_rejects_non_monotonic_frame_headers():

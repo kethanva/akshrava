@@ -76,7 +76,7 @@ async def healthz():
 async def readyz():
     """Readiness is separate from liveness so a dead database removes this API from service."""
     try:
-        await store.ping()
+        await asyncio.wait_for(store.ping(), timeout=settings.ready_timeout_ms / 1000.0)
     except Exception:
         logger.exception("database readiness check failed")
         raise HTTPException(status_code=503, detail="database unavailable")
@@ -118,6 +118,8 @@ async def device_events(device_id: str, limit: int = 20, authorization: Optional
     # operator console and must never become a cross-device event feed.
     if _http_device_id(authorization) != device_id:
         raise HTTPException(status_code=403, detail="device token does not match requested device")
+    if await store.is_device_revoked(device_id):
+        raise HTTPException(status_code=403, detail="device access revoked")
     events = await store.recent_events(device_id, max(1, min(limit, 100)))
     return {
         "events": [
@@ -149,6 +151,9 @@ async def session(websocket: WebSocket):
         device_id = device_id_from_token(token, settings)
     except AuthError:
         await websocket.close(code=4401)
+        return
+    if await store.is_device_revoked(device_id):
+        await websocket.close(code=4403)
         return
     await websocket.accept()
     state = SessionState(device_id=device_id)

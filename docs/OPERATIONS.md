@@ -50,6 +50,17 @@ JWT_SECRET='same-secret-as-server' python ../scripts/mint_device_token.py pilot-
 The Android app encrypts this token using the device's Android Keystore before storing it. A
 keystore failure means the volunteer must re-provision; it must not fall back to plaintext storage.
 
+To revoke a lost or compromised provisioned device immediately, run from an operator machine with
+the production `DATABASE_URL`:
+
+```bash
+cd backend
+DATABASE_URL='postgresql+asyncpg://...' python ../scripts/revoke_device.py pilot-phone-001
+```
+
+Revocation is checked during WebSocket upgrade and event reads. Issue a new device ID/token after
+re-provisioning; do not "unrevoke" a lost device.
+
 ## Model activation
 
 After the licence decision and model validation, set `INSTALL_YOLO=true`, mount the approved local model directory through `MODEL_DIR`, record the weight SHA-256, and set `DETECTOR=ultralytics` for a single host or `DETECTOR=remote` for the control plane of a split deployment. `YOLO_WEIGHTS` must point at that read-only `/models/...` file on the inference host; the server rejects a missing path and never downloads weights during a session. A model deployment must run the regression suite and controlled-course release gate before it reaches a phone.

@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 from sqlalchemy import DateTime, Float, Integer, String, delete, event, inspect, select, text
 from sqlalchemy.exc import IntegrityError
@@ -18,6 +19,8 @@ _ALERT_EVENT_COLUMN_ADDITIONS = {
     "track_id": "INTEGER",
 }
 
+_DEVICE_COLUMN_ADDITIONS = {"revoked_at": "TIMESTAMP WITH TIME ZONE"}
+
 
 def _alert_event_add_column_sql(name: str) -> str:
     try:
@@ -25,6 +28,14 @@ def _alert_event_add_column_sql(name: str) -> str:
     except KeyError as exc:
         raise ValueError("unsupported alert_events migration column") from exc
     return f"ALTER TABLE alert_events ADD COLUMN {name} {sql_type}"
+
+
+def _device_add_column_sql(name: str) -> str:
+    try:
+        sql_type = _DEVICE_COLUMN_ADDITIONS[name]
+    except KeyError as exc:
+        raise ValueError("unsupported devices migration column") from exc
+    return f"ALTER TABLE devices ADD COLUMN {name} {sql_type}"
 
 
 class Base(DeclarativeBase):
@@ -40,6 +51,7 @@ class Device(Base):
     calibration_id: Mapped[str] = mapped_column(String(128), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class CalibrationProfileRecord(Base):
@@ -98,6 +110,12 @@ class Store:
             for name in _ALERT_EVENT_COLUMN_ADDITIONS:
                 if name not in existing:
                     await connection.execute(text(_alert_event_add_column_sql(name)))
+            device_columns = await connection.run_sync(
+                lambda sync_connection: {column["name"] for column in inspect(sync_connection).get_columns("devices")}
+            )
+            for name in _DEVICE_COLUMN_ADDITIONS:
+                if name not in device_columns:
+                    await connection.execute(text(_device_add_column_sql(name)))
 
     async def upsert_device(self, device_id, calibration_id):
         # Two sockets for the same device can race here across a reconnect (old socket's
@@ -128,6 +146,21 @@ class Store:
             if record is None or not record.verified:
                 return None
             return GeometryProfile(record.calibration_id, record.focal_px, record.camera_height_m)
+
+    async def revoke_device(self, device_id: str) -> bool:
+        """Deny a device immediately without retaining any image or frame data."""
+        async with self.sessions() as session:
+            device = await session.get(Device, device_id)
+            if device is None:
+                return False
+            device.revoked_at = datetime.now(timezone.utc)
+            await session.commit()
+            return True
+
+    async def is_device_revoked(self, device_id: str) -> bool:
+        async with self.sessions() as session:
+            device = await session.get(Device, device_id)
+            return bool(device and device.revoked_at is not None)
 
     async def ping(self):
         async with self.engine.connect() as connection:
