@@ -1,6 +1,7 @@
 .DS_Store
 **/.gradle/
 **/build/
+**/dist/
 **/.venv/
 **/.ruff_cache/
 **/.pytest_cache/
