@@ -1,95 +1,226 @@
 # Akshrava
 
-Akshrava is a safety-bounded Android + Python implementation of a recycled-phone assistive-vision pilot for blind and low-vision users in India.
+Recycled-phone assistive vision for blind and low-vision users in India.
 
-It is **not** a navigation system, collision-avoidance system, or replacement for a cane, guide dog, or sighted guide. It never says a road is safe to cross. 
+Akshrava turns a **recent** chest-mounted Android camera view into a short, rate-limited alert. It supplements a white cane, guide dog, or sighted guide. It is **not** navigation, collision avoidance, route guidance, or a crossing aid.
 
-**Kinematic Honesty Boundary**: At low sample rates (1–3 FPS), bounding box growth confounds vehicle motion with wearer motion. The vehicle vocabulary is strictly limited to `vehicle nearby`. The system does not, and will not, infer "approaching" vehicles or closing speeds.
+**Hard safety boundary**
 
-## Current implementation boundary
+- Never says a road is safe to cross, a path is clear, or a vehicle is *approaching*.
+- At 0.2–3 FPS, box growth confounds wearer motion with target motion. Vehicle speech is only `vehicle nearby`. Results carry `motion_evidence: "insufficient"`.
+- Silence never means safety. The phone must say when the camera, network, or detector cannot assist.
 
-This repository is a **bench and supervised-pilot implementation**, not a complete field-ready
-v1.4 system. The working transport, freshness, alert-policy and operations scaffolding is here;
-detector validation, device calibration and controlled-course evidence are release gates.
+This repository is a **bench and supervised-pilot** implementation. A green CI run is not field-use approval. Authoritative depth lives in [`Important Architecture.md`](Important%20Architecture.md); this README is the end-to-end map of what the code actually does.
 
-- **Native Android app (`android/`)**:
-  - CameraX capture with one frame in flight, thumbnail duplicate gating, an explicit
-    camera-obscured prompt, adaptive quality, pose metadata, battery/thermal safeguards and
-    visible foreground-service lifecycle.
-  - TTS/haptic alert rate limiting and clear degraded-mode wording when the server or its
-    detector is unavailable.
-  - No local TFLite/reflex path is bundled. A future fallback needs its own model contract,
-    target-device benchmark and controlled-course evidence before it can be considered.
+---
 
-- **Backend (`backend/`)**:
-  - Authenticated JSON-header + JPEG WebSocket protocol, frame-size validation, a per-session
-    token bucket, strict result expiry, and adaptive quality advice.
-  - Persistence-only two-stage association and conservative alerts: no crossing advice,
-    no approach/closing-speed claim, no numeric distance, and no single-frame urgent alert.
-    Per-device geometry fails closed: only a provisioned, verified calibration profile plus
-    fresh pose and agreeing range estimates can set `range_valid=true`; no numeric distance is
-    spoken.
-  - Aggregate, non-identifying Prometheus metrics for processed/rejected frames, alerts, and
-    inference duration at `/metrics`.
+## End-to-end architecture
 
-- **Operations & Compliance (`docs/`, `infra/`)**:
-  - Zero raw-image retention in the running backend and an explicit consent/privacy process.
-  - **Device Provisioning and Trials**: [Field guide](docs/FIELD_GUIDE.md) defines phone qualification, release gates, and supervised-trial requirements.
-    including a named mobility instructor with stop authority.
+```mermaid
+flowchart TB
+  subgraph Phone["Android phone — AssistService"]
+    Cam["CameraX ImageAnalysis<br/>KEEP_ONLY_LATEST · setTargetRotation"]
+    Gate["CapturePolicy + FrameGate<br/>IMU · duplicate · blur"]
+    Enc["FrameEncoder<br/>NV21 rotate/scale · one JPEG"]
+    WSS["ProtocolClient<br/>1 in-flight · 1 pending"]
+    Alert["AlertManager<br/>TTS · haptic · freshness"]
+    Cam --> Gate --> Enc --> WSS
+    WSS --> Alert
+  end
 
-*(Note: Ultralytics YOLO weights are licensed under AGPL-3.0. For non-open-source deployments, enterprise licensing or alternative Apache-2.0 models are required).*
+  subgraph Edge["TLS edge"]
+    Proxy["Caddy / reverse proxy · WSS"]
+  end
+
+  subgraph Control["Control plane — FastAPI"]
+    Sess["/v1/session<br/>JWT · rate limit · validate"]
+    VS["VisionService<br/>detect · track · score · policy"]
+    Persist["Background record_alert<br/>never blocks WS reply"]
+    DB[("PostgreSQL / SQLite<br/>alerts · devices · no raw frames")]
+    Sess --> VS --> Persist --> DB
+  end
+
+  subgraph GPU["Private GPU worker — optional"]
+    Infer["POST /v1/infer<br/>raw image/jpeg + HMAC headers"]
+    YOLO["Ultralytics / noop detector"]
+    Infer --> YOLO
+  end
+
+  WSS <-->|"JSON frame header + binary JPEG"| Proxy
+  Proxy --> Sess
+  VS -->|"RemoteWorkerDetector<br/>signed JPEG body"| Infer
+  Infer -->|"detections JSON"| VS
+  VS -->|"result + optional quality"| Sess
+```
+
+### Frame-to-ear path (implemented)
+
+| Step | Code | Behaviour |
+|---:|---|---|
+| 1 | `AssistService` | Visible Start → camera foreground `LifecycleService`; Stop is explicit (`START_NOT_STICKY`). Watchdog may **prompt**, never silently restart the camera. |
+| 2 | `ImageAnalysis` | Latest frame only; `setTargetRotation` prefers already-oriented buffers. |
+| 3 | `FrameGate` / `CapturePolicy` | Motion, duplicate, blur gates; periodic sample so stillness cannot imply “safe”. |
+| 4 | `FrameEncoder` | NV21 scratch buffers for rotate/downscale; **no Bitmap** path; one `YuvImage` JPEG. |
+| 5 | `ProtocolClient` | JSON `frame` header + binary JPEG over one authenticated socket; 1 in-flight + 1 replaceable pending. |
+| 6 | `VisionService.analyze` | Detector (noop / ultralytics / remote) → `SimpleTracker` → `HazardScorer` → `AlertPolicy`. Late frames skip scoring so cooldowns are not burned. |
+| 7 | Persist | `_schedule_record_alert` fire-and-forget; phone gets the hazard **before** DB commit. |
+| 8 | `AlertManager` | Phone-local freshness (≤500 ms normal, ≤250 ms urgent S1); TTS/haptic; never invents approach/cross language. |
+
+Default detector is `DETECTOR=noop` until licensed weights and release gates exist.
+
+---
 
 ## Repository layout
 
-| Path | Purpose |
+| Path | Role |
 |---|---|
-| `android/` | Universal Android Kotlin APK; API 28–36 is release-tested, API 26–27 compatibility-only; validate each donated phone before issue |
-| `backend/` | FastAPI service, conservative IoU association, and geometry-gated hazard scorer |
-| `infra/` | PostgreSQL, API and optional Caddy/TLS deployment |
-| `docs/` | Wire protocol, privacy policies, provisioning, and trial protocols |
-| `scripts/` | Backend test/run and token provisioning helpers |
-| `Important Architecture.md` | Authoritative end-to-end product, safety, and architecture boundary |
-| `NOT_NOW.md` | Deferred device-agnostic features (GPS memory, looming detector, foveated upload) |
+| `android/` | Kotlin app: CameraX, NV21 encode, WSS client, TTS/haptics, watchdog |
+| `backend/akshrava_backend/` | FastAPI control plane, vision policy, optional GPU worker |
+| `infra/` | Compose profiles: `control-plane`, `gpu-worker`, edge, monitoring |
+| `terraform/` | GCP IaC (VPC, Cloud Run app, Cloud SQL, Redis, secrets, storage) |
+| `docs/` | Protocol, ops, privacy, field guide, Android matrix |
+| `scripts/` | `verify_phases.sh`, backend run/test, token minting |
+| `Important Architecture.md` | Full product / safety / release boundary |
+| `NOT_NOW.md` | Explicit non-goals (GPS memory, looming, foveated upload, …) |
 
-## Run locally
+---
+
+## Wire contract (phone ↔ control plane)
+
+Production: `wss://HOST/v1/session` with `Authorization: Bearer <device JWT>`.
+
+1. Server → `ready` (`max_in_flight: 1`, `vision_enabled`).
+2. Client → JSON `frame` header, then one binary JPEG.
+3. Server → `result` (optional `quality`, optional `look_summary` for priority look).
+
+```json
+{
+  "type": "frame",
+  "id": 841,
+  "capture_mono_ms": 93211455,
+  "w": 640,
+  "h": 480,
+  "jpeg_bytes": 61423,
+  "camera_calibration_id": "pilot-phone-r0",
+  "pitch_cdeg": -1180,
+  "roll_cdeg": 90,
+  "pose_age_ms": 12,
+  "mode": "normal",
+  "priority": false
+}
+```
+
+`capture_mono_ms` is **phone elapsedRealtime**. The phone owns staleness; the server does not compare clocks. Full rules: [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
+
+### Control plane ↔ GPU worker
+
+`RemoteWorkerDetector` posts the **raw JPEG body** (not base64):
+
+```http
+POST /v1/infer
+Content-Type: image/jpeg
+X-Akshrava-Timestamp: <unix>
+X-Akshrava-Nonce: <urlsafe>
+X-Akshrava-Signature: HMAC-SHA256(secret, ts.nonce.body)
+```
+
+Legacy JSON/`image_b64` bodies are rejected (`415`). Nonces are claimed in Redis for replica-safe replay protection.
+
+---
+
+## Performance invariants (in code)
+
+| Concern | Implementation |
+|---|---|
+| DB must not delay alerts | `VisionService._schedule_record_alert` + `drain_persists` / `shutdown_async` before engine dispose |
+| Phone GC / frame drops | `FrameEncoder` NV21 rotate/scale; CameraX target rotation first |
+| Worker link CPU/bytes | Raw JPEG + HMAC headers; no base64 on the hot path |
+| Local model GIL | Bounded `ThreadPoolExecutor`; Ultralytics stays `requires_serial_execution`; production scales via **remote** workers (not `ProcessPoolExecutor`) |
+| Freshness | Drop late work; never build a catch-up queue of frames |
+
+---
+
+## Run locally (bench)
 
 ```bash
+# Backend venv + tests
 ./scripts/test_backend.sh
 ./scripts/run_backend_dev.sh
+# → http://127.0.0.1:8000/healthz
+# Dev WebSocket: DEV_AUTH_BYPASS / dev-device-token only for local debug
 ```
 
-Then visit `http://127.0.0.1:8000/healthz`. The development WebSocket accepts only `dev-device-token`; pilot/production require RS256 signed JWTs with the public key mounted on the API. Note: `python3` must be used if `python` is unavailable in your environment.
-
-## Build the Android app
-
-Install Android SDK Platform 36 and Build Tools 36, then set `ANDROID_HOME` (or create an untracked `android/local.properties` with `sdk.dir=/path/to/sdk`).
+```bash
+# Full verification baseline (noop detector + ruff when installed)
+./scripts/verify_phases.sh
+```
 
 ```bash
+# Android debug APK (SDK Platform/Build-Tools 36; set ANDROID_HOME)
 cd android
 ./gradlew :app:assembleDebug
+./gradlew :app:testDebugUnitTest
 ```
 
-The application only accepts `wss://` endpoints in release builds. Debug builds accept `ws://` for a local emulator/device test. A visible user action starts the foreground camera service; it cannot, and must not, silently start from boot/background.
+Release builds accept **only** `wss://`. Debug may use `ws://` for emulator/device. Assistance starts only from a visible user action — never from boot or a silent receiver.
 
-The release matrix covers Android 9 through Android 16 (API 28–36), including 12L. See
-[Android compatibility](docs/ANDROID.md) for the exact automated and physical-device
-evidence required for each release.
-
-## Tests
+### Optional Compose stack
 
 ```bash
-./scripts/test_backend.sh
-cd android && ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug
+cd infra
+# Copy and fill .env (Postgres/Redis secrets, JWT material, worker secret, …)
+docker compose --profile control-plane up -d
+# GPU worker profile when DETECTOR=remote and weights are provisioned:
+# docker compose --profile gpu-worker up -d
 ```
 
-The Android module is configured and includes the Gradle wrapper. The first local Android build
-may prompt for Android SDK Platform 36 and Build Tools 36 licences; CI installs the same components
-before it runs the Android unit tests and builds the APK.
+See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) and [`docs/OPERATIONS.md`](docs/OPERATIONS.md). Terraform under `terraform/` targets GCP when you leave the laptop bench.
 
-## Important implementation boundary
+---
 
-No real detector, local fallback model, production TLS domain, JWT secret, device calibration, or
-field-validation evidence can responsibly be invented in source code. The supplied code makes all
-of those integrations explicit and fails closed where possible. Follow [the operator runbook](docs/OPERATIONS.md) before moving beyond a bench test.
+## Alert vocabulary (allowed)
 
-The required code, device, model and field sign-offs are collected in the [field guide](docs/FIELD_GUIDE.md). Do not treat a green CI build as a field-use approval.
+| Situation | Spoken / keyed response |
+|---|---|
+| Stable validated central obstruction | `Obstacle ahead` (+ haptic) |
+| Stable nearby lateral vehicle | `Vehicle nearby, left/right` |
+| Priority look | `look_summary` for this frame (cooldowns skipped; still no approach/cross) |
+| Camera blocked / link down / no detector | Explicit status (`Camera view unclear`, `Vision assistance unavailable`, …) |
+
+Never: numeric metres, “approaching”, “safe to cross”, “path clear”, continuous scene narration.
+
+---
+
+## Privacy
+
+- Normal frames stay in RAM and are discarded. No raw video/audio/GPS trail by default.
+- Persisted rows are alert/audit metadata only (`record_alert`), not JPEGs.
+- Consent and retention: [`docs/PRIVACY.md`](docs/PRIVACY.md).
+
+---
+
+## Release and field use
+
+| Gate | Minimum |
+|---|---|
+| Bench | `./scripts/verify_phases.sh` green; protocol + policy tests |
+| One-phone | Controlled-course recall; ≤500 ms spoken age; no silent service death |
+| Supervised trial | Named mobility instructor with stop authority; Tier-A phone; consent |
+| Pilot | Approved device inventory, ops runbook, model SHA pin, privacy review |
+
+Checklist: [`docs/FIELD_GUIDE.md`](docs/FIELD_GUIDE.md) · [`docs/RELEASE_AND_VERIFICATION.md`](docs/RELEASE_AND_VERIFICATION.md).
+
+**Licensing note:** Ultralytics YOLO weights are AGPL-3.0 unless you have an enterprise licence. Do not enable `DETECTOR=ultralytics` / remote YOLO in a closed deployment without a licence decision.
+
+---
+
+## Primary references
+
+| Doc | Contents |
+|---|---|
+| [`Important Architecture.md`](Important%20Architecture.md) | Full E2E architecture, timing budgets, model governance |
+| [`docs/PROTOCOL.md`](docs/PROTOCOL.md) | WebSocket + look / freshness invariants |
+| [`docs/ANDROID.md`](docs/ANDROID.md) | API matrix and resource policy |
+| [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | Deploy, secrets, failure handling |
+| [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | Compose / edge / worker layout |
+| [`NOT_NOW.md`](NOT_NOW.md) | Deferred features |

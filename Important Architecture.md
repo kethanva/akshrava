@@ -27,9 +27,9 @@ Silence never means safety. The app must state `Camera view unclear`, `Limited a
 ```mermaid
 flowchart LR
   subgraph Phone["Worn Android phone — current baseline"]
-    Camera["CameraX / Camera2 fallback\n640 px analysis"] --> Gate["IMU, duplicate and blur gate\nlatest frame only"]
-    Gate --> Encode["Adaptive JPEG encoder\n1 in-flight + 1 replaceable pending"]
-    Encode --> Socket["Authenticated WSS client\nfreshness and reconnect control"]
+    Camera["CameraX ImageAnalysis\nKEEP_ONLY_LATEST · target rotation"] --> Gate["IMU, duplicate and blur gate\nlatest frame only"]
+    Gate --> Encode["FrameEncoder NV21 path\nrotate/scale · one JPEG · no Bitmap"]
+    Encode --> Socket["Authenticated WSS client\n1 in-flight + 1 pending"]
     Result["Result validation\nexpiry, dedupe, state handling"] --> Alert["AlertManager\noffline TTS, haptic, headset"]
     Socket --> Result
     Sensors["Pose, thermal, battery, network"] --> Gate
@@ -37,23 +37,24 @@ flowchart LR
   end
   Socket <-->|"JSON header + JPEG / JSON result"| Edge["TLS reverse proxy"]
   Edge --> Session["FastAPI session/ingest\nauth, limits, validation"]
-  Session --> Worker["Bounded async inference worker\ncurrent: noop; target: approved ONNX GPU model"]
-  Worker --> Track["Per-device association\ngeometry validity only"]
-  Track --> Score["Hazard scorer and response composer"]
-  Score --> Session
-  Session --> Store[("PostgreSQL/SQLite\nusers, devices, config, audit\nno raw frames")]
+  Session --> Vision["VisionService\ndetect · track · score · policy"]
+  Vision --> Remote["Optional RemoteWorkerDetector\nraw signed image/jpeg"]
+  Remote --> GPU["Private GPU /v1/infer\nHMAC + Redis nonce"]
+  Vision --> Persist["Background record_alert\noff the WS reply path"]
+  Persist --> Store[("PostgreSQL/SQLite\nusers, devices, config, audit\nno raw frames")]
+  Vision --> Session
   Metrics["Prometheus/Grafana\naggregate operational metrics"] --- Session
 ```
 
-The architecture is intentionally a freshness pipeline, not a video system. Raw frames are processed in memory, never queued to catch up, and are not retained in normal operation. A consented diagnostic sample is a separate privacy-controlled workflow.
+The architecture is intentionally a freshness pipeline, not a video system. Raw frames are processed in memory, never queued to catch up, and are not retained in normal operation. A consented diagnostic sample is a separate privacy-controlled workflow. The repository [`README.md`](README.md) is the short end-to-end map of these code paths.
 
 ### Frame-to-ear lifecycle
 
 1. The user visibly starts assistance from the accessible Android activity. The foreground service owns the camera, so locking the screen does not transfer ownership back to the activity.
-2. `ImageAnalysis` keeps only the latest frame. The phone uses motion, thumbnail-difference and blur gates, but periodically samples even when still so gating cannot declare a scene safe.
-3. It rotates/downscales and JPEG-encodes a 640 px image. Normal walking is about 1 FPS, stillness about 0.2 FPS, and a short confirmed-hazard re-check may reach 2 FPS; this is freshness confirmation, never collision sensing.
+2. `ImageAnalysis` keeps only the latest frame and asks CameraX for the current display rotation. The phone uses motion, thumbnail-difference and blur gates, but periodically samples even when still so gating cannot declare a scene safe.
+3. `FrameEncoder` rotates/downscales in NV21 scratch buffers (no Bitmap allocations) and JPEG-encodes a ≤640 px image. Normal walking is about 1 FPS, stillness about 0.2 FPS, and a short confirmed-hazard re-check may reach 2 FPS; this is freshness confirmation, never collision sensing.
 4. The phone sends a JSON frame header immediately followed by binary JPEG over one authenticated WebSocket. It permits one in-flight request and one replaceable pending frame; it drops old work rather than building a backlog.
-5. The backend authenticates, validates size/timing, rate-limits, runs the configured detector, associates tracks per device, applies conservative hazard policy, and returns compact JSON plus optional quality guidance.
+5. The backend authenticates, validates size/timing, rate-limits, runs the configured detector (`noop` / local Ultralytics / remote HMAC worker), associates tracks per session, applies conservative hazard policy, and returns compact JSON plus optional quality guidance. Alert rows are scheduled with `_schedule_record_alert` so PostgreSQL latency cannot delay the phone reply; `shutdown_async` drains those tasks before the DB engine is disposed.
 6. The phone rejects stale or mismatched results, deduplicates them, arbitrates speech/haptics, and plays short offline English/Hindi prompts through a single-ear headset where possible.
 
 ## 3. Timing, freshness, and backpressure
@@ -99,7 +100,7 @@ Before decode, enforce image-size and supported-dimension limits (200 KB default
 
 Use 25 Hz IMU sensing while active, a rolling stillness decision, 160×120 thumbnail difference and a per-device blur threshold. A blurred/obscured image is still sampled periodically so the app can say the camera is obscured. Stabilised nearby tracks may temporarily increase sampling for confirmation. Do not exceed 3 FPS in this cloud architecture.
 
-JPEG is the baseline: target 640 px/Q60 and roughly 45–90 KB, with a lower-quality 512 px/Q45 ladder for poor uplink. Do not substitute base64 (adds bytes/allocations) or continuous HEVC/video (creates keyframe, decode and backlog problems). Test actual data use, heat and battery per device; estimates are not a release claim.
+JPEG is the baseline: target 640 px/Q60 and roughly 45–90 KB, with a lower-quality 512 px/Q45 ladder for poor uplink. Encoding stays in NV21 (`FrameEncoder`) so rotation/downscale does not allocate Bitmaps on the analysis thread. Do not substitute base64 on the phone↔server or control↔worker links (adds bytes/CPU) or continuous HEVC/video (creates keyframe, decode and backlog problems). Test actual data use, heat and battery per device; estimates are not a release claim.
 
 At low battery, thermal warning, hot battery, blocked view, dead service or failed network, reduce/stop assistance and speak the relevant state once. Never charge or issue a visibly hot or swollen donated phone. For OEM power management, document exact manual settings for each model and validate a locked-screen 15-minute walk after reboot. Auto-start tricks are prohibited.
 
@@ -217,7 +218,7 @@ Before Phase 1, name the NGO safety partner and stop authority; choose one famil
 
 ## 12. Primary implementation references
 
-- [README.md](README.md) — repository boundary and local setup.
+- [README.md](README.md) — end-to-end architecture map, code paths, local setup and verification.
 - [docs/PROTOCOL.md](docs/PROTOCOL.md) — exact WebSocket contract and enforced invariants.
 - [docs/ANDROID.md](docs/ANDROID.md) — Android compatibility and resource policy.
 - [docs/OPERATIONS.md](docs/OPERATIONS.md) — deployment, model activation and failure handling.
