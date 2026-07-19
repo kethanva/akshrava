@@ -1,0 +1,25 @@
+<resources>
+    <string name="app_name">अक्षरव</string>
+    <string name="notification_channel_name">सहायता सेवा</string>
+    <string name="notification_title">अक्षरव सहायता सक्रिय</string>
+    <string name="notification_text">कैमरा सहायता रोकने के लिए Stop दबाएँ।</string>
+    <string name="action_stop">रोकें</string>
+    <string name="action_start">सहायता शुरू करें</string>
+    <string name="watchdog_channel_name">सहायता निगरानी</string>
+    <string name="watchdog_channel_desc">अगर फोन ने कैमरा सहायता बंद की हो तो सूचित करता है।</string>
+    <string name="watchdog_title">अक्षरव सहायता बंद हो गई</string>
+    <string name="watchdog_text">अक्षरव खोलें और सहायता शुरू करें दबाएँ। छड़ी का उपयोग जारी रखें।</string>
+    <string name="hint_endpoint">सुरक्षित WebSocket पता</string>
+    <string name="hint_token">डिवाइस टोकन</string>
+    <string name="hint_calibration">कैलिब्रेशन आईडी</string>
+    <string name="hint_language">अलर्ट भाषा</string>
+    <string name="language_english">अंग्रेज़ी (भारत)</string>
+    <string name="language_hindi">हिन्दी</string>
+    <string name="status_configure">स्वयंसेवक के साथ एक बार सेट करें, फिर सहायता शुरू करें दबाएँ।</string>
+    <string name="status_stopped">सहायता बंद।</string>
+    <string name="status_starting">सहायता शुरू हो रही है। अब स्क्रीन लॉक कर सकते हैं।</string>
+    <string name="status_need_provisioning">स्वयंसेवक को WSS पता, डिवाइस टोकन और कैलिब्रेशन आईडी भरना होगा।</string>
+    <string name="status_camera_permission">सहायता शुरू करने के लिए कैमरा अनुमति आवश्यक है।</string>
+    <string name="status_notification_permission">दिखाई देने वाले नियंत्रणों के लिए सूचना अनुमति आवश्यक है।</string>
+    <string name="status_keystore_failed">डिवाइस Keystore उपलब्ध नहीं। स्वयंसेवक के साथ टोकन फिर से सेट करें; सादे पाठ में नहीं रखा गया।</string>
+</resources>

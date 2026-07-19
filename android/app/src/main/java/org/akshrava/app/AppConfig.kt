@@ -37,13 +37,13 @@ object AppConfigStore {
         )
     }
 
-    fun save(context: Context, config: AppConfig) {
+    fun save(context: Context, config: AppConfig): Boolean {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString(ENDPOINT, config.endpoint.trim())
             .putString(LANGUAGE, config.language)
             .putString(CALIBRATION, config.calibrationId.trim())
             .apply()
-        saveToken(context, config.deviceToken.trim())
+        return saveToken(context, config.deviceToken.trim())
     }
 
     private fun loadToken(context: Context): String {
@@ -70,13 +70,14 @@ object AppConfigStore {
         return legacy
     }
 
-    private fun saveToken(context: Context, token: String) {
+    /** Returns false when the Android Keystore cannot protect the bearer token. */
+    private fun saveToken(context: Context, token: String): Boolean {
         val editor = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(TOKEN)
         if (token.isBlank()) {
             editor.remove(ENCRYPTED_TOKEN).remove(TOKEN_IV).apply()
-            return
+            return true
         }
-        try {
+        return try {
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE, tokenKey())
             val ciphertext = cipher.doFinal(token.toByteArray(Charsets.UTF_8))
@@ -84,10 +85,12 @@ object AppConfigStore {
                 .putString(ENCRYPTED_TOKEN, Base64.encodeToString(ciphertext, Base64.NO_WRAP))
                 .putString(TOKEN_IV, Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
                 .apply()
+            true
         } catch (_: Exception) {
             // An unavailable Android Keystore is a provisioning failure, not a reason to retain
             // a bearer token in plaintext storage.
             editor.remove(ENCRYPTED_TOKEN).remove(TOKEN_IV).apply()
+            false
         }
     }
 

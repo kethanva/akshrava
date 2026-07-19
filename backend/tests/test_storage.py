@@ -82,6 +82,22 @@ async def test_geometry_profile_is_unavailable_until_explicitly_verified(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_upsert_calibration_profile_requires_verified_flag_for_geometry(tmp_path):
+    store = Store("sqlite+aiosqlite:///%s" % (tmp_path / "upsert-profile.db"))
+    await store.initialize()
+    try:
+        await store.upsert_calibration_profile("pilot-r0", 520.0, 1.4, verified=False)
+        assert await store.geometry_profile("pilot-r0") is None
+        await store.upsert_calibration_profile("pilot-r0", 520.0, 1.4, verified=True)
+        profile = await store.geometry_profile("pilot-r0")
+        assert profile is not None
+        assert profile.focal_px == 520.0
+        assert profile.camera_height_m == 1.4
+    finally:
+        await store.engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_revoked_device_is_denied_by_the_connection_check(tmp_path):
     store = Store("sqlite+aiosqlite:///%s" % (tmp_path / "revocation.db"))
     await store.initialize()

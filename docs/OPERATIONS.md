@@ -7,6 +7,16 @@
 3. Provision only a Tier-A device: camera, mount, offline TTS, locked-screen service survival, battery/heat and carrier freshness must pass.
 4. Configure `wss://your-domain/v1/session`, token and calibration ID while the phone UI is visible. The user must press Start assistance; Android does not permit a silent background camera start.
 5. Use a cane/guide and a named mobility instructor for every field session. No independent street use.
+6. After controlled-course mount verification, upsert geometry so `range_valid` can leave fail-closed:
+
+```bash
+export DATABASE_URL='postgresql+asyncpg://…'
+# From repo root with backend deps available:
+PYTHONPATH=backend python scripts/upsert_calibration_profile.py pilot-phone-r0 \
+  --focal-px 520 --camera-height-m 1.35 --confirm-verified
+```
+
+Without `--confirm-verified` the row stays fail-closed (`geometry_profile` returns null).
 
 ## Local backend
 

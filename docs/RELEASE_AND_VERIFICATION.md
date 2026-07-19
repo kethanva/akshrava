@@ -20,15 +20,17 @@ cd android && ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug :a
 ```
 
 The current backend suite verifies protocol, freshness, priority look, geometry gating, storage,
-distributed coordination, migration, remote-worker, authentication, and fail-closed contracts.
+distributed coordination, migration, remote-worker, authentication, Phase-0 synthetic policy
+replay (`datasets/phase0/`), and fail-closed contracts.
 The Android unit/build gate verifies protocol freshness handling, watchdog timing, frame gating,
 capture cadence policy, API compatibility constants, and debug/release APK assembly. It does not
 prove street perception, mount calibration, CUDA performance, carrier handover, or field safety.
 
 Before a deployment, run `cloud_preflight.sh .env` (and `--field` / `--gpu-worker` where relevant),
-rehearse Alembic upgrade/rollback against a restored backup, and validate readiness, metrics, mTLS,
-worker failover, and device revocation. Complete every item in [FIELD_GUIDE.md](FIELD_GUIDE.md)
-before treating a GitHub release as a field release.
+or `./scripts/gcp_preflight.sh` for the Terraform stack. Rehearse Alembic upgrade/rollback against
+a restored backup, and validate readiness, metrics, mTLS, worker failover, and device revocation.
+Complete every item in [FIELD_GUIDE.md](FIELD_GUIDE.md) before treating a GitHub release as a field
+release.
 
 ## Verification boundary
 

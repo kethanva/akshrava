@@ -1,0 +1,26 @@
+{
+  "description": "Phase-0 policy replay fixtures. Synthetic detections only — not street evidence.",
+  "events": [
+    {
+      "id": 1,
+      "label": "person",
+      "confidence": 0.91,
+      "box": [220, 100, 430, 460],
+      "expect_message_key_after_hits": "obstacle_ahead"
+    },
+    {
+      "id": 2,
+      "label": "car",
+      "confidence": 0.88,
+      "box": [40, 180, 220, 360],
+      "expect_message_key_after_hits": "vehicle_nearby"
+    },
+    {
+      "id": 3,
+      "label": "person",
+      "confidence": 0.4,
+      "box": [250, 120, 400, 440],
+      "expect_silent": true
+    }
+  ]
+}

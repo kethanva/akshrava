@@ -131,6 +131,34 @@ class Store:
                 return None
             return GeometryProfile(record.calibration_id, record.focal_px, record.camera_height_m)
 
+    async def upsert_calibration_profile(
+        self,
+        calibration_id: str,
+        focal_px: float,
+        camera_height_m: float,
+        *,
+        verified: bool = False,
+    ) -> None:
+        """Create or update a mount profile. verified=True only after controlled-course sign-off."""
+        async with self.sessions() as session:
+            record = await session.get(CalibrationProfileRecord, calibration_id)
+            if record is None:
+                session.add(
+                    CalibrationProfileRecord(
+                        calibration_id=calibration_id,
+                        focal_px=focal_px,
+                        camera_height_m=camera_height_m,
+                        verified=verified,
+                        updated_at=datetime.now(timezone.utc),
+                    )
+                )
+            else:
+                record.focal_px = focal_px
+                record.camera_height_m = camera_height_m
+                record.verified = verified
+                record.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+
     async def revoke_device(self, device_id: str) -> bool:
         """Deny a device immediately without retaining any image or frame data."""
         async with self.sessions() as session:

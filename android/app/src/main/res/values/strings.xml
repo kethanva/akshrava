@@ -9,4 +9,17 @@
     <string name="watchdog_channel_desc">Alerts you if camera assistance was stopped by the phone.</string>
     <string name="watchdog_title">Akshrava assistance stopped</string>
     <string name="watchdog_text">Open Akshrava and press Start assistance again. Keep using your cane.</string>
+    <string name="hint_endpoint">Secure WebSocket endpoint</string>
+    <string name="hint_token">Device token</string>
+    <string name="hint_calibration">Calibration ID</string>
+    <string name="hint_language">Alert language</string>
+    <string name="language_english">English (India)</string>
+    <string name="language_hindi">Hindi</string>
+    <string name="status_configure">Configure once with a volunteer, then press Start assistance.</string>
+    <string name="status_stopped">Assistance stopped.</string>
+    <string name="status_starting">Starting assistance. You can now lock the screen.</string>
+    <string name="status_need_provisioning">A volunteer must enter a WSS endpoint, device token, and calibration ID.</string>
+    <string name="status_camera_permission">Camera permission is required to start assistance.</string>
+    <string name="status_notification_permission">Notification permission is required for visible assistance controls.</string>
+    <string name="status_keystore_failed">Device Keystore unavailable. Re-provision the token with a volunteer; it was not saved in plaintext.</string>
 </resources>

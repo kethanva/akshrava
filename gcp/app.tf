@@ -239,6 +239,34 @@ resource "google_cloud_run_v2_service" "api" {
         value = "false"
       }
       env {
+        name  = "ALERT_MAX_AGE_MS"
+        value = "500"
+      }
+      env {
+        name  = "MIN_FRAME_INTERVAL_MS"
+        value = "200"
+      }
+      env {
+        name  = "ALERT_RETENTION_DAYS"
+        value = "30"
+      }
+      env {
+        name  = "MAX_ACTIVE_SESSIONS"
+        value = "200"
+      }
+      env {
+        name  = "INFERENCE_TIMEOUT_MS"
+        value = "800"
+      }
+      env {
+        name  = "INFERENCE_EXECUTOR_WORKERS"
+        value = "2"
+      }
+      env {
+        name  = "CLOUD_FALLBACK_PROVIDER"
+        value = "none"
+      }
+      env {
         name = "DATABASE_URL"
         value_source {
           secret_key_ref {

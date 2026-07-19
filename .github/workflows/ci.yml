@@ -20,15 +20,14 @@ jobs:
         with:
           python-version: "3.11"
       - run: python -m pip install '.[dev]' pip-audit
-      - run: pytest -q
-      - run: ruff check akshrava_backend tests
+      - run: ../scripts/verify_phases.sh
       - run: DATABASE_URL=sqlite:///./migration-check.db alembic upgrade head
       - run: python -m pip check
       - run: pip-audit
 
   release-gate:
     runs-on: ubuntu-latest
-    needs: [backend, deployment-config, android]
+    needs: [backend, deployment-config, gcp-iac, android]
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - run: echo "Automated checks passed. Human safety, model, device and supervised-trial gates remain mandatory."
@@ -41,6 +40,16 @@ jobs:
       - run: POSTGRES_PASSWORD=test-password-with-at-least-32-characters JWT_SECRET=test-secret-with-at-least-32-characters DOMAIN=example.org GRAFANA_PASSWORD=test-grafana-password-with-at-least-32-chars REDIS_PASSWORD=test-redis-password-with-at-least-32-chars docker compose -f infra/docker-compose.yml --profile gpu-worker config --quiet
       - run: ./scripts/test_cloud_preflight.sh
       - run: docker build --build-arg INSTALL_YOLO=false -t akshrava-api-ci backend
+
+  gcp-iac:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.5.7"
+          terraform_wrapper: false
+      - run: ./scripts/gcp_preflight.sh
 
   android:
     runs-on: ubuntu-latest

@@ -186,19 +186,37 @@ Run the repository verification baseline with:
 
 ```bash
 ./scripts/verify_phases.sh
-# equivalent: ./scripts/test_backend.sh  (also creates .venv / installs deps)
+# equivalent first-time setup: ./scripts/test_backend.sh
+./scripts/gcp_preflight.sh   # when changing gcp/
 ```
 
-This runs the backend pytest suite under `DETECTOR=noop` (and ruff when installed). There is no separate Phase-0 fixture-replay binary or labelled regression-clip suite in this repository yet. A green test suite proves only the tested implementation; it is not field-use approval. Run the backend tests and static checks in CI, and validate the Android build on the intended SDK/device. See [docs/RELEASE_AND_VERIFICATION.md](docs/RELEASE_AND_VERIFICATION.md).
+`verify_phases.sh` creates `backend/.venv` if needed, runs the full pytest suite (including
+**Phase-0 policy replay** over ≥50 synthetic events in `datasets/phase0/`), and ruff when
+installed. That replay proves fail-closed speech contracts (`motion_evidence`, no approach/cross
+language)—**not** street perception. A green suite is not field-use approval. CI runs the same
+backend gate, Compose config, `gcp_preflight`, and Android unit/APK assembly. See
+[docs/RELEASE_AND_VERIFICATION.md](docs/RELEASE_AND_VERIFICATION.md).
 
-| Gate | Minimum evidence before progressing |
+| Gate | Minimum evidence before progressing | In-repo support today |
+|---|---|---|
+| Bench → one-phone integration | Policy tests + Phase-0 replay (≥50 synthetic events); every spoken output carries age; no result older than 500 ms is spoken | `verify_phases.sh`, `datasets/phase0/`, Android assemble |
+| One phone → field-survival work | 50 controlled-course repetitions per declared static class; ≥45/50 alerts in budget; zero unannounced service deaths; mute/stop without sight | Field evidence (not CI); calibration upsert via `scripts/upsert_calibration_profile.py` |
+| Survival → supervised participant trial | Three 45-minute device/carrier sessions; state announcements once each; mobility instructor signs | Process in [FIELD_GUIDE.md](docs/FIELD_GUIDE.md) |
+| Participant trial → small pilot | 3–5 guided sessions, no attributable injury, regressions triaged, alerts understandable | Process + ops runbooks |
+
+Operator scripts that close the documented working path:
+
+| Script | Purpose |
 |---|---|
-| Bench → one-phone integration | 50 replayed in-scope events, policy tests pass, every output has age, no result older than 500 ms is spoken |
-| One phone → field-survival work | 50 controlled-course repetitions per declared static class; at least 45/50 event-level alerts begin inside the budget; zero unannounced service deaths; user can mute/stop without sight |
-| Survival → supervised participant trial | Three 45-minute device/carrier sessions; network, recovery, blocked camera, heat and battery states each announce exactly once; mobility instructor signs the protocol |
-| Participant trial → small pilot | 3–5 guided sessions, no injury/near fall attributable to the system, every deviation triaged into regressions, participants find alerts understandable and not overwhelming |
+| `scripts/upsert_calibration_profile.py` | Insert/update mount geometry; `--confirm-verified` after course sign-off |
+| `scripts/mint_device_token_gcp.sh` | Mint RS256 device JWT from Secret Manager private key |
+| `scripts/build_gcp_images.sh` | Build/push API (with GCP extras) + GPU worker images |
+| `scripts/install_worker_weights.sh` | Copy + SHA-verify YOLO weights onto the GPU VM |
+| `scripts/gcp_preflight.sh` | `terraform fmt/validate` + remote-detector SHA gate |
 
-The test pyramid is unit policy/state tests; a consented, route-diverse replay suite; controlled closed-course obstacles with no moving vehicles; then daylight, familiar-route sessions with a cane, a guide at arm’s reach, one operator and predefined stop points. A blindfolded developer is not a mobility-validation proxy.
+The test pyramid is unit policy/state tests; Phase-0 synthetic replay; controlled closed-course
+obstacles with no moving vehicles; then daylight guided sessions. A blindfolded developer is not
+a mobility-validation proxy.
 
 Stop a session after an unexpected urgent miss, repeated stale alerts, unannounced service death, overheating, a fall/near fall or participant distress. The guide—not the app—intervenes for danger. Before each trial, explain the safety boundary orally, demonstrate mute/stop, check mount/battery/network and confirm consent. Afterward, collect oral feedback on helpful, late, wrong, frequent and audible alerts and read it back for confirmation.
 
@@ -222,4 +240,8 @@ Before Phase 1, name the NGO safety partner and stop authority; choose one famil
 - [docs/PROTOCOL.md](docs/PROTOCOL.md) — exact WebSocket contract and enforced invariants.
 - [docs/ANDROID.md](docs/ANDROID.md) — Android compatibility and resource policy.
 - [docs/OPERATIONS.md](docs/OPERATIONS.md) — deployment, model activation and failure handling.
+- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — Compose and GCP Cloud Run / private GPU worker deploy.
 - [docs/FIELD_GUIDE.md](docs/FIELD_GUIDE.md) — release and participant safeguards.
+- [gcp/](gcp/) — Terraform for Cloud Run API, SQL, Redis, mTLS worker, secrets, Artifact Registry.
+- [datasets/phase0/](datasets/phase0/) — synthetic Phase-0 policy replay fixtures (not street evidence).
+- [NOT_NOW.md](NOT_NOW.md) — deferred scope guard.

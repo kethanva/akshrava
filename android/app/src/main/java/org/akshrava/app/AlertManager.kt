@@ -203,6 +203,7 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
         "vehicle_nearby" -> if (isHindi) {
             when (bearing) { "left" -> "वाहन बाईं ओर है"; "right" -> "वाहन दाईं ओर है"; else -> "वाहन आगे है" }
         } else "Vehicle nearby, $bearing"
+        "busy_road" -> if (isHindi) "व्यस्त सड़क, सावधान" else "Busy road, careful"
         else -> if (isHindi) "सहायता सीमित है" else "Assistance is limited"
     }
 

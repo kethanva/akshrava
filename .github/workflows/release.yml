@@ -89,8 +89,29 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          python - <<'PY'
+          import json, os, subprocess
+          tag = os.environ["GITHUB_REF_NAME"]
+          commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          manifest = {
+              "tag": tag,
+              "commit": commit,
+              "database_schema_revision": "20260719_01",
+              "detector_default": "noop",
+              "yolo_weights_sha256": os.environ.get("YOLO_WEIGHTS_SHA256", ""),
+              "artifacts": [
+                  "backend wheel under backend/dist/",
+                  "android/app/build/outputs/apk/release/app-release.apk",
+              ],
+              "notes": "Model weights are not published here; pin SHA in gcp/terraform.tfvars before detector=remote.",
+          }
+          with open("release-manifest.json", "w", encoding="utf-8") as handle:
+              json.dump(manifest, handle, indent=2)
+              handle.write("\n")
+          PY
           gh release create "$GITHUB_REF_NAME" \
             --title "Akshrava $GITHUB_REF_NAME" \
             --generate-notes \
             backend/dist/* \
-            android/app/build/outputs/apk/release/app-release.apk
+            android/app/build/outputs/apk/release/app-release.apk \
+            release-manifest.json
