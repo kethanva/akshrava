@@ -73,3 +73,4 @@ class SessionState:
     last_roll_cdeg: Optional[int] = None
     geometry_profile: Optional[GeometryProfile] = None
     language: str = ""
+    diagnostic_consent: bool = False

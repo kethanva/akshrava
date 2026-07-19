@@ -21,6 +21,7 @@ from .rate_limit import FrameRateLimiter
 from .service import VisionService
 from .session_admission import session_admission_for
 from .storage import Store
+from .gcp_storage import GcpDiagnosticStorage
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -79,6 +80,8 @@ session_admission = session_admission_for(
     maximum=settings.max_active_sessions,
     require_distributed=settings.environment == "production",
 )
+gcp_storage = GcpDiagnosticStorage(settings.gcp_diagnostics_bucket)
+
 
 
 @asynccontextmanager
@@ -212,7 +215,12 @@ async def session(websocket: WebSocket):
     session_opened = True
     await websocket.accept()
     metrics.session_opened()
-    state = SessionState(device_id=device_id, trace_prefix=secrets.token_urlsafe(12))
+    consent = websocket.query_params.get("consent", "false").lower() in {"true", "1"}
+    state = SessionState(
+        device_id=device_id,
+        trace_prefix=secrets.token_urlsafe(12),
+        diagnostic_consent=consent,
+    )
     pending_header = None
     discard_next_binary = False
     local_limiter = FrameRateLimiter(NORMAL_FRAME_RATE_PER_SECOND, NORMAL_FRAME_BURST)
@@ -366,6 +374,9 @@ async def session(websocket: WebSocket):
                 if result.get("late_suppressed"):
                     metrics.late_suppressed()
                 await websocket.send_json(result)
+                if state.diagnostic_consent and settings.gcp_diagnostics_bucket:
+                    file_name = f"{device_id}/{header.frame_id}_{header.capture_mono_ms}.jpg"
+                    asyncio.create_task(gcp_storage.upload_frame(file_name, jpeg))
                 
                 await websocket.send_json(quality_for_inference(result["server_inference_ms"]))
             else:
