@@ -11,6 +11,9 @@ class Settings:
     environment: str
     database_url: str
     jwt_secret: str
+    jwt_algorithm: str
+    jwt_public_key_file: str
+    max_active_sessions: int
     detector: str
     yolo_weights: str
     max_image_bytes: int
@@ -28,6 +31,13 @@ class Settings:
     remote_worker_secret: str
     remote_inference_timeout_ms: int
     ready_timeout_ms: int
+    redis_url: str
+    inference_timeout_ms: int
+    inference_executor_workers: int
+    expected_schema_revision: str
+    remote_tls_ca_file: str
+    remote_tls_client_cert_file: str
+    remote_tls_client_key_file: str
 
     @classmethod
     def from_env(cls):
@@ -35,6 +45,9 @@ class Settings:
             environment=os.getenv("AKSHRAVA_ENV", "development").lower(),
             database_url=os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./akshrava.db"),
             jwt_secret=os.getenv("JWT_SECRET", "change-me-before-field-use"),
+            jwt_algorithm=os.getenv("JWT_ALGORITHM", "HS256").upper(),
+            jwt_public_key_file=os.getenv("JWT_PUBLIC_KEY_FILE", "").strip(),
+            max_active_sessions=int(os.getenv("MAX_ACTIVE_SESSIONS", "200")),
             detector=os.getenv("DETECTOR", "noop"),
             yolo_weights=os.getenv("YOLO_WEIGHTS", "yolo11s.pt"),
             max_image_bytes=int(os.getenv("MAX_IMAGE_BYTES", "200000")),
@@ -48,19 +61,34 @@ class Settings:
             aws_region=os.getenv("AWS_REGION", ""),
             azure_vision_endpoint=os.getenv("AZURE_VISION_ENDPOINT", ""),
             azure_vision_key=os.getenv("AZURE_VISION_KEY", ""),
-            remote_inference_url=os.getenv("REMOTE_INFERENCE_URL", "").rstrip("/"),
+            remote_inference_url=os.getenv("REMOTE_INFERENCE_URL", "").strip(),
             remote_worker_secret=os.getenv("REMOTE_WORKER_SECRET", ""),
             remote_inference_timeout_ms=int(os.getenv("REMOTE_INFERENCE_TIMEOUT_MS", "450")),
             ready_timeout_ms=int(os.getenv("READY_TIMEOUT_MS", "2000")),
+            redis_url=os.getenv("REDIS_URL", "").strip(),
+            inference_timeout_ms=int(os.getenv("INFERENCE_TIMEOUT_MS", "800")),
+            inference_executor_workers=int(os.getenv("INFERENCE_EXECUTOR_WORKERS", "2")),
+            expected_schema_revision=os.getenv("DATABASE_SCHEMA_REVISION", "20260719_01").strip(),
+            remote_tls_ca_file=os.getenv("REMOTE_TLS_CA_FILE", "").strip(),
+            remote_tls_client_cert_file=os.getenv("REMOTE_TLS_CLIENT_CERT_FILE", "").strip(),
+            remote_tls_client_key_file=os.getenv("REMOTE_TLS_CLIENT_KEY_FILE", "").strip(),
         )
         if settings.environment not in {"development", "pilot", "production"}:
             raise ValueError("AKSHRAVA_ENV must be development, pilot or production")
         if settings.environment != "development" and settings.dev_auth_bypass:
             raise ValueError("DEV_AUTH_BYPASS is permitted only when AKSHRAVA_ENV=development")
-        if not settings.dev_auth_bypass and settings.jwt_secret == "change-me-before-field-use":
+        if settings.jwt_algorithm not in {"HS256", "RS256"}:
+            raise ValueError("JWT_ALGORITHM must be HS256 or RS256")
+        if settings.jwt_algorithm == "HS256" and not settings.dev_auth_bypass and settings.jwt_secret == "change-me-before-field-use":
             raise ValueError("JWT_SECRET must be set when DEV_AUTH_BYPASS is false")
-        if not settings.dev_auth_bypass and len(settings.jwt_secret) < 32:
+        if settings.jwt_algorithm == "HS256" and not settings.dev_auth_bypass and len(settings.jwt_secret) < 32:
             raise ValueError("JWT_SECRET must be at least 32 characters when DEV_AUTH_BYPASS is false")
+        if settings.jwt_algorithm == "RS256" and not settings.jwt_public_key_file:
+            raise ValueError("JWT_PUBLIC_KEY_FILE is required when JWT_ALGORITHM=RS256")
+        if settings.environment == "production" and settings.jwt_algorithm != "RS256":
+            raise ValueError("production requires JWT_ALGORITHM=RS256 with per-device provisioning keys")
+        if not 1 <= settings.max_active_sessions <= 100_000:
+            raise ValueError("MAX_ACTIVE_SESSIONS must be between 1 and 100000")
         if settings.alert_max_age_ms <= 0:
             raise ValueError("ALERT_MAX_AGE_MS must be positive")
         if settings.min_frame_interval_ms < 0:
@@ -75,12 +103,27 @@ class Settings:
             raise ValueError("DETECTOR must be noop, ultralytics or remote")
         if settings.detector == "remote":
             allowed_schemes = ("http://", "https://") if settings.environment == "development" else ("https://",)
-            if not settings.remote_inference_url.startswith(allowed_schemes):
+            remote_urls = [url.strip().rstrip("/") for url in settings.remote_inference_url.split(",") if url.strip()]
+            if not remote_urls or any(not url.startswith(allowed_schemes) for url in remote_urls):
                 raise ValueError("REMOTE_INFERENCE_URL must use HTTPS outside development when DETECTOR=remote")
             if len(settings.remote_worker_secret) < 32:
                 raise ValueError("REMOTE_WORKER_SECRET must be at least 32 characters when DETECTOR=remote")
+            if settings.environment != "development" and not all((
+                settings.remote_tls_ca_file,
+                settings.remote_tls_client_cert_file,
+                settings.remote_tls_client_key_file,
+            )):
+                raise ValueError("remote inference outside development requires CA, client certificate, and client key")
         if not 50 <= settings.remote_inference_timeout_ms <= 10_000:
             raise ValueError("REMOTE_INFERENCE_TIMEOUT_MS must be between 50 and 10000")
         if not 100 <= settings.ready_timeout_ms <= 10_000:
             raise ValueError("READY_TIMEOUT_MS must be between 100 and 10000")
+        if settings.environment == "production" and not settings.redis_url.startswith(("redis://", "rediss://")):
+            raise ValueError("REDIS_URL is required in production for distributed session and replay controls")
+        if not 50 <= settings.inference_timeout_ms <= 10_000:
+            raise ValueError("INFERENCE_TIMEOUT_MS must be between 50 and 10000")
+        if not 1 <= settings.inference_executor_workers <= 32:
+            raise ValueError("INFERENCE_EXECUTOR_WORKERS must be between 1 and 32")
+        if settings.environment != "development" and not settings.expected_schema_revision:
+            raise ValueError("DATABASE_SCHEMA_REVISION is required outside development")
         return settings

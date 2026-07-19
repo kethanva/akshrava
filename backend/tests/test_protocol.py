@@ -21,6 +21,35 @@ def test_parses_valid_frame_header():
     )
     assert header.frame_id == 1
     assert header.pitch_cdeg == -1200
+    assert header.priority is False
+
+
+def test_parses_priority_flag_and_mode():
+    by_flag = parse_frame_header(
+        {
+            "type": "frame",
+            "id": 2,
+            "capture_mono_ms": 42,
+            "w": 640,
+            "h": 480,
+            "jpeg_bytes": 10,
+            "priority": True,
+        }
+    )
+    assert by_flag.priority is True
+    by_mode = parse_frame_header(
+        {
+            "type": "frame",
+            "id": 3,
+            "capture_mono_ms": 43,
+            "w": 640,
+            "h": 480,
+            "jpeg_bytes": 10,
+            "mode": "priority",
+        }
+    )
+    assert by_mode.priority is True
+    assert by_mode.mode == "priority"
 
 
 def test_rejects_invalid_frame_header():

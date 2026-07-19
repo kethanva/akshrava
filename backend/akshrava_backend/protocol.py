@@ -33,6 +33,9 @@ def parse_frame_header(payload: Dict[str, Any]) -> FrameHeader:
         roll_cdeg=_integer(payload, "roll_cdeg", -9000, required=False),
         pose_age_ms=_integer(payload, "pose_age_ms", 0, required=False),
         mode=str(payload.get("mode", "normal"))[:32],
+        priority=bool(payload.get("priority", False))
+        or str(payload.get("mode", "")) == "priority",
+        trace_id=str(payload.get("trace_id", ""))[:64],
     )
 
 

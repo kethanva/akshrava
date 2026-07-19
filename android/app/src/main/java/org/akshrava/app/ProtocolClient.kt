@@ -1,6 +1,7 @@
 package org.akshrava.app
 
 import android.os.SystemClock
+import android.util.Log
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -40,6 +41,9 @@ class ProtocolClient(
         const val MAX_BACKOFF_ATTEMPT = 4          // 2^4 = 16 s, capped to 10 s
         const val MAX_BACKOFF_SECONDS = 10.0
         const val STALE_ALERT_MS = 500L
+        /** Look answers use the full freshness budget even when the hazard is S1. */
+        const val LOOK_FRESHNESS_MS = 500L
+        const val URGENT_FRESHNESS_MS = 250L
 
         /** Device revocation is an operator action, not a network condition to retry. */
         fun isPermanentAccessClose(code: Int): Boolean = code == 4401 || code == 4403
@@ -72,19 +76,24 @@ class ProtocolClient(
         )
     }
 
+    /** True only after ready with a live detector — not transport-only noop bench mode. */
+    fun canStream(): Boolean = sessionReady && visionEnabled
+
     fun sendFrame(
         frameId: Long,
         captureMonoMs: Long,
         pose: PoseSnapshot,
         calibrationId: String,
         frame: EncodedFrame,
-        mode: String = "normal"
+        mode: String = "normal",
+        priority: Boolean = false
     ): Boolean {
         val ws = socket ?: return false
         // Do not produce traffic or imply an active service before the authenticated server has
         // explicitly confirmed that a real detector, rather than bench-mode NoopDetector, is live.
-        if (!sessionReady || !visionEnabled) return false
+        if (!canStream()) return false
         if (!inFlight.compareAndSet(false, true)) return false
+        val look = priority || mode == "priority"
         val header = JSONObject()
             .put("type", "frame")
             .put("id", frameId)
@@ -97,7 +106,9 @@ class ProtocolClient(
             .put("pitch_cdeg", pose.pitchCdeg)
             .put("roll_cdeg", pose.rollCdeg)
             .put("pose_age_ms", pose.ageMs)
-            .put("mode", mode)
+            .put("mode", if (look) "priority" else mode)
+            .put("priority", look)
+            .put("trace_id", "frame-$frameId-$captureMonoMs")
         // Header and JPEG are a pair in the server protocol.  OkHttp queues WebSocket messages
         // independently, so if it accepts the header but rejects the JPEG we must tear down the
         // socket rather than let the next JPEG attach to this header.
@@ -149,6 +160,11 @@ class ProtocolClient(
                 payload.optDouble("fps", 1.0)
             ))
             "result" -> {
+                payload.optString("trace_id", "").takeIf { it.isNotBlank() }?.let {
+                    // No device ID, endpoint, image, or location is logged; this is only a
+                    // cross-tier frame correlation key for diagnosing glass-to-ear latency.
+                    Log.i("AkshravaTrace", "result trace=$it")
+                }
                 if (payload.optBoolean("cloud_fallback_unavailable", false)) {
                     if (!cloudFallbackWarningAnnounced) {
                         cloudFallbackWarningAnnounced = true
@@ -161,17 +177,28 @@ class ProtocolClient(
                 }
                 val frameMono = payload.optLong("capture_mono_ms", -1)
                 val age = if (frameMono >= 0) SystemClock.elapsedRealtime() - frameMono else Long.MAX_VALUE
-                // The phone owns freshness; server and phone monotonic clocks are not comparable.
-                if (age <= STALE_ALERT_MS) {
-                    val hazard = payload.optJSONObject("hazard")
-                    if (hazard != null) {
-                        val isUrgent = hazard.optString("level") == "urgent"
+                val priority = payload.optBoolean("priority", false)
+                val hazard = payload.optJSONObject("hazard")
+                val isUrgent = hazard?.optString("level") == "urgent"
+                // Look answers use 500 ms even if the hazard is S1 — a user-pulled query must
+                // not be dropped by the tighter 250 ms S1 window on slow links.
+                val maxAge = when {
+                    priority -> LOOK_FRESHNESS_MS
+                    isUrgent -> URGENT_FRESHNESS_MS
+                    else -> STALE_ALERT_MS
+                }
+                if (age <= maxAge) {
+                    val lookSummary = payload.optString("look_summary", "").ifBlank {
+                        hazard?.optString("spoken_preview", "") ?: ""
+                    }
+                    if (priority && lookSummary.isNotBlank()) {
+                        alertManager.speakComposed(lookSummary, urgent = true)
+                    } else if (hazard != null) {
                         val isNear = hazard.optBoolean("range_valid", false) &&
                             hazard.optString("range_band") == "near"
                         if (isUrgent || isNear) {
                             onHighAlert()
                         }
-                        
                         alertManager.announce(
                             hazard.optString("message_key"),
                             hazard.optString("bearing", "ahead"),

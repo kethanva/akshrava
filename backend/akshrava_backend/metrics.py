@@ -18,6 +18,8 @@ class Metrics:
         self._alerts_total = 0
         self._rejected_frames_total = 0
         self._late_suppressed_total = 0
+        self._sessions_active = 0
+        self._inference_failures_total = 0
         self._inference_counts: Dict[int, int] = {bucket: 0 for bucket in self._INFERENCE_BUCKETS}
         self._inference_sum_ms = 0
         self._inference_count = 0
@@ -58,6 +60,18 @@ class Metrics:
         with self._lock:
             self._late_suppressed_total += 1
 
+    def session_opened(self) -> None:
+        with self._lock:
+            self._sessions_active += 1
+
+    def session_closed(self) -> None:
+        with self._lock:
+            self._sessions_active = max(0, self._sessions_active - 1)
+
+    def inference_failed(self) -> None:
+        with self._lock:
+            self._inference_failures_total += 1
+
     def render(self) -> str:
         with self._lock:
             lines = [
@@ -73,6 +87,12 @@ class Metrics:
                 "# HELP akshrava_late_suppressed_total Hazards detected too late to speak safely.",
                 "# TYPE akshrava_late_suppressed_total counter",
                 "akshrava_late_suppressed_total %s" % self._late_suppressed_total,
+                "# HELP akshrava_sessions_active Active authenticated WebSocket sessions on this API instance.",
+                "# TYPE akshrava_sessions_active gauge",
+                "akshrava_sessions_active %s" % self._sessions_active,
+                "# HELP akshrava_inference_failures_total Inference failures that fail closed.",
+                "# TYPE akshrava_inference_failures_total counter",
+                "akshrava_inference_failures_total %s" % self._inference_failures_total,
                 "# HELP akshrava_inference_duration_milliseconds Vision inference and queue duration.",
                 "# TYPE akshrava_inference_duration_milliseconds histogram",
             ]

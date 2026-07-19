@@ -13,9 +13,21 @@ def main():
     parser.add_argument("device_id")
     parser.add_argument("--days", type=int, default=30)
     args = parser.parse_args()
-    secret = os.environ.get("JWT_SECRET")
-    if not secret:
-        sys.exit("Set JWT_SECRET before minting a token.")
+    algorithm = os.environ.get("JWT_ALGORITHM", "HS256").upper()
+    if algorithm == "RS256":
+        key_file = os.environ.get("JWT_PRIVATE_KEY_FILE", "")
+        if not key_file:
+            sys.exit("Set JWT_PRIVATE_KEY_FILE before minting an RS256 token.")
+        try:
+            secret = open(key_file, encoding="utf-8").read()
+        except OSError as exc:
+            sys.exit("Unable to read JWT_PRIVATE_KEY_FILE: %s" % exc)
+    elif algorithm == "HS256":
+        secret = os.environ.get("JWT_SECRET")
+        if not secret:
+            sys.exit("Set JWT_SECRET before minting a token.")
+    else:
+        sys.exit("JWT_ALGORITHM must be HS256 or RS256.")
     now = datetime.now(timezone.utc)
     token = jwt.encode(
         {
@@ -25,7 +37,7 @@ def main():
             "exp": now + timedelta(days=args.days),
         },
         secret,
-        algorithm="HS256",
+        algorithm=algorithm,
     )
     print(token)
 

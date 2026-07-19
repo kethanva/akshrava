@@ -16,6 +16,7 @@ backend/akshrava.db-wal
 android/local.properties
 infra/.env
 graphify-out/
+.android-sdk-matrix/
 
 # Local editor / agent config (keep out of the product tree)
 .claude/

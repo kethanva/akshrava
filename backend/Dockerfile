@@ -10,6 +10,8 @@ ARG INSTALL_YOLO=false
 ARG INSTALL_CLOUD_PROVIDER=none
 COPY pyproject.toml ./
 COPY akshrava_backend ./akshrava_backend
+COPY migrations ./migrations
+COPY alembic.ini ./
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 RUN pip install --upgrade "pip<25" && \
@@ -38,6 +40,8 @@ RUN addgroup --system appgroup && adduser --system --group appuser
 # Copy virtualenv and application code
 COPY --from=builder /opt/venv /opt/venv
 COPY akshrava_backend ./akshrava_backend
+COPY migrations ./migrations
+COPY alembic.ini ./
 
 # Give appuser ownership
 RUN chown -R appuser:appgroup /app

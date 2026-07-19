@@ -34,8 +34,7 @@ detector validation, device calibration and controlled-course evidence are relea
 
 - **Operations & Compliance (`docs/`, `infra/`)**:
   - Zero raw-image retention in the running backend and an explicit consent/privacy process.
-  - **Device Provisioning**: `PROVISIONING_CHECKLIST.md` outlines the 6-step qualification flow to classify recycled phones into A/B/C deployment tiers.
-  - **Supervised Trial Protocol**: `TRIAL_PROTOCOL.md` defines strict safety requirements,
+  - **Device Provisioning and Trials**: [Field guide](docs/FIELD_GUIDE.md) defines phone qualification, release gates, and supervised-trial requirements.
     including a named mobility instructor with stop authority.
 
 *(Note: Ultralytics YOLO weights are licensed under AGPL-3.0. For non-open-source deployments, enterprise licensing or alternative Apache-2.0 models are required).*
@@ -44,7 +43,7 @@ detector validation, device calibration and controlled-course evidence are relea
 
 | Path | Purpose |
 |---|---|
-| `android/` | Lean Android 8+ (API 26) Kotlin application; validate each donated phone before issue |
+| `android/` | Universal Android Kotlin APK; API 28–36 is release-tested, API 26–27 compatibility-only; validate each donated phone before issue |
 | `backend/` | FastAPI service, conservative IoU association, and geometry-gated hazard scorer |
 | `infra/` | PostgreSQL, API and optional Caddy/TLS deployment |
 | `docs/` | Wire protocol, privacy policies, provisioning, and trial protocols |
@@ -72,6 +71,10 @@ cd android
 
 The application only accepts `wss://` endpoints in release builds. Debug builds accept `ws://` for a local emulator/device test. A visible user action starts the foreground camera service; it cannot, and must not, silently start from boot/background.
 
+The release matrix covers Android 9 through Android 16 (API 28–36), including 12L. See
+[Android compatibility](docs/ANDROID.md) for the exact automated and physical-device
+evidence required for each release.
+
 ## Tests
 
 ```bash
@@ -89,4 +92,4 @@ No real detector, local fallback model, production TLS domain, JWT secret, devic
 field-validation evidence can responsibly be invented in source code. The supplied code makes all
 of those integrations explicit and fails closed where possible. Follow [the operator runbook](docs/OPERATIONS.md) before moving beyond a bench test.
 
-The required code, device, model and field sign-offs are collected in the [release gate](docs/RELEASE_GATE.md). Do not treat a green CI build as a field-use approval.
+The required code, device, model and field sign-offs are collected in the [field guide](docs/FIELD_GUIDE.md). Do not treat a green CI build as a field-use approval.

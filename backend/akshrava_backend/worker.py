@@ -20,6 +20,7 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, Request, Response
 
 from .detector import Detector, jpeg_dimensions, make_detector
+from .coordination import nonce_store_for
 from .metrics import Metrics
 
 
@@ -33,6 +34,8 @@ class WorkerSettings:
     require_gpu: bool = True
     batch_max_size: int = 8
     batch_wait_ms: int = 12
+    environment: str = "development"
+    nonce_redis_url: str = ""
 
     @classmethod
     def from_env(cls):
@@ -45,6 +48,8 @@ class WorkerSettings:
             require_gpu=os.getenv("REQUIRE_GPU", "true").lower() in {"1", "true", "yes", "on"},
             batch_max_size=int(os.getenv("WORKER_BATCH_MAX_SIZE", "8")),
             batch_wait_ms=int(os.getenv("WORKER_BATCH_WAIT_MS", "12")),
+            environment=os.getenv("AKSHRAVA_ENV", "development").lower(),
+            nonce_redis_url=os.getenv("NONCE_REDIS_URL", "").strip(),
         )
         if len(settings.shared_secret) < 32:
             raise ValueError("WORKER_SHARED_SECRET must be at least 32 characters")
@@ -58,6 +63,10 @@ class WorkerSettings:
             raise ValueError("WORKER_BATCH_MAX_SIZE must be between 1 and 64")
         if not 0 <= settings.batch_wait_ms <= 50:
             raise ValueError("WORKER_BATCH_WAIT_MS must be between 0 and 50")
+        if settings.environment not in {"development", "pilot", "production"}:
+            raise ValueError("AKSHRAVA_ENV must be development, pilot or production")
+        if settings.environment == "production" and not settings.nonce_redis_url.startswith(("redis://", "rediss://")):
+            raise ValueError("NONCE_REDIS_URL is required in production")
         return settings
 
 
@@ -133,8 +142,10 @@ def create_worker_app(
         app.state.worker_detector = configured_detector
         app.state.inference_queue = asyncio.Queue(maxsize=configured_settings.batch_max_size * 8)
         app.state.batch_task = asyncio.create_task(_batch_loop(app))
-        app.state.nonce_lock = asyncio.Lock()
-        app.state.used_nonces = {}
+        app.state.nonce_store = nonce_store_for(
+            redis_url=configured_settings.nonce_redis_url,
+            require_distributed=configured_settings.environment == "production",
+        )
         app.state.metrics = Metrics()
         try:
             yield
@@ -144,6 +155,7 @@ def create_worker_app(
                 await app.state.batch_task
             except asyncio.CancelledError:
                 pass
+            await app.state.nonce_store.close()
 
     app = FastAPI(title="Akshrava GPU inference worker", version="0.1.0", lifespan=lifespan)
 
@@ -153,6 +165,10 @@ def create_worker_app(
 
     @app.get("/readyz")
     async def readyz():
+        try:
+            await app.state.nonce_store.health()
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="worker replay protection unavailable") from exc
         return {"ok": True, "role": "gpu-worker", "detector": "ultralytics"}
 
     @app.get("/metrics", include_in_schema=False)
@@ -168,15 +184,14 @@ def create_worker_app(
         if len(body) > settings_value.max_image_bytes * 2:
             raise HTTPException(status_code=413, detail="worker request too large")
         nonce = _authenticated_body(request, body, settings_value)
-        now = time.time()
-        async with app.state.nonce_lock:
-            cutoff = now - settings_value.request_max_age_seconds
-            app.state.used_nonces = {
-                value: seen_at for value, seen_at in app.state.used_nonces.items() if seen_at >= cutoff
-            }
-            if nonce in app.state.used_nonces:
-                raise HTTPException(status_code=409, detail="replayed worker request")
-            app.state.used_nonces[nonce] = now
+        try:
+            first_use = await app.state.nonce_store.claim(nonce, settings_value.request_max_age_seconds)
+        except Exception as exc:
+            # A failed coordinator is a security failure, never a reason to accept a potentially
+            # replayed request on another replica.
+            raise HTTPException(status_code=503, detail="worker replay protection unavailable") from exc
+        if not first_use:
+            raise HTTPException(status_code=409, detail="replayed worker request")
         try:
             payload = json.loads(body)
             image_b64 = payload["image_b64"]

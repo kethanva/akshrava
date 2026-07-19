@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from akshrava_backend import main
+from akshrava_backend.application import SessionApplicationService
 from akshrava_backend.main import app
 
 
@@ -143,12 +144,42 @@ def test_websocket_rejects_non_object_or_oversized_control_messages():
             assert websocket.receive_json()["code"] == "protocol_error"
 
 
+def test_priority_look_includes_summary(tmp_path, monkeypatch):
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/session?token=dev-device-token") as websocket:
+            assert websocket.receive_json()["type"] == "ready"
+            websocket.send_json({"type": "look"})
+            assert websocket.receive_json()["type"] == "look_ack"
+            websocket.send_json(
+                {
+                    "type": "frame",
+                    "id": 9,
+                    "capture_mono_ms": 300,
+                    "w": 1,
+                    "h": 1,
+                    "jpeg_bytes": len(JPEG),
+                    "camera_calibration_id": "test-r0",
+                    "priority": True,
+                    "mode": "priority",
+                }
+            )
+            websocket.send_bytes(JPEG)
+            result = websocket.receive_json()
+            assert result["type"] == "result"
+            assert result["priority"] is True
+            assert result["look_summary"]
+            assert "approach" not in result["look_summary"].lower()
+            assert "safe" not in result["look_summary"].lower()
+            assert websocket.receive_json()["type"] == "quality"
+
+
 def test_inference_failure_explicitly_disables_vision(monkeypatch):
     class BrokenVision:
         async def analyze(self, state, header, jpeg):
             raise RuntimeError("model unavailable")
 
     monkeypatch.setattr(main, "vision", BrokenVision())
+    monkeypatch.setattr(main, "session_application", SessionApplicationService(main.store, main.vision))
     with TestClient(app) as client:
         with client.websocket_connect("/v1/session?token=dev-device-token") as websocket:
             websocket.receive_json()

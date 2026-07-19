@@ -9,35 +9,6 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from .domain import GeometryProfile
 
 
-# Both fragments form SQL grammar and must remain a closed, reviewed allow-list.  Keeping this
-# separate from the migration loop prevents a later caller from accidentally interpolating a
-# table, column, or type received from configuration or a request.
-_ALERT_EVENT_COLUMN_ADDITIONS = {
-    "severity": "VARCHAR(8)",
-    "range_band": "VARCHAR(16)",
-    "message_key": "VARCHAR(64)",
-    "track_id": "INTEGER",
-}
-
-_DEVICE_COLUMN_ADDITIONS = {"revoked_at": "TIMESTAMP WITH TIME ZONE"}
-
-
-def _alert_event_add_column_sql(name: str) -> str:
-    try:
-        sql_type = _ALERT_EVENT_COLUMN_ADDITIONS[name]
-    except KeyError as exc:
-        raise ValueError("unsupported alert_events migration column") from exc
-    return f"ALTER TABLE alert_events ADD COLUMN {name} {sql_type}"
-
-
-def _device_add_column_sql(name: str) -> str:
-    try:
-        sql_type = _DEVICE_COLUMN_ADDITIONS[name]
-    except KeyError as exc:
-        raise ValueError("unsupported devices migration column") from exc
-    return f"ALTER TABLE devices ADD COLUMN {name} {sql_type}"
-
-
 class Base(DeclarativeBase):
     pass
 
@@ -84,8 +55,10 @@ class AlertEvent(Base):
 
 
 class Store:
-    def __init__(self, url):
+    def __init__(self, url, *, bootstrap_schema: bool = True, expected_schema_revision: Optional[str] = None):
         self.engine = create_async_engine(url, future=True)
+        self.bootstrap_schema = bootstrap_schema
+        self.expected_schema_revision = expected_schema_revision
         if url.startswith("sqlite"):
             @event.listens_for(self.engine.sync_engine, "connect")
             def _sqlite_pragmas(dbapi_connection, _connection_record):
@@ -96,26 +69,37 @@ class Store:
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False, class_=AsyncSession)
 
     async def initialize(self):
-        async with self.engine.begin() as connection:
-            await connection.run_sync(Base.metadata.create_all)
-            # `create_all` creates fresh tables but intentionally does not alter existing ones.
-            # Keep the early pilot schema upgrade tiny and idempotent so a deployed SQLite file
-            # can gain alert metadata without deleting its history. The column names and SQL types
-            # are fixed here rather than derived from untrusted input.
-            existing = await connection.run_sync(
-                lambda sync_connection: {
-                    column["name"] for column in inspect(sync_connection).get_columns("alert_events")
-                }
+        """Initialize only disposable development/test schemas.
+
+        Production schema changes are executed by Alembic before application rollout.  Running
+        DDL from every API process creates a deployment race and makes rollback impossible.
+        """
+        if self.bootstrap_schema:
+            async with self.engine.begin() as connection:
+                await connection.run_sync(Base.metadata.create_all)
+        await self.verify_schema()
+
+    async def verify_schema(self):
+        required = {"devices", "calibration_profiles", "alert_events"}
+        async with self.engine.connect() as connection:
+            present = await connection.run_sync(
+                lambda sync_connection: set(inspect(sync_connection).get_table_names())
             )
-            for name in _ALERT_EVENT_COLUMN_ADDITIONS:
-                if name not in existing:
-                    await connection.execute(text(_alert_event_add_column_sql(name)))
-            device_columns = await connection.run_sync(
-                lambda sync_connection: {column["name"] for column in inspect(sync_connection).get_columns("devices")}
-            )
-            for name in _DEVICE_COLUMN_ADDITIONS:
-                if name not in device_columns:
-                    await connection.execute(text(_device_add_column_sql(name)))
+        missing = required - present
+        if missing:
+            raise RuntimeError("database schema is not migrated; missing tables: %s" % ", ".join(sorted(missing)))
+        if self.expected_schema_revision:
+            if "alembic_version" not in present:
+                raise RuntimeError(
+                    "database schema revision mismatch: expected %s, found none" % self.expected_schema_revision
+                )
+            async with self.engine.connect() as connection:
+                revision = (await connection.execute(text("SELECT version_num FROM alembic_version"))).scalar_one_or_none()
+            if revision != self.expected_schema_revision:
+                raise RuntimeError(
+                    "database schema revision mismatch: expected %s, found %s"
+                    % (self.expected_schema_revision, revision or "none")
+                )
 
     async def upsert_device(self, device_id, calibration_id):
         # Two sockets for the same device can race here across a reconnect (old socket's

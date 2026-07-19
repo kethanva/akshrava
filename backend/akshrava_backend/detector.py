@@ -4,7 +4,9 @@ import hashlib
 import hmac
 import json
 import secrets
+import ssl
 import time
+from threading import Lock
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import List
@@ -78,10 +80,22 @@ class RemoteWorkerDetector(Detector):
     _MAX_RESPONSE_BYTES = 256_000
     _MAX_DETECTIONS = 100
 
-    def __init__(self, endpoint: str, shared_secret: str, timeout_ms: int):
+    def __init__(
+        self,
+        endpoint: str,
+        shared_secret: str,
+        timeout_ms: int,
+        tls_ca_file: str = "",
+        tls_client_cert_file: str = "",
+        tls_client_key_file: str = "",
+    ):
         self.endpoint = endpoint
         self.shared_secret = shared_secret.encode("utf-8")
         self.timeout_seconds = timeout_ms / 1000.0
+        self._ssl_context = None
+        if tls_ca_file:
+            self._ssl_context = ssl.create_default_context(cafile=tls_ca_file)
+            self._ssl_context.load_cert_chain(tls_client_cert_file, tls_client_key_file)
 
     def detect(self, jpeg: bytes) -> List[Detection]:
         body = json.dumps(
@@ -107,7 +121,7 @@ class RemoteWorkerDetector(Detector):
             },
         )
         try:
-            with urlopen(request, timeout=self.timeout_seconds) as response:
+            with urlopen(request, timeout=self.timeout_seconds, context=self._ssl_context) as response:
                 raw = response.read(self._MAX_RESPONSE_BYTES + 1)
         except (HTTPError, URLError, TimeoutError, OSError) as exc:
             raise RemoteInferenceError("remote worker unavailable") from exc
@@ -146,6 +160,31 @@ class RemoteWorkerDetector(Detector):
         if parsed_box[2] < parsed_box[0] or parsed_box[3] < parsed_box[1]:
             raise ValueError("invalid box order")
         return Detection(label=label, confidence=float(confidence), box=parsed_box)
+
+
+class FailoverRemoteWorkerDetector(Detector):
+    """Stable round-robin worker selection with immediate failover to configured warm peers."""
+
+    def __init__(self, endpoints, shared_secret: str, timeout_ms: int, **tls):
+        self._workers = [RemoteWorkerDetector(endpoint, shared_secret, timeout_ms, **tls) for endpoint in endpoints]
+        self._next = 0
+        self._lock = Lock()
+
+    def detect(self, jpeg: bytes) -> List[Detection]:
+        with self._lock:
+            start = self._next
+            self._next = (self._next + 1) % len(self._workers)
+        errors = []
+        for offset in range(len(self._workers)):
+            worker = self._workers[(start + offset) % len(self._workers)]
+            try:
+                return worker.detect(jpeg)
+            except RemoteInferenceError as exc:
+                errors.append(exc)
+        raise RemoteInferenceError("all configured remote workers are unavailable") from errors[-1]
+
+    def requires_serial_execution(self) -> bool:
+        return False
 
 
 class UltralyticsDetector(Detector):
@@ -190,16 +229,24 @@ def make_detector(
     remote_inference_url: str = "",
     remote_worker_secret: str = "",
     remote_inference_timeout_ms: int = 450,
+    remote_tls_ca_file: str = "",
+    remote_tls_client_cert_file: str = "",
+    remote_tls_client_key_file: str = "",
 ) -> Detector:
     if kind == "noop":
         detector = NoopDetector()
     elif kind == "ultralytics":
         detector = UltralyticsDetector(weights)
     elif kind == "remote":
-        detector = RemoteWorkerDetector(
-            remote_inference_url,
+        endpoints = [url.strip().rstrip("/") for url in remote_inference_url.split(",") if url.strip()]
+        detector_type = FailoverRemoteWorkerDetector if len(endpoints) > 1 else RemoteWorkerDetector
+        detector = detector_type(
+            endpoints if detector_type is FailoverRemoteWorkerDetector else endpoints[0],
             remote_worker_secret,
             remote_inference_timeout_ms,
+            tls_ca_file=remote_tls_ca_file,
+            tls_client_cert_file=remote_tls_client_cert_file,
+            tls_client_key_file=remote_tls_client_key_file,
         )
     else:
         raise RuntimeError("unknown DETECTOR=%s" % kind)
