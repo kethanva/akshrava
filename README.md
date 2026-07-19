@@ -26,8 +26,9 @@ detector validation, device calibration and controlled-course evidence are relea
     token bucket, strict result expiry, and adaptive quality advice.
   - Persistence-only two-stage association and conservative alerts: no crossing advice,
     no approach/closing-speed claim, no numeric distance, and no single-frame urgent alert.
-    Per-device geometry is intentionally unimplemented, so every response has
-    `range_valid=false`.
+    Per-device geometry fails closed: only a provisioned, verified calibration profile plus
+    fresh pose and agreeing range estimates can set `range_valid=true`; no numeric distance is
+    spoken.
   - Aggregate, non-identifying Prometheus metrics for processed/rejected frames, alerts, and
     inference duration at `/metrics`.
 
@@ -44,7 +45,7 @@ detector validation, device calibration and controlled-course evidence are relea
 | Path | Purpose |
 |---|---|
 | `android/` | Lean Android 8+ (API 26) Kotlin application; validate each donated phone before issue |
-| `backend/` | FastAPI service, ByteTrack association, and geometry-gated hazard scorer |
+| `backend/` | FastAPI service, conservative IoU association, and geometry-gated hazard scorer |
 | `infra/` | PostgreSQL, API and optional Caddy/TLS deployment |
 | `docs/` | Wire protocol, privacy policies, provisioning, and trial protocols |
 | `scripts/` | Backend test/run and token provisioning helpers |
@@ -75,11 +76,12 @@ The application only accepts `wss://` endpoints in release builds. Debug builds 
 
 ```bash
 ./scripts/test_backend.sh
-cd backend && .venv/bin/ruff check akshrava_backend tests
+cd android && ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug
 ```
 
-The Android module is configured and includes the Gradle wrapper. This workspace still needs the
-Android 36 SDK licences accepted before an APK can be assembled locally.
+The Android module is configured and includes the Gradle wrapper. The first local Android build
+may prompt for Android SDK Platform 36 and Build Tools 36 licences; CI installs the same components
+before it runs the Android unit tests and builds the APK.
 
 ## Important implementation boundary
 

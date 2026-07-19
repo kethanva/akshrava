@@ -50,7 +50,7 @@ JWT_SECRET='same-secret-as-server' python ../scripts/mint_device_token.py pilot-
 The Android app encrypts this token using the device's Android Keystore before storing it. A
 keystore failure means the volunteer must re-provision; it must not fall back to plaintext storage.
 
-To revoke a lost or compromised provisioned device immediately, run from an operator machine with
+To revoke a lost or compromised provisioned device, run from an operator machine with
 the production `DATABASE_URL`:
 
 ```bash
@@ -58,8 +58,9 @@ cd backend
 DATABASE_URL='postgresql+asyncpg://...' python ../scripts/revoke_device.py pilot-phone-001
 ```
 
-Revocation is checked during WebSocket upgrade and event reads. Issue a new device ID/token after
-re-provisioning; do not "unrevoke" a lost device.
+Revocation is checked during WebSocket upgrade, before every frame header, and during event reads.
+An already-open session is closed before its next frame; issue a new device ID/token after
+re-provisioning, and do not "unrevoke" a lost device.
 
 ## Model activation
 

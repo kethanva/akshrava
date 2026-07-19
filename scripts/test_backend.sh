@@ -13,3 +13,4 @@ export DETECTOR=noop
 python -m pip install --upgrade 'pip<25'
 python -m pip install '.[dev]'
 pytest -q
+ruff check akshrava_backend tests

@@ -190,6 +190,13 @@ async def session(websocket: WebSocket):
                 if message_type == "ping":
                     await websocket.send_json({"type": "pong"})
                 elif message_type == "frame":
+                    # A revocation can happen after this WebSocket was accepted. Check before
+                    # accepting another header so a lost phone cannot continue using an already
+                    # open session; the Android client treats 4403 as a permanent provisioning
+                    # failure rather than reconnecting.
+                    if await store.is_device_revoked(device_id):
+                        await websocket.close(code=4403)
+                        return
                     if pending_header is not None:
                         await websocket.send_json({"type": "error", "code": "frame_header_pending"})
                     else:
