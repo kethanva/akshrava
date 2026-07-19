@@ -5,6 +5,7 @@ replicas share one fleet-wide concurrent-session budget instead of each admittin
 """
 
 import asyncio
+import time
 from abc import ABC, abstractmethod
 
 
@@ -103,7 +104,9 @@ return 1
 
     async def try_open(self, session_id: str) -> bool:
         client = await self._client_for_use()
-        now = asyncio.get_running_loop().time()
+        # Redis leases must use wall-clock epoch seconds shared across replicas. asyncio loop
+        # time is monotonic and process-local; mixing it into Redis would desync expiry.
+        now = time.time()
         result = await client.eval(self._SCRIPT, 1, self.namespace, session_id, now, self.lease_seconds, self.maximum)
         return bool(result)
 

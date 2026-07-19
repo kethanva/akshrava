@@ -36,4 +36,4 @@ class SessionApplicationService:
     async def close_session(self, state: SessionState) -> None:
         release = getattr(self.vision, "release_session", None)
         if release is not None:
-            await release(state.device_id)
+            await release(state.session_key or state.device_id)

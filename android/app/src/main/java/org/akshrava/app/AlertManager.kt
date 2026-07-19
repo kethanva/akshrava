@@ -2,6 +2,8 @@ package org.akshrava.app
 
 import android.content.Context
 import android.media.AudioAttributes
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
@@ -9,12 +11,16 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import java.util.ArrayDeque
 import java.util.Locale
+import java.util.concurrent.Executors
 
 /**
  * Owns speech, haptics and the "never drown the user" rate policy (§6.3).
  * Hard rules enforced here: at most one utterance per 2 s, an S1 alert preempts,
  * the same object re-alerts only after its cooldown, and three alerts in ten seconds
  * collapse to a single "busy road" summary until the scene calms.
+ *
+ * Public methods are serialized onto a single worker so cooldown maps and the TTS queue
+ * stay consistent across camera, headset, and main-thread callers.
  */
 class AlertManager(private val context: Context, languageTag: String) : TextToSpeech.OnInitListener {
     private companion object {
@@ -26,6 +32,8 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
         const val REPEATABLE_WINDOW_MS = 30_000L
     }
 
+    private val api = Executors.newSingleThreadExecutor()
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var tts: TextToSpeech? = TextToSpeech(context, this)
     private val vibrator = context.getSystemService(Vibrator::class.java)
     private val language = Locale.forLanguageTag(languageTag)
@@ -46,33 +54,40 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
     @Volatile private var ready = false
 
     override fun onInit(status: Int) {
-        ready = status == TextToSpeech.SUCCESS
-        if (ready) {
-            tts?.language = language
-            tts?.setAudioAttributes(
-                AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY).build()
-            )
-            tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                override fun onStart(utteranceId: String) = Unit
-                override fun onDone(utteranceId: String) = complete(utteranceId)
-                @Deprecated("Deprecated in Java")
-                override fun onError(utteranceId: String) = complete(utteranceId)
-                override fun onError(utteranceId: String, errorCode: Int) = complete(utteranceId)
-            })
-            // pendingStatus is written from status() on the camera analyzer's background
-            // executor thread and read here on whatever thread the TTS engine completes init
-            // on -- not necessarily the same thread. Guard it with the same lock already used
-            // for completionCallbacks rather than relying on @Volatile visibility alone, since
-            // this is a read-then-clear that must not race a concurrent status() write.
-            val toSpeak = synchronized(completionLock) { pendingStatus.also { pendingStatus = null } }
-            toSpeak?.let { speak(it.text, flush = true, id = nextStatusId(), onComplete = it.onComplete) }
-        } else {
-            val toDrop = synchronized(completionLock) { pendingStatus.also { pendingStatus = null } }
-            toDrop?.onComplete?.invoke()
+        api.execute {
+            ready = status == TextToSpeech.SUCCESS
+            if (ready) {
+                tts?.language = language
+                tts?.setAudioAttributes(
+                    AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY).build()
+                )
+                tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                    override fun onStart(utteranceId: String) = Unit
+                    override fun onDone(utteranceId: String) = complete(utteranceId)
+                    override fun onStop(utteranceId: String, interrupted: Boolean) = complete(utteranceId)
+                    @Deprecated("Deprecated in Java")
+                    override fun onError(utteranceId: String) = complete(utteranceId)
+                    override fun onError(utteranceId: String, errorCode: Int) = complete(utteranceId)
+                })
+                // pendingStatus is written from status() on the camera analyzer's background
+                // executor thread and read here on whatever thread the TTS engine completes init
+                // on -- not necessarily the same thread. Guard it with the same lock already used
+                // for completionCallbacks rather than relying on @Volatile visibility alone, since
+                // this is a read-then-clear that must not race a concurrent status() write.
+                val toSpeak = synchronized(completionLock) { pendingStatus.also { pendingStatus = null } }
+                toSpeak?.let { speak(it.text, flush = true, id = nextStatusId(), onComplete = it.onComplete) }
+            } else {
+                val toDrop = synchronized(completionLock) { pendingStatus.also { pendingStatus = null } }
+                toDrop?.onComplete?.invoke()
+            }
         }
     }
 
     fun announce(messageKey: String, bearing: String, urgent: Boolean, haptic: String) {
+        api.execute { announceLocked(messageKey, bearing, urgent, haptic) }
+    }
+
+    private fun announceLocked(messageKey: String, bearing: String, urgent: Boolean, haptic: String) {
         val now = SystemClock.elapsedRealtime()
         val cooldownKey = "$messageKey:$bearing"
         val previous = lastSpoken[cooldownKey]
@@ -102,35 +117,41 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
 
     /** Double-press headset mute. Auto-unmutes after [durationMs] so it can never be left silently dead. */
     fun muteFor(durationMs: Long) {
-        mutedUntilMs = SystemClock.elapsedRealtime() + durationMs
-        speak(
-            if (isHindi) "पंद्रह मिनट के लिए म्यूट" else "Muted for fifteen minutes",
-            flush = true, id = nextStatusId()
-        )
+        api.execute {
+            mutedUntilMs = SystemClock.elapsedRealtime() + durationMs
+            speak(
+                if (isHindi) "पंद्रह मिनट के लिए म्यूट" else "Muted for fifteen minutes",
+                flush = true, id = nextStatusId()
+            )
+        }
     }
 
     /** Single-press headset repeat: replays the last spoken alert if it is still recent. */
     fun repeatLast() {
-        val text = lastAlertText
-        val now = SystemClock.elapsedRealtime()
-        if (text == null || now - lastAlertAtMs > REPEATABLE_WINDOW_MS) {
-            speak(
-                if (isHindi) "कोई हाल का अलर्ट नहीं" else "No recent alert",
-                flush = true, id = nextStatusId()
-            )
-            return
+        api.execute {
+            val text = lastAlertText
+            val now = SystemClock.elapsedRealtime()
+            if (text == null || now - lastAlertAtMs > REPEATABLE_WINDOW_MS) {
+                speak(
+                    if (isHindi) "कोई हाल का अलर्ट नहीं" else "No recent alert",
+                    flush = true, id = nextStatusId()
+                )
+                return@execute
+            }
+            speak(text, flush = true, id = nextStatusId())
         }
-        speak(text, flush = true, id = nextStatusId())
     }
 
     fun status(text: String, onComplete: (() -> Unit)? = null) {
-        if (ready) {
-            speak(text, flush = true, id = nextStatusId(), onComplete = onComplete)
-        } else {
-            val replaced = synchronized(completionLock) {
-                pendingStatus.also { pendingStatus = PendingStatus(text, onComplete) }
+        api.execute {
+            if (ready) {
+                speak(text, flush = true, id = nextStatusId(), onComplete = onComplete)
+            } else {
+                val replaced = synchronized(completionLock) {
+                    pendingStatus.also { pendingStatus = PendingStatus(text, onComplete) }
+                }
+                replaced?.onComplete?.invoke()
             }
-            replaced?.onComplete?.invoke()
         }
     }
 
@@ -141,9 +162,11 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
 
     /** User-pulled look summary: flush and bypass object cooldown / busy collapse. */
     fun speakComposed(text: String, urgent: Boolean = true) {
-        val now = SystemClock.elapsedRealtime()
-        markUtterance(now)
-        speak(text, flush = urgent, id = "look-${++statusSequence}")
+        api.execute {
+            val now = SystemClock.elapsedRealtime()
+            markUtterance(now)
+            speak(text, flush = urgent, id = "look-${++statusSequence}")
+        }
     }
 
     /** Every control action must be confirmed by voice (§6.4): an explicit look that never got
@@ -195,7 +218,7 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
 
     private fun complete(utteranceId: String) {
         val callback = synchronized(completionLock) { completionCallbacks.remove(utteranceId) }
-        callback?.invoke()
+        callback?.let { mainHandler.post(it) }
     }
 
     private fun template(key: String, bearing: String): String = when (key) {
@@ -225,8 +248,11 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
             pendingStatus = null
             values
         }
+        tts?.stop()
         tts?.shutdown()
         tts = null
-        pending.forEach { it.invoke() }
+        ready = false
+        api.shutdownNow()
+        pending.forEach { mainHandler.post(it) }
     }
 }

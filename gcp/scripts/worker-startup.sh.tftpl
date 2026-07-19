@@ -5,13 +5,22 @@ set -euo pipefail
 CERT_DIR=/var/lib/akshrava/certs
 mkdir -p "$$CERT_DIR" /var/lib/akshrava/models
 
-cos-extensions install gpu -- -version latest || true
+if ! cos-extensions install gpu -- -version latest; then
+  echo "FATAL: cos-extensions GPU install failed" >&2
+  exit 1
+fi
+gpu_ready=0
 for _ in $$(seq 1 60); do
   if [[ -e /dev/nvidia0 ]]; then
+    gpu_ready=1
     break
   fi
   sleep 2
 done
+if [[ "$$gpu_ready" -ne 1 ]]; then
+  echo "FATAL: /dev/nvidia0 did not appear after GPU install" >&2
+  exit 1
+fi
 
 access_secret() {
   local name="$$1"

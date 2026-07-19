@@ -7,9 +7,10 @@ import ssl
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional, Set, Tuple
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.parse import urlparse
+from urllib.request import HTTPRedirectHandler, Request, build_opener, HTTPSHandler, HTTPHandler
 
 from PIL import Image
 
@@ -58,6 +59,10 @@ class Detector(ABC):
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self.detect_for_device, device_id, jpeg)
 
+    async def detect_async_with_status_for_device(self, device_id: str, jpeg: bytes) -> Tuple[List[Detection], bool]:
+        """Return detections along with fallback status. Defaults to False (fallback not active)."""
+        return await self.detect_async_for_device(device_id, jpeg), False
+
 
 def jpeg_dimensions(jpeg: bytes):
     """Validate that untrusted bytes are a bounded JPEG before a detector sees them."""
@@ -86,6 +91,11 @@ class RemoteInferenceError(RuntimeError):
     """The trusted GPU worker cannot produce a safely usable result."""
 
 
+class _RejectRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise RemoteInferenceError("remote worker redirect rejected")
+
+
 class RemoteWorkerDetector(Detector):
     """Synchronous, authenticated adapter for a private GPU inference worker.
 
@@ -105,8 +115,16 @@ class RemoteWorkerDetector(Detector):
         tls_ca_file: str = "",
         tls_client_cert_file: str = "",
         tls_client_key_file: str = "",
+        allowed_hosts: Optional[Set[str]] = None,
     ):
         self.endpoint = endpoint
+        parsed = urlparse(endpoint)
+        if not parsed.scheme or not parsed.hostname:
+            raise ValueError("remote worker endpoint must include scheme and host")
+        self._endpoint_host = parsed.hostname.lower()
+        self._allowed_hosts = {host.lower() for host in (allowed_hosts or {self._endpoint_host})}
+        if self._endpoint_host not in self._allowed_hosts:
+            raise ValueError("remote worker endpoint host is not on the allowlist")
         self.shared_secret = shared_secret.encode("utf-8")
         self.timeout_seconds = timeout_ms / 1000.0
         self._ssl_context = None
@@ -114,6 +132,11 @@ class RemoteWorkerDetector(Detector):
             self._ssl_context = ssl.create_default_context(cafile=tls_ca_file)
             self._ssl_context.load_cert_chain(tls_client_cert_file, tls_client_key_file)
         self._async_client = None
+
+    def _assert_host_allowed(self, url: str) -> None:
+        host = (urlparse(url).hostname or "").lower()
+        if host not in self._allowed_hosts:
+            raise RemoteInferenceError("remote worker host not allowlisted")
 
     async def _get_async_client(self):
         if self._async_client is None:
@@ -123,10 +146,12 @@ class RemoteWorkerDetector(Detector):
                 verify=self._ssl_context or True,
                 timeout=self.timeout_seconds,
                 limits=limits,
+                follow_redirects=False,
             )
         return self._async_client
 
     def detect(self, jpeg: bytes) -> List[Detection]:
+        self._assert_host_allowed(self.endpoint)
         body = jpeg
         timestamp = str(int(time.time()))
         nonce = secrets.token_urlsafe(18)
@@ -146,9 +171,17 @@ class RemoteWorkerDetector(Detector):
                 "X-Akshrava-Signature": signature,
             },
         )
+        handlers = [_RejectRedirectHandler()]
+        if self._ssl_context is not None:
+            handlers.append(HTTPSHandler(context=self._ssl_context))
+        else:
+            handlers.extend([HTTPHandler(), HTTPSHandler()])
+        opener = build_opener(*handlers)
         try:
-            with urlopen(request, timeout=self.timeout_seconds, context=self._ssl_context) as response:
+            with opener.open(request, timeout=self.timeout_seconds) as response:
                 raw = response.read(self._MAX_RESPONSE_BYTES + 1)
+        except RemoteInferenceError:
+            raise
         except (HTTPError, URLError, TimeoutError, OSError) as exc:
             raise RemoteInferenceError("remote worker unavailable") from exc
         if len(raw) > self._MAX_RESPONSE_BYTES:
@@ -163,6 +196,7 @@ class RemoteWorkerDetector(Detector):
             raise RemoteInferenceError("invalid remote worker response") from exc
 
     async def detect_async(self, jpeg: bytes) -> List[Detection]:
+        self._assert_host_allowed(self.endpoint)
         client = await self._get_async_client()
         body = jpeg
         timestamp = str(int(time.time()))
@@ -182,12 +216,15 @@ class RemoteWorkerDetector(Detector):
                     "X-Akshrava-Nonce": nonce,
                     "X-Akshrava-Signature": signature,
                 },
+                follow_redirects=False,
             )
             response.raise_for_status()
             raw = response.content
         except Exception as exc:
             import httpx
             if isinstance(exc, httpx.HTTPStatusError):
+                if 300 <= exc.response.status_code < 400:
+                    raise RemoteInferenceError("remote worker redirect rejected") from exc
                 raise RemoteInferenceError("remote worker failed status=%d" % exc.response.status_code) from exc
             raise RemoteInferenceError("remote worker unavailable") from exc
         if len(raw) > self._MAX_RESPONSE_BYTES:
@@ -289,14 +326,25 @@ class StaticInferenceEndpointRegistry:
         start = int.from_bytes(digest[:8], "big") % len(self._endpoints)
         return self._endpoints[start:] + self._endpoints[:start]
 
+    def allowed_hosts(self) -> Set[str]:
+        hosts = set()
+        for endpoint in self._endpoints:
+            host = urlparse(endpoint.url).hostname
+            if host:
+                hosts.add(host.lower())
+        return hosts
+
 
 class RegistryRemoteWorkerDetector(Detector):
     """Device-sticky worker selection with immediate fail-through to warm peers."""
 
     def __init__(self, registry: StaticInferenceEndpointRegistry, shared_secret: str, timeout_ms: int, **tls):
         self.registry = registry
+        allowed = registry.allowed_hosts()
         self._workers = {
-            endpoint.id: RemoteWorkerDetector(endpoint.url, shared_secret, timeout_ms, **tls)
+            endpoint.id: RemoteWorkerDetector(
+                endpoint.url, shared_secret, timeout_ms, allowed_hosts=allowed, **tls
+            )
             for endpoint in registry.endpoints
         }
 
@@ -342,6 +390,8 @@ class UltralyticsDetector(Detector):
         except ImportError as exc:
             raise RuntimeError("install backend[yolo] to enable DETECTOR=ultralytics") from exc
         self._model = YOLO(weights)
+        from concurrent.futures import ThreadPoolExecutor
+        self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="akshrava-local-infer")
 
     def detect(self, jpeg: bytes) -> List[Detection]:
         return self.detect_batch([jpeg])[0]
@@ -363,6 +413,19 @@ class UltralyticsDetector(Detector):
                     )
             parsed.append(detections)
         return parsed
+
+    async def detect_async(self, jpeg: bytes) -> List[Detection]:
+        import asyncio
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._executor, self.detect, jpeg)
+
+    async def detect_async_for_device(self, device_id: str, jpeg: bytes) -> List[Detection]:
+        import asyncio
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._executor, self.detect_for_device, device_id, jpeg)
+
+    def close(self) -> None:
+        self._executor.shutdown(wait=True)
 
 
 def make_detector(

@@ -6,7 +6,7 @@ from typing import Callable, Dict, Set
 
 from .composer import hazard_payload, look_summary
 from .alert_policy import AlertPolicy
-from .detector import Detector
+from .detector import Detector, RegistryRemoteWorkerDetector, RemoteWorkerDetector
 from .domain import FrameHeader, SessionState
 from .hazards import HazardScorer
 from .tracker import SimpleTracker
@@ -14,16 +14,59 @@ from .tracker import SimpleTracker
 logger = logging.getLogger(__name__)
 
 
+class BackgroundTaskTracker:
+    """Safely tracks and drains fire-and-forget background tasks.
+
+    Prevents garbage collection mid-flight by holding strong references to running tasks,
+    and logs exceptions raised during task execution to prevent silent failures.
+    """
+
+    def __init__(self, name: str):
+        self.name = name
+        self.tasks: Set[asyncio.Task] = set()
+
+    def schedule(self, coro) -> None:
+        task = asyncio.create_task(coro)
+        self.tasks.add(task)
+
+        def handle_done(t: asyncio.Task):
+            self.tasks.discard(t)
+            try:
+                exc = t.exception()
+                if exc is not None:
+                    logger.error(
+                        "Background task in %s failed: %s",
+                        self.name,
+                        exc,
+                        exc_info=exc,
+                    )
+            except asyncio.CancelledError:
+                pass
+        task.add_done_callback(handle_done)
+
+    async def drain(self, timeout: float = 2.0) -> None:
+        if not self.tasks:
+            return
+        pending = list(self.tasks)
+        done, still_pending = await asyncio.wait(pending, timeout=timeout)
+        for task in still_pending:
+            task.cancel()
+        if still_pending:
+            await asyncio.gather(*still_pending, return_exceptions=True)
+
+
 class VisionService:
     """Phone-facing vision path.
 
-    Track ID allocation is per-session (`device_id` key). Association state lives on
+    Track ID allocation is per-connection (`session_key`). Association state lives on
     `SessionState.tracks`; the helper only owns the next-ID counter so two concurrent
-    phones never collide track IDs. This is per-session isolation, not a durable
-    cross-reconnect device tracker.
+    phones never collide track IDs. Keys are connection-scoped so an old socket's cleanup
+    cannot wipe a newer reconnect of the same device_id.
     """
 
     _POSE_DISCONTINUITY_CDEG = 1_200
+    _CIRCUIT_OPEN_AFTER = 3
+    _CIRCUIT_COOLDOWN_SECONDS = 5.0
 
     def __init__(
         self,
@@ -46,21 +89,33 @@ class VisionService:
         self.alert_max_age_ms = alert_max_age_ms
         self.inference_timeout_seconds = inference_timeout_ms / 1000.0
         self._inference_executor_workers = inference_executor_workers
-        self._executor = self._new_executor()
-        # Alert persistence must never block the phone WebSocket reply. Keep strong refs so
-        # fire-and-forget tasks are not garbage-collected mid-flight.
-        self._persist_tasks: Set[asyncio.Task] = set()
+        # Local YOLO and remote/cloud paths use separate pools so a hung cloud call cannot
+        # starve local inference (and vice versa). asyncio.wait_for does not cancel the
+        # underlying thread; isolation + a bounded worker count fail closed under saturation.
+        self._local_executor = self._new_executor("akshrava-local-infer")
+        self._remote_executor = self._new_executor("akshrava-remote-infer")
+        self._timeout_streak = 0
+        self._circuit_open_until = 0.0
+        # Alert persistence / diagnostic uploads must never block the phone WebSocket reply.
+        self._persist_tracker = BackgroundTaskTracker("alert-persistence")
+        self._upload_tracker = BackgroundTaskTracker("diagnostic-uploads")
 
-    def _new_executor(self) -> ThreadPoolExecutor:
+    def _new_executor(self, prefix: str) -> ThreadPoolExecutor:
         return ThreadPoolExecutor(
             max_workers=self._inference_executor_workers,
-            thread_name_prefix="akshrava-inference",
+            thread_name_prefix=prefix,
         )
 
-    def _tracker(self, device_id: str) -> SimpleTracker:
-        if device_id not in self._trackers:
-            self._trackers[device_id] = self._tracker_factory()
-        return self._trackers[device_id]
+    def _uses_remote_path(self) -> bool:
+        return isinstance(self.detector, (RemoteWorkerDetector, RegistryRemoteWorkerDetector))
+
+    def _tracker_key(self, state: SessionState) -> str:
+        return state.session_key or state.device_id
+
+    def _tracker(self, session_key: str) -> SimpleTracker:
+        if session_key not in self._trackers:
+            self._trackers[session_key] = self._tracker_factory()
+        return self._trackers[session_key]
 
     async def analyze(self, state: SessionState, header: FrameHeader, jpeg: bytes) -> Dict:
         started = time.monotonic()
@@ -76,7 +131,7 @@ class VisionService:
         detect_ms = int((time.monotonic() - detected_started) * 1000)
         track_score_started = time.monotonic()
         pose_discontinuity = self._pose_discontinuity(state, header)
-        tracker = self._tracker(state.device_id)
+        tracker = self._tracker(self._tracker_key(state))
         state.tracks = tracker.update(
             state.tracks,
             detections,
@@ -142,9 +197,11 @@ class VisionService:
         return result
 
     def _schedule_record_alert(self, device_id: str, frame_id: int, hazard) -> None:
-        task = asyncio.create_task(self._record_alert_background(device_id, frame_id, hazard))
-        self._persist_tasks.add(task)
-        task.add_done_callback(self._persist_tasks.discard)
+        self._persist_tracker.schedule(self._record_alert_background(device_id, frame_id, hazard))
+
+    def schedule_diagnostic_upload(self, coro) -> None:
+        """Track diagnostic upload tasks so shutdown can drain them."""
+        self._upload_tracker.schedule(coro)
 
     async def _record_alert_background(self, device_id: str, frame_id: int, hazard) -> None:
         try:
@@ -157,35 +214,31 @@ class VisionService:
             )
 
     async def drain_persists(self, timeout: float = 2.0) -> None:
-        """Wait for in-flight alert writes (tests + graceful shutdown)."""
-        pending = list(self._persist_tasks)
-        if not pending:
-            return
-        done, still_pending = await asyncio.wait(pending, timeout=timeout)
-        for task in still_pending:
-            task.cancel()
-        if still_pending:
-            await asyncio.gather(*still_pending, return_exceptions=True)
-        for task in done:
-            exc = task.exception() if not task.cancelled() else None
-            if exc is not None:
-                logger.error("background alert persistence task failed: %s", exc)
+        """Wait for in-flight alert writes and diagnostic uploads (tests + graceful shutdown)."""
+        await asyncio.gather(
+            self._persist_tracker.drain(timeout=timeout),
+            self._upload_tracker.drain(timeout=timeout),
+            return_exceptions=True,
+        )
 
-    async def release_session(self, device_id: str) -> None:
+    async def release_session(self, session_key: str) -> None:
         """Drop per-connection tracker state on disconnect/revocation."""
-        self._trackers.pop(device_id, None)
+        self._trackers.pop(session_key, None)
 
     def shutdown(self) -> None:
         # cancel_futures is Python 3.9+, while the package intentionally supports Python 3.8.
         # The bounded executor prevents unbounded queued work. Using wait=True ensures
         # all thread pools join during lifecycle teardowns and test runs.
-        for task in list(self._persist_tasks):
-            task.cancel()
-        self._persist_tasks.clear()
-        self._executor.shutdown(wait=True)
+        for tracker in (self._persist_tracker, self._upload_tracker):
+            for task in list(tracker.tasks):
+                task.cancel()
+            tracker.tasks.clear()
+        self._local_executor.shutdown(wait=True)
+        self._remote_executor.shutdown(wait=True)
         # TestClient can start a fresh lifespan over the imported application. Recreate the
-        # bounded pool lazily instead of retaining an executor that has already been shut down.
-        self._executor = self._new_executor()
+        # bounded pools lazily instead of retaining executors that have already been shut down.
+        self._local_executor = self._new_executor("akshrava-local-infer")
+        self._remote_executor = self._new_executor("akshrava-remote-infer")
 
     async def shutdown_async(self) -> None:
         await self.drain_persists()
@@ -197,41 +250,70 @@ class VisionService:
             else:
                 close_method()
 
-    async def _detect(self, device_id: str, jpeg: bytes):
-        async_device_method = getattr(self.detector, "detect_async_with_status_for_device", None)
-        async_method = async_device_method or getattr(self.detector, "detect_async_with_status", None)
-        
-        if async_device_method is not None:
-            try:
-                result = await asyncio.wait_for(
-                    async_device_method(device_id, jpeg),
-                    timeout=self.inference_timeout_seconds,
-                )
-            except asyncio.TimeoutError as exc:
-                raise RuntimeError("inference deadline exceeded") from exc
-            return result
-        elif async_method is not None:
-            try:
-                result = await asyncio.wait_for(
-                    async_method(jpeg),
-                    timeout=self.inference_timeout_seconds,
-                )
-            except asyncio.TimeoutError as exc:
-                raise RuntimeError("inference deadline exceeded") from exc
-            return result
-        elif hasattr(self.detector, "detect_async_for_device"):
-            try:
-                result = await asyncio.wait_for(
-                    self.detector.detect_async_for_device(device_id, jpeg),
-                    timeout=self.inference_timeout_seconds,
-                )
-            except asyncio.TimeoutError as exc:
-                raise RuntimeError("inference deadline exceeded") from exc
-            return result, None
+    def _circuit_allows(self) -> None:
+        if time.monotonic() < self._circuit_open_until:
+            raise RuntimeError("inference circuit open after repeated timeouts")
 
+    def _note_timeout(self) -> None:
+        self._timeout_streak += 1
+        if self._timeout_streak >= self._CIRCUIT_OPEN_AFTER:
+            self._circuit_open_until = time.monotonic() + self._CIRCUIT_COOLDOWN_SECONDS
+            self._timeout_streak = 0
+            logger.warning(
+                "inference circuit opened for %.1fs after repeated timeouts",
+                self._CIRCUIT_COOLDOWN_SECONDS,
+            )
+
+    def _note_success(self) -> None:
+        self._timeout_streak = 0
+
+    async def _detect(self, device_id: str, jpeg: bytes):
+        """Run detection with timeout + circuit break.
+
+        Remote HTTP adapters are preferred on the async path (request timeouts are killable).
+        Local/sync detectors run on an isolated thread pool: wait_for cannot cancel a worker
+        thread, so pool separation limits blast radius when one path hangs.
+        """
+        self._circuit_allows()
+        loop = asyncio.get_running_loop()
+
+        # Remote workers: async HTTP with follow_redirects=False; timeout is meaningful.
+        if self._uses_remote_path():
+            async_for_device = getattr(self.detector, "detect_async_for_device", None)
+            try:
+                if async_for_device is not None:
+                    result = await asyncio.wait_for(
+                        async_for_device(device_id, jpeg),
+                        timeout=self.inference_timeout_seconds,
+                    )
+                    self._note_success()
+                    return result, None
+                result = await asyncio.wait_for(
+                    self.detector.detect_async(jpeg),
+                    timeout=self.inference_timeout_seconds,
+                )
+                self._note_success()
+                return result, None
+            except asyncio.TimeoutError as exc:
+                self._note_timeout()
+                raise RuntimeError("inference deadline exceeded") from exc
+
+        # CloudFallbackDetector exposes provider + local; keep async for the availability bit.
+        if getattr(self.detector, "provider", None) is not None and getattr(self.detector, "local", None) is not None:
+            try:
+                result = await asyncio.wait_for(
+                    self.detector.detect_async_with_status_for_device(device_id, jpeg),
+                    timeout=self.inference_timeout_seconds,
+                )
+                self._note_success()
+                return result
+            except asyncio.TimeoutError as exc:
+                self._note_timeout()
+                raise RuntimeError("inference deadline exceeded") from exc
+
+        # Local YOLO / noop: sync detect on the isolated local pool (not the default executor).
         device_method = getattr(self.detector, "detect_with_status_for_device", None)
         method = device_method or getattr(self.detector, "detect_with_status", None)
-        loop = asyncio.get_running_loop()
         if device_method is not None:
             def function(frame):
                 return device_method(device_id, frame)
@@ -242,13 +324,14 @@ class VisionService:
                 return self.detector.detect_for_device(device_id, frame)
         try:
             result = await asyncio.wait_for(
-                loop.run_in_executor(self._executor, function, jpeg),
+                loop.run_in_executor(self._local_executor, function, jpeg),
                 timeout=self.inference_timeout_seconds,
             )
+            self._note_success()
+            return result if method is not None else (result, None)
         except asyncio.TimeoutError as exc:
+            self._note_timeout()
             raise RuntimeError("inference deadline exceeded") from exc
-        return result if method is not None else (result, None)
-
 
     def _pose_discontinuity(self, state: SessionState, header: FrameHeader) -> bool:
         if header.pose_age_ms is None or header.pose_age_ms > 100:

@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import NamedTuple, Optional
 from pathlib import Path
 
 import jwt
@@ -10,6 +10,11 @@ class AuthError(ValueError):
     pass
 
 
+class DeviceClaims(NamedTuple):
+    device_id: str
+    diagnostic_consent: bool
+
+
 def _verification_key(settings: Settings) -> str:
     if settings.jwt_algorithm == "HS256":
         return settings.jwt_secret
@@ -19,9 +24,10 @@ def _verification_key(settings: Settings) -> str:
         raise AuthError("device verification key unavailable") from exc
 
 
-def device_id_from_token(token: Optional[str], settings: Settings) -> str:
+def device_claims_from_token(token: Optional[str], settings: Settings) -> DeviceClaims:
+    """Decode a device JWT. Diagnostic upload consent is a server-side claim, not a query param."""
     if settings.dev_auth_bypass and token == "dev-device-token":
-        return "dev-device"
+        return DeviceClaims(device_id="dev-device", diagnostic_consent=False)
     if not token:
         raise AuthError("missing device token")
     try:
@@ -41,4 +47,11 @@ def device_id_from_token(token: Optional[str], settings: Settings) -> str:
     subject = claims.get("sub")
     if not isinstance(subject, str) or not subject:
         raise AuthError("token missing subject")
-    return subject
+    consent = claims.get("diagnostic_consent", False)
+    if not isinstance(consent, bool):
+        consent = False
+    return DeviceClaims(device_id=subject, diagnostic_consent=consent)
+
+
+def device_id_from_token(token: Optional[str], settings: Settings) -> str:
+    return device_claims_from_token(token, settings).device_id

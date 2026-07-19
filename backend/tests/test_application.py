@@ -24,8 +24,8 @@ class Vision:
         self.received.append((state, header, jpeg))
         return {"type": "result"}
 
-    async def release_session(self, device_id):
-        self.closed.append(device_id)
+    async def release_session(self, session_key):
+        self.closed.append(session_key)
 
 
 def header(calibration_id="r0"):
@@ -35,7 +35,7 @@ def header(calibration_id="r0"):
 @pytest.mark.asyncio
 async def test_session_application_owns_calibration_and_vision_transaction():
     store, vision = Store(), Vision()
-    state = SessionState(device_id="phone")
+    state = SessionState(device_id="phone", session_key="conn-1")
     app = SessionApplicationService(store, vision)
     result = await app.analyze_frame(state, header(), b"jpeg")
     assert result["type"] == "result"
@@ -44,7 +44,7 @@ async def test_session_application_owns_calibration_and_vision_transaction():
     assert state.geometry_profile == {"calibration_id": "r0"}
     assert state.last_capture_mono_ms == 100
     await app.close_session(state)
-    assert vision.closed == ["phone"]
+    assert vision.closed == ["conn-1"]
 
 
 @pytest.mark.asyncio

@@ -203,14 +203,18 @@ def test_remote_detector_signs_and_validates_worker_response(monkeypatch):
         def read(self, size):
             return b'{"detections":[{"label":"car","confidence":0.8,"box":[1,2,3,4]}]}'
 
-    def fake_urlopen(request, timeout, context=None):
-        captured["signature"] = request.headers["X-akshrava-signature"]
-        captured["content_type"] = request.headers["Content-type"]
-        captured["body"] = request.data
-        captured["timeout"] = timeout
-        return Response()
+    class FakeOpener:
+        def open(self, request, timeout=None):
+            captured["signature"] = request.get_header("X-akshrava-signature") or request.headers.get("X-Akshrava-Signature")
+            # urllib Request stores headers with capitalization variants
+            headers = {k.lower(): v for k, v in request.header_items()}
+            captured["signature"] = headers.get("x-akshrava-signature")
+            captured["content_type"] = headers.get("content-type")
+            captured["body"] = request.data
+            captured["timeout"] = timeout
+            return Response()
 
-    monkeypatch.setattr("akshrava_backend.detector.urlopen", fake_urlopen)
+    monkeypatch.setattr("akshrava_backend.detector.build_opener", lambda *args, **kwargs: FakeOpener())
     detector = RemoteWorkerDetector("https://worker.internal/v1/infer", SECRET, 450)
     assert detector.detect(JPEG) == [Detection("car", 0.8, (1.0, 2.0, 3.0, 4.0))]
     assert captured["signature"]
@@ -218,6 +222,38 @@ def test_remote_detector_signs_and_validates_worker_response(monkeypatch):
     assert captured["body"] == JPEG
     assert captured["timeout"] == 0.45
 
+
+def test_remote_detector_rejects_http_redirects(monkeypatch):
+    from akshrava_backend.detector import RemoteInferenceError
+
+    class FakeOpener:
+        def open(self, request, timeout=None):
+            raise RemoteInferenceError("remote worker redirect rejected")
+
+    monkeypatch.setattr("akshrava_backend.detector.build_opener", lambda *args, **kwargs: FakeOpener())
+    detector = RemoteWorkerDetector("https://worker.internal/v1/infer", SECRET, 450)
+    try:
+        detector.detect(JPEG)
+        assert False, "expected redirect rejection"
+    except RemoteInferenceError as exc:
+        assert "redirect" in str(exc)
+
+
+def test_remote_detector_rejects_host_outside_allowlist():
+    from akshrava_backend.detector import RemoteInferenceError
+
+    detector = RemoteWorkerDetector(
+        "https://worker.internal/v1/infer",
+        SECRET,
+        450,
+        allowed_hosts={"worker.internal"},
+    )
+    detector.endpoint = "https://evil.example/v1/infer"
+    try:
+        detector.detect(JPEG)
+        assert False, "expected host allowlist rejection"
+    except RemoteInferenceError as exc:
+        assert "allowlist" in str(exc)
 
 def test_gpu_worker_accepts_signed_binary_jpeg_without_base64():
     settings = WorkerSettings(SECRET, "unused.pt", 200_000, 1280, 30, require_gpu=False)
@@ -244,14 +280,15 @@ def test_remote_detector_routes_device_stickily_and_fails_over_to_warm_worker(mo
         def read(self, size):
             return b'{"detections":[]}'
 
-    def fake_urlopen(request, timeout, context=None):
-        calls.append(request.full_url)
-        if len(calls) == 1:
-            from urllib.error import URLError
-            raise URLError("preempted")
-        return Response()
+    class FakeOpener:
+        def open(self, request, timeout=None):
+            calls.append(request.full_url)
+            if len(calls) == 1:
+                from urllib.error import URLError
+                raise URLError("preempted")
+            return Response()
 
-    monkeypatch.setattr("akshrava_backend.detector.urlopen", fake_urlopen)
+    monkeypatch.setattr("akshrava_backend.detector.build_opener", lambda *args, **kwargs: FakeOpener())
     registry = StaticInferenceEndpointRegistry([
         InferenceEndpoint("one", "https://one.internal/v1/infer"),
         InferenceEndpoint("two", "https://two.internal/v1/infer"),

@@ -1,9 +1,28 @@
 project_id = "your-gcp-project-id"
-# credentials_file = "/absolute/path/to/sa.json"  # optional; otherwise use ADC
+# Use Application Default Credentials or Workload Identity Federation (no credentials_file).
 region      = "us-central1"
 zone        = "us-central1-a"
 environment = "pilot"
 detector    = "noop"
+
+# Prefer digest-pinned images from ./scripts/build_gcp_images.sh:
+# api_image    = "us-central1-docker.pkg.dev/PROJECT/akshrava/akshrava-api@sha256:..."
+# worker_image = "us-central1-docker.pkg.dev/PROJECT/akshrava/akshrava-worker@sha256:..."
+
+# Cloud Run invoker: default is private. For a temporary public pilot edge only:
+# api_allow_unauthenticated = true
+# Or grant specific members:
+# api_invoker_members = ["serviceAccount:edge@PROJECT.iam.gserviceaccount.com"]
+
+# Memorystore in-transit TLS (upgrades to STANDARD_HA + rediss://):
+# redis_transit_encryption = true
+
+# Prefer external PKI so private keys never land in Terraform state:
+# manage_pki_in_terraform = false
+# jwt_public_key_pem  = file("jwt-public.pem")
+# jwt_private_key_pem = file("jwt-private.pem")
+# ... plus worker_*_pem values ...
+
 # When ready for GPU inference:
 # detector            = "remote"
 # yolo_weights_sha256 = "hex64..."

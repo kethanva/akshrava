@@ -66,8 +66,16 @@ object AppConfigStore {
             }
         }
         val legacy = prefs.getString(TOKEN, "") ?: ""
-        if (legacy.isNotBlank()) saveToken(context, legacy)
-        return legacy
+        if (legacy.isNotBlank()) {
+            // One-shot migration into Keystore, then scrub plaintext immediately.
+            if (saveToken(context, legacy)) {
+                prefs.edit().remove(TOKEN).apply()
+                return legacy
+            }
+            prefs.edit().remove(TOKEN).apply()
+            return ""
+        }
+        return ""
     }
 
     /** Returns false when the Android Keystore cannot protect the bearer token. */

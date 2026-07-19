@@ -11,6 +11,7 @@
     <string name="watchdog_text">अक्षरव खोलें और सहायता शुरू करें दबाएँ। छड़ी का उपयोग जारी रखें।</string>
     <string name="hint_endpoint">सुरक्षित WebSocket पता</string>
     <string name="hint_token">डिवाइस टोकन</string>
+    <string name="hint_token_saved">डिवाइस टोकन सुरक्षित (बदलने के लिए नया मान लिखें)</string>
     <string name="hint_calibration">कैलिब्रेशन आईडी</string>
     <string name="hint_language">अलर्ट भाषा</string>
     <string name="language_english">अंग्रेज़ी (भारत)</string>

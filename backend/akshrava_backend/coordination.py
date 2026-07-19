@@ -6,6 +6,7 @@ state when a deployment adds API or GPU replicas.
 """
 
 import asyncio
+import time
 from abc import ABC, abstractmethod
 
 
@@ -150,7 +151,9 @@ return allowed and 1 or 0
 
     async def allow(self, device_id: str, rate_per_second: float, burst: float) -> bool:
         client = await self._client_for_use()
-        now = asyncio.get_running_loop().time()
+        # Token-bucket refill across API replicas must use shared wall-clock epoch seconds.
+        # Process-local asyncio loop.time() is monotonic and diverges between hosts.
+        now = time.time()
         result = await client.eval(self._SCRIPT, 1, f"{self.namespace}:{device_id}", now, burst, rate_per_second)
         return bool(result)
 
@@ -169,3 +172,12 @@ def device_rate_limiter_for(*, redis_url: str, require_distributed: bool) -> Dev
     if require_distributed:
         raise ValueError("REDIS_URL is required for production distributed frame limits")
     return InMemoryDeviceRateLimiter()
+
+
+def use_redis_frame_limiter(*, redis_url: str) -> bool:
+    """Prefer the Redis limiter whenever REDIS_URL is configured (pilot and production).
+
+    In-memory buckets are only for development or single-process benches without Redis.
+    Compose default AKSHRAVA_ENV=pilot must not bypass Redis when Redis is present.
+    """
+    return bool(redis_url and redis_url.strip())

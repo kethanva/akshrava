@@ -1,27 +1,27 @@
 import asyncio
-import json
 import logging
-import time
 import secrets
 from contextlib import asynccontextmanager, suppress
+from json import JSONDecodeError
 from typing import Optional
 
 from fastapi import FastAPI, Header, HTTPException, Response, WebSocket, WebSocketDisconnect
 
-from .auth import AuthError, device_id_from_token
+from .auth import AuthError, device_claims_from_token, device_id_from_token
 from .application import SessionApplicationService
 from .config import Settings
 from .domain import SessionState
-from .protocol import ProtocolError, parse_frame_header, quality_for_inference
+from .protocol import ProtocolError, quality_for_inference
 from .cloud_fallback import make_cloud_provider
 from .coordination import device_rate_limiter_for
-from .detector import jpeg_dimensions, make_detector
+from .detector import make_detector
 from .metrics import Metrics
 from .rate_limit import FrameRateLimiter
 from .service import VisionService
 from .session_admission import session_admission_for
 from .storage import Store
 from .gcp_storage import GcpDiagnosticStorage
+from .session_handler import FrameStreamHandler
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -41,6 +41,7 @@ MAX_CONTROL_MESSAGE_BYTES = 4096
 settings = Settings.from_env()
 store = Store(
     settings.database_url,
+    redis_url=settings.redis_url,
     bootstrap_schema=settings.environment == "development",
     expected_schema_revision=None if settings.environment == "development" else settings.expected_schema_revision,
 )
@@ -109,7 +110,7 @@ async def lifespan(app):
                 shutdown()
         # Close GCS storage executor
         gcp_storage.close()
-        await store.engine.dispose()
+        await store.close()
         await device_rate_limiter.close()
         await session_admission.shutdown()
 
@@ -137,7 +138,19 @@ async def readyz():
 
 
 @app.get("/metrics", include_in_schema=False)
-async def prometheus_metrics():
+async def prometheus_metrics(
+    x_akshrava_metrics_token: Optional[str] = Header(default=None),
+    authorization: Optional[str] = Header(default=None),
+):
+    # Match Compose Caddy: do not expose aggregate metrics on the public URL outside development.
+    # Internal scrapers pass METRICS_SCRAPE_TOKEN via header or Bearer.
+    if settings.environment != "development":
+        expected = settings.metrics_scrape_token
+        provided = (x_akshrava_metrics_token or "").strip()
+        if not provided and authorization and authorization.lower().startswith("bearer "):
+            provided = authorization[7:].strip()
+        if not expected or provided != expected:
+            raise HTTPException(status_code=404, detail="not found")
     return Response(metrics.render(), media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
@@ -201,7 +214,8 @@ async def session(websocket: WebSocket):
     if token is None and settings.dev_auth_bypass:
         token = websocket.query_params.get("token")
     try:
-        device_id = device_id_from_token(token, settings)
+        claims = device_claims_from_token(token, settings)
+        device_id = claims.device_id
     except AuthError:
         await websocket.close(code=4401)
         return
@@ -217,16 +231,31 @@ async def session(websocket: WebSocket):
     session_opened = True
     await websocket.accept()
     metrics.session_opened()
-    consent = websocket.query_params.get("consent", "false").lower() in {"true", "1"}
+    # Diagnostic upload consent is server-side (JWT claim). Query param alone is never enough;
+    # development may OR a query flag only when DEV_AUTH_BYPASS is on for local bench uploads.
+    consent = claims.diagnostic_consent
+    if settings.dev_auth_bypass and websocket.query_params.get("consent", "false").lower() in {"true", "1"}:
+        consent = True
     state = SessionState(
         device_id=device_id,
+        session_key=session_id,
         trace_prefix=secrets.token_urlsafe(12),
         diagnostic_consent=consent,
     )
-    pending_header = None
-    discard_next_binary = False
-    local_limiter = FrameRateLimiter(NORMAL_FRAME_RATE_PER_SECOND, NORMAL_FRAME_BURST)
-    priority_local_limiter = FrameRateLimiter(PRIORITY_FRAME_RATE_PER_SECOND, PRIORITY_FRAME_BURST)
+    handler = FrameStreamHandler(
+        device_id=device_id,
+        state=state,
+        settings=settings,
+        store=store,
+        device_rate_limiter=device_rate_limiter,
+        metrics=metrics,
+        local_limiter=FrameRateLimiter(NORMAL_FRAME_RATE_PER_SECOND, NORMAL_FRAME_BURST),
+        priority_local_limiter=FrameRateLimiter(PRIORITY_FRAME_RATE_PER_SECOND, PRIORITY_FRAME_BURST),
+        normal_rate=NORMAL_FRAME_RATE_PER_SECOND,
+        normal_burst=NORMAL_FRAME_BURST,
+        priority_rate=PRIORITY_FRAME_RATE_PER_SECOND,
+        priority_burst=PRIORITY_FRAME_BURST,
+    )
 
     # Normal walking sessions are bounded at 1.2 FPS with a two-frame burst. This matches the
     # freshness policy and prevents one authenticated device from turning server queue time into
@@ -246,154 +275,66 @@ async def session(websocket: WebSocket):
         while True:
             message = await websocket.receive()
             if message.get("text") is not None:
-                raw_payload = message["text"]
-                if len(raw_payload.encode("utf-8")) > MAX_CONTROL_MESSAGE_BYTES:
-                    raise ProtocolError("control message is too large")
-                payload = json.loads(raw_payload)
-                if not isinstance(payload, dict):
-                    raise ProtocolError("control message must be a JSON object")
-                message_type = payload.get("type")
-                if message_type == "ping":
-                    await websocket.send_json({"type": "pong"})
-                elif message_type == "frame":
-                    # A revocation can happen after this WebSocket was accepted. Check before
-                    # accepting another header so a lost phone cannot continue using an already
-                    # open session; the Android client treats 4403 as a permanent provisioning
-                    # failure rather than reconnecting.
-                    if await store.is_device_revoked(device_id):
-                        await websocket.close(code=4403)
+                resp = await handler.handle_text_frame(message["text"])
+                if resp is not None:
+                    if resp.get("_action") == "close":
+                        if resp.get("response") is not None:
+                            await websocket.send_json(resp["response"])
+                        await websocket.close(code=resp["code"])
                         return
-                    if pending_header is not None or discard_next_binary:
-                        logger.error("Protocol violation: received header before prior binary payload was resolved")
-                        await websocket.send_json({"type": "error", "code": "protocol_violation", "detail": "Header out of sequence"})
-                        await websocket.close(code=4400)
-                        return
-                    else:
-                        header = parse_frame_header(payload)
-                        previous = state.last_capture_mono_ms
-                        
-                        if previous is not None and header.capture_mono_ms <= previous:
-                            metrics.reject_frame()
-                            await websocket.send_json({"type": "error", "code": "non_monotonic_capture"})
-                            # Headers and JPEGs are paired without an acknowledgement. Consume the
-                            # corresponding JPEG so a rejected header cannot desynchronise the socket.
-                            discard_next_binary = True
-                        else:
-                            # Priority (on-demand look) frames get their own, tighter bucket
-                            # instead of bypassing rate limiting entirely -- header.priority is
-                            # client-asserted, so an unbounded bypass would let any authenticated
-                            # device (including a lost/stolen kit still inside its token window)
-                            # flood the shared GPU at socket speed. The ":priority" key suffix
-                            # keeps this bucket fully separate from the ambient-frame bucket, so
-                            # a look burst never eats into ordinary walking-session budget.
-                            if header.priority:
-                                rate_id = "%s:priority" % device_id
-                                rate_per_second, burst = PRIORITY_FRAME_RATE_PER_SECOND, PRIORITY_FRAME_BURST
-                                dev_limiter = priority_local_limiter
-                            else:
-                                rate_id = device_id
-                                rate_per_second, burst = NORMAL_FRAME_RATE_PER_SECOND, NORMAL_FRAME_BURST
-                                dev_limiter = local_limiter
-                            try:
-                                rate_allowed = (
-                                    await device_rate_limiter.allow(rate_id, rate_per_second, burst)
-                                    if settings.environment == "production"
-                                    else dev_limiter.allow()
-                                )
-                            except Exception:
-                                logger.exception("frame admission control unavailable")
-                                await websocket.send_json({"type": "error", "code": "vision_unavailable"})
-                                await websocket.close(code=1011)
-                                return
-                            # A look frame right after an ambient frame is the whole point of the
-                            # feature (the standing-still blind spot), so the min-interval floor
-                            # -- which exists to bound ambient upload cadence -- does not apply
-                            # to priority frames; the priority token bucket above already bounds
-                            # how often a look can happen.
-                            if not rate_allowed or (
-                                not header.priority
-                                and previous is not None
-                                and header.capture_mono_ms - previous < settings.min_frame_interval_ms
-                            ):
-                                metrics.reject_frame()
-                                await websocket.send_json({"type": "error", "code": "frame_rate_limited"})
-                                discard_next_binary = True
-                            else:
-                                pending_header = header
-                elif message_type == "status":
-                    await websocket.send_json({"type": "status_ack"})
-                elif message_type == "look":
-                    # On-demand look is a priority frame header+binary; acknowledge intent.
-                    await websocket.send_json({"type": "look_ack"})
-                else:
-                    await websocket.send_json({"type": "error", "code": "unknown_message"})
+                    await websocket.send_json(resp)
             elif message.get("bytes") is not None:
-                decode_started = time.monotonic()
-                if not (pending_header is not None or discard_next_binary):
-                    logger.error("Protocol violation: received binary bytes without pending header")
-                    await websocket.send_json({"type": "error", "code": "protocol_violation", "detail": "Binary payload out of sequence"})
-                    await websocket.close(code=4400)
+                resp = await handler.handle_binary_frame(message["bytes"])
+                if resp.get("_action") == "close":
+                    if resp.get("response") is not None:
+                        await websocket.send_json(resp["response"])
+                    await websocket.close(code=resp["code"])
                     return
-                if discard_next_binary:
-                    discard_next_binary = False
+                elif resp.get("_action") == "continue":
                     continue
-                if pending_header is None:
-                    metrics.reject_frame()
-                    await websocket.send_json({"type": "error", "code": "missing_frame_header"})
-                    continue
-                jpeg = message["bytes"]
-                header = pending_header
-                pending_header = None
-                if len(jpeg) != header.jpeg_bytes or len(jpeg) > settings.max_image_bytes:
-                    metrics.reject_frame()
-                    await websocket.send_json({"type": "error", "code": "invalid_image_size"})
-                    continue
-                if header.width > settings.max_frame_side or header.height > settings.max_frame_side:
-                    metrics.reject_frame()
-                    await websocket.send_json({"type": "error", "code": "unsupported_frame_size"})
-                    continue
-                try:
-                    actual_width, actual_height = jpeg_dimensions(jpeg)
-                except ValueError:
-                    metrics.reject_frame()
-                    await websocket.send_json({"type": "error", "code": "invalid_jpeg"})
-                    continue
-                if (actual_width, actual_height) != (header.width, header.height):
-                    metrics.reject_frame()
-                    await websocket.send_json({"type": "error", "code": "jpeg_dimension_mismatch"})
-                    continue
-                decode_ms = int((time.monotonic() - decode_started) * 1000)
-                try:
-                    result = await session_application.analyze_frame(state, header, jpeg)
-                except Exception:
-                    # Do not leave a phone believing vision is active after a model/runtime
-                    # failure.  The client disables speech and reconnects only after this socket
-                    # is closed, preventing a half-paired frame stream from continuing.
-                    logger.exception("vision inference failed for device=%s frame_id=%s", device_id, header.frame_id)
-                    metrics.inference_failed()
-                    await websocket.send_json({"type": "error", "code": "vision_unavailable"})
-                    await websocket.close(code=1011)
-                    return
-                stages = dict(result.get("pipeline_stage_ms", {}))
-                stages["decode"] = decode_ms
-                metrics.observe_result(result["server_inference_ms"], result["hazard"] is not None, stages)
-                if header.capture_epoch_ms is not None:
-                    frame_age_ms = int(result["server_received_epoch_ms"]) - header.capture_epoch_ms
-                    if 0 <= frame_age_ms <= 60_000:
-                        metrics.observe_frame_age(frame_age_ms)
-                if result.get("late_suppressed"):
-                    metrics.late_suppressed()
-                await websocket.send_json(result)
-                if state.diagnostic_consent and settings.gcp_diagnostics_bucket:
-                    file_name = f"{device_id}/{header.frame_id}_{header.capture_mono_ms}.jpg"
-                    asyncio.create_task(gcp_storage.upload_frame(file_name, jpeg))
-                
-                await websocket.send_json(quality_for_inference(result["server_inference_ms"]))
+                elif resp.get("_action") == "analyze":
+                    header = resp["header"]
+                    decode_ms = resp["decode_ms"]
+                    jpeg = message["bytes"]
+
+                    try:
+                        result = await session_application.analyze_frame(state, header, jpeg)
+                    except Exception:
+                        # Do not leave a phone believing vision is active after a model/runtime
+                        # failure.  The client disables speech and reconnects only after this socket
+                        # is closed, preventing a half-paired frame stream from continuing.
+                        logger.exception("vision inference failed for device=%s frame_id=%s", device_id, header.frame_id)
+                        metrics.inference_failed()
+                        await websocket.send_json({"type": "error", "code": "vision_unavailable"})
+                        await websocket.close(code=1011)
+                        return
+                    stages = dict(result.get("pipeline_stage_ms", {}))
+                    stages["decode"] = decode_ms
+                    metrics.observe_result(result["server_inference_ms"], result["hazard"] is not None, stages)
+                    if header.capture_epoch_ms is not None:
+                        frame_age_ms = int(result["server_received_epoch_ms"]) - header.capture_epoch_ms
+                        if 0 <= frame_age_ms <= 60_000:
+                            metrics.observe_frame_age(frame_age_ms)
+                    if result.get("late_suppressed"):
+                        metrics.late_suppressed()
+                    await websocket.send_json(result)
+                    if state.diagnostic_consent and settings.gcp_diagnostics_bucket:
+                        file_name = f"{device_id}/{header.frame_id}_{header.capture_mono_ms}.jpg"
+
+                        async def _upload_diagnostic(name=file_name, payload=jpeg):
+                            try:
+                                await gcp_storage.upload_frame(name, payload)
+                            except Exception:
+                                logger.exception("diagnostic upload failed device=%s", device_id)
+
+                        vision.schedule_diagnostic_upload(_upload_diagnostic())
+
+                    await websocket.send_json(quality_for_inference(result["server_inference_ms"]))
             else:
                 await websocket.send_json({"type": "error", "code": "unsupported_message"})
     except (WebSocketDisconnect, RuntimeError):
         logger.info("session closed for device=%s", device_id)
-    except (ProtocolError, json.JSONDecodeError) as exc:
+    except (ProtocolError, JSONDecodeError) as exc:
         logger.warning("protocol error for device=%s: %s", device_id, exc)
         # The socket may already be broken by the same condition that raised ProtocolError
         # (e.g. the peer vanished mid-message). Best-effort notify-then-close; a failure here

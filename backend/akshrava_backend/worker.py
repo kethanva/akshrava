@@ -72,8 +72,8 @@ class WorkerSettings:
             raise ValueError("AKSHRAVA_ENV must be development, pilot or production")
         if settings.environment != "development" and not settings.yolo_weights_sha256:
             raise ValueError("YOLO_WEIGHTS_SHA256 is required outside development")
-        if settings.environment == "production" and not settings.nonce_redis_url.startswith(("redis://", "rediss://")):
-            raise ValueError("NONCE_REDIS_URL is required in production")
+        if settings.environment != "development" and not settings.nonce_redis_url.startswith(("redis://", "rediss://")):
+            raise ValueError("NONCE_REDIS_URL is required outside development for shared GPU nonce claims")
         return settings
 
 
@@ -162,7 +162,7 @@ def create_worker_app(
         app.state.batch_task = asyncio.create_task(_batch_loop(app))
         app.state.nonce_store = nonce_store_for(
             redis_url=configured_settings.nonce_redis_url,
-            require_distributed=configured_settings.environment == "production",
+            require_distributed=configured_settings.environment != "development",
         )
         app.state.metrics = Metrics()
         try:

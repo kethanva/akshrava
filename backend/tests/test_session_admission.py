@@ -1,3 +1,5 @@
+import time
+
 import pytest
 
 from akshrava_backend.session_admission import (
@@ -28,7 +30,7 @@ async def test_redis_session_admission_uses_atomic_shared_budget(monkeypatch):
 
     class FakeRedis:
         async def eval(self, script, keys, namespace, session_id, now, lease_seconds, maximum):
-            calls.append((script, keys, namespace, session_id, lease_seconds, maximum))
+            calls.append((script, keys, namespace, session_id, now, lease_seconds, maximum))
             return 1
 
         async def zrem(self, namespace, session_id):
@@ -40,14 +42,19 @@ async def test_redis_session_admission_uses_atomic_shared_budget(monkeypatch):
         return FakeRedis()
 
     monkeypatch.setattr(admission, "_client_for_use", fake_client)
+    before = time.time()
     assert await admission.try_open("session-1")
+    after = time.time()
     await admission.close("session-1")
 
-    script, keys, namespace, session_id, lease_seconds, maximum = calls[0]
+    script, keys, namespace, session_id, now, lease_seconds, maximum = calls[0]
     assert "ZCARD" in script
     assert keys == 1
     assert namespace == "akshrava:session-admission"
     assert session_id == "session-1"
     assert lease_seconds > 0
     assert maximum == 3
+    # Wall-clock epoch seconds, not asyncio loop.time() (often ~tens of seconds since boot).
+    assert before - 1 <= now <= after + 1
+    assert now > 1_000_000_000
     assert calls[1] == ("zrem", "akshrava:session-admission", "session-1")

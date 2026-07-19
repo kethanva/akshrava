@@ -205,6 +205,23 @@ async def test_per_session_trackers_do_not_share_id_counters():
 
 
 @pytest.mark.asyncio
+async def test_release_session_does_not_wipe_a_newer_reconnect_tracker():
+    # Old socket cleanup keyed by device_id used to pop the tracker that a newer session
+    # for the same phone had already started using.
+    service = VisionService(EmptyDetector(), RecordingStore())
+    state_old = SessionState(device_id="phone-1", session_key="conn-old")
+    state_new = SessionState(device_id="phone-1", session_key="conn-new")
+    await service.analyze(state_old, _header(1, 1_000), b"")
+    await service.analyze(state_new, _header(1, 1_000), b"")
+    old_tracker = service._tracker("conn-old")
+    new_tracker = service._tracker("conn-new")
+    assert old_tracker is not new_tracker
+    await service.release_session("conn-old")
+    assert "conn-old" not in service._trackers
+    assert service._tracker("conn-new") is new_tracker
+
+
+@pytest.mark.asyncio
 async def test_priority_look_bypasses_cooldown_and_returns_look_summary():
     service = VisionService(FixedPersonDetector(), RecordingStore(), language="en")
     state = SessionState(device_id="look-device")

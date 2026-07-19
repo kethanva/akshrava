@@ -3,12 +3,6 @@ variable "project_id" {
   description = "GCP project ID where Akshrava resources are created."
 }
 
-variable "credentials_file" {
-  type        = string
-  default     = ""
-  description = "Optional path to a GCP service-account JSON. Empty uses Application Default Credentials."
-}
-
 variable "region" {
   type        = string
   default     = "us-central1"
@@ -46,13 +40,13 @@ variable "detector" {
 variable "api_image" {
   type        = string
   default     = ""
-  description = "Optional override for the API image. Defaults to Artifact Registry akshrava-api:latest."
+  description = "Digest-pinned API image (preferred). Empty falls back to Artifact Registry :latest for bootstrap only."
 }
 
 variable "worker_image" {
   type        = string
   default     = ""
-  description = "Optional override for the GPU worker image. Defaults to Artifact Registry akshrava-worker:latest."
+  description = "Digest-pinned GPU worker image (preferred). Empty falls back to :latest for bootstrap only."
 }
 
 variable "yolo_weights_sha256" {
@@ -67,9 +61,92 @@ variable "database_schema_revision" {
   description = "Must match backend Settings expected_schema_revision / alembic head marker."
 }
 
+variable "api_allow_unauthenticated" {
+  type        = bool
+  default     = false
+  description = "If true, grant allUsers run.invoker (discouraged). Prefer api_invoker_members or a private edge."
+}
+
+variable "api_invoker_members" {
+  type        = list(string)
+  default     = []
+  description = "IAM members granted roles/run.invoker (e.g. serviceAccount:...@... or group:ops@...). Empty + api_allow_unauthenticated=false means private Cloud Run."
+}
+
+variable "redis_transit_encryption" {
+  type        = bool
+  default     = false
+  description = "When true, use Memorystore STANDARD_HA with SERVER_AUTHENTICATION and rediss:// URLs. BASIC AUTH remains redis://."
+}
+
+variable "manage_pki_in_terraform" {
+  type        = bool
+  default     = true
+  description = "When true, generate JWT/worker TLS keys in Terraform (lands in state). Prefer false + external PEMs for pilot/production."
+}
+
+variable "jwt_public_key_pem" {
+  type        = string
+  default     = ""
+  sensitive   = true
+  description = "Required when manage_pki_in_terraform=false."
+}
+
+variable "jwt_private_key_pem" {
+  type        = string
+  default     = ""
+  sensitive   = true
+  description = "Required when manage_pki_in_terraform=false. Never mount on Cloud Run."
+}
+
+variable "worker_ca_cert_pem" {
+  type      = string
+  default   = ""
+  sensitive = true
+}
+
+variable "worker_server_cert_pem" {
+  type      = string
+  default   = ""
+  sensitive = true
+}
+
+variable "worker_server_key_pem" {
+  type      = string
+  default   = ""
+  sensitive = true
+}
+
+variable "worker_client_cert_pem" {
+  type      = string
+  default   = ""
+  sensitive = true
+}
+
+variable "worker_client_key_pem" {
+  type      = string
+  default   = ""
+  sensitive = true
+}
+
 check "remote_requires_weights_sha" {
   assert {
     condition     = var.detector != "remote" || length(var.yolo_weights_sha256) == 64
     error_message = "detector=remote requires yolo_weights_sha256 (64 hex chars)."
+  }
+}
+
+check "external_pki_complete" {
+  assert {
+    condition = var.manage_pki_in_terraform || (
+      length(var.jwt_public_key_pem) > 0 &&
+      length(var.jwt_private_key_pem) > 0 &&
+      length(var.worker_ca_cert_pem) > 0 &&
+      length(var.worker_server_cert_pem) > 0 &&
+      length(var.worker_server_key_pem) > 0 &&
+      length(var.worker_client_cert_pem) > 0 &&
+      length(var.worker_client_key_pem) > 0
+    )
+    error_message = "manage_pki_in_terraform=false requires all jwt_* and worker_* PEM variables."
   }
 }

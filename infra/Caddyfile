@@ -11,6 +11,8 @@
     route {
         @metrics path /metrics
         respond @metrics "not found" 404
-        reverse_proxy api:8000
+        reverse_proxy api:8000 {
+            lb_policy header Authorization
+        }
     }
 }

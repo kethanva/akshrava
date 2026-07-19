@@ -16,10 +16,12 @@ terraform {
   }
 }
 
+# Use Application Default Credentials or Workload Identity Federation only.
+# Do not embed a service-account JSON via credentials = file(...); that leaks into
+# process listings and encourages long-lived keys next to Terraform state.
 provider "google" {
-  project     = var.project_id
-  region      = var.region
-  credentials = var.credentials_file != "" ? file(var.credentials_file) : null
+  project = var.project_id
+  region  = var.region
 }
 
 resource "google_project_service" "required" {

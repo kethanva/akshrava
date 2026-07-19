@@ -51,5 +51,29 @@ class WatchdogReceiver : BroadcastReceiver() {
             .setContentIntent(open)
             .build()
         manager.notify(NOTIFICATION_ID, notification)
+        // Short BLV recovery utterance; watchdog remains prompt-only for restart (never auto-starts).
+        lateinit var tts: android.speech.tts.TextToSpeech
+        tts = android.speech.tts.TextToSpeech(context) { status ->
+            if (status != android.speech.tts.TextToSpeech.SUCCESS) {
+                tts.shutdown()
+                return@TextToSpeech
+            }
+            tts.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) = Unit
+                override fun onDone(utteranceId: String?) {
+                    tts.shutdown()
+                }
+                @Deprecated("Deprecated in Java")
+                override fun onError(utteranceId: String?) {
+                    tts.shutdown()
+                }
+            })
+            tts.speak(
+                context.getString(R.string.watchdog_text),
+                android.speech.tts.TextToSpeech.QUEUE_FLUSH,
+                null,
+                "watchdog-recovery"
+            )
+        }
     }
 }

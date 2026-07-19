@@ -19,6 +19,7 @@ locals {
     google_secret_manager_secret.worker_tls_ca.secret_id,
     google_secret_manager_secret.worker_tls_client_cert.secret_id,
     google_secret_manager_secret.worker_tls_client_key.secret_id,
+    google_secret_manager_secret.metrics_scrape_token.secret_id,
   ]
   worker_secret_ids = [
     google_secret_manager_secret.worker_shared.secret_id,

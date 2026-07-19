@@ -258,6 +258,22 @@ def test_inference_failure_explicitly_disables_vision(monkeypatch):
                 websocket.receive_json()
 
 
+def test_websocket_consent_query_alone_does_not_upload_without_jwt_claim(monkeypatch):
+    """Outside the development bypass, consent=true on the query string must fail closed."""
+    from unittest.mock import AsyncMock
+    mock_upload = AsyncMock(return_value="http://storage/mock.jpg")
+    monkeypatch.setattr(main.gcp_storage, "upload_frame", mock_upload)
+    monkeypatch.setattr(main, "settings", replace(main.settings, gcp_diagnostics_bucket="test-bucket", dev_auth_bypass=False))
+
+    # Without DEV_AUTH_BYPASS the query token path is closed (4401) before any upload.
+    with TestClient(app) as client:
+        with pytest.raises(WebSocketDisconnect) as disconnect:
+            with client.websocket_connect("/v1/session?token=dev-device-token&consent=true") as websocket:
+                websocket.receive_json()
+        assert disconnect.value.code == 4401
+    mock_upload.assert_not_called()
+
+
 def test_websocket_consent_triggers_gcp_upload(monkeypatch):
     from unittest.mock import AsyncMock
     mock_upload = AsyncMock(return_value="http://storage/mock.jpg")
@@ -281,7 +297,7 @@ def test_websocket_consent_triggers_gcp_upload(monkeypatch):
             websocket.send_bytes(JPEG)
             assert websocket.receive_json()["type"] == "result"
             websocket.receive_json()  # consume quality message
-            
+
             # Wait for background task to run
             time.sleep(0.1)
 

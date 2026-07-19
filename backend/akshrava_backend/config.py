@@ -41,6 +41,7 @@ class Settings:
     remote_tls_client_cert_file: str
     remote_tls_client_key_file: str
     gcp_diagnostics_bucket: str
+    metrics_scrape_token: str
 
     @classmethod
     def from_env(cls):
@@ -78,6 +79,7 @@ class Settings:
             remote_tls_client_cert_file=os.getenv("REMOTE_TLS_CLIENT_CERT_FILE", "").strip(),
             remote_tls_client_key_file=os.getenv("REMOTE_TLS_CLIENT_KEY_FILE", "").strip(),
             gcp_diagnostics_bucket=os.getenv("GCP_DIAGNOSTICS_BUCKET", "").strip(),
+            metrics_scrape_token=os.getenv("METRICS_SCRAPE_TOKEN", "").strip(),
         )
         if settings.environment not in {"development", "pilot", "production"}:
             raise ValueError("AKSHRAVA_ENV must be development, pilot or production")
@@ -148,4 +150,8 @@ class Settings:
             raise ValueError("INFERENCE_EXECUTOR_WORKERS must be between 1 and 32")
         if settings.environment != "development" and not settings.expected_schema_revision:
             raise ValueError("DATABASE_SCHEMA_REVISION is required outside development")
+        if settings.environment != "development" and not settings.metrics_scrape_token:
+            raise ValueError(
+                "METRICS_SCRAPE_TOKEN is required outside development so /metrics is not public"
+            )
         return settings

@@ -11,6 +11,7 @@
     <string name="watchdog_text">Open Akshrava and press Start assistance again. Keep using your cane.</string>
     <string name="hint_endpoint">Secure WebSocket endpoint</string>
     <string name="hint_token">Device token</string>
+    <string name="hint_token_saved">Device token saved (enter a new value to replace)</string>
     <string name="hint_calibration">Calibration ID</string>
     <string name="hint_language">Alert language</string>
     <string name="language_english">English (India)</string>

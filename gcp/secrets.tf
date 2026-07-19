@@ -1,13 +1,17 @@
 locals {
   api_image_default    = "${var.region}-docker.pkg.dev/${var.project_id}/akshrava/akshrava-api:latest"
   worker_image_default = "${var.region}-docker.pkg.dev/${var.project_id}/akshrava/akshrava-worker:latest"
+  # Prefer digest-pinned images (api_image / worker_image from build_gcp_images.sh --digest).
+  # :latest defaults exist only for first bootstrap; pilot/production should set digests.
   api_image            = var.api_image != "" ? var.api_image : local.api_image_default
   worker_image         = var.worker_image != "" ? var.worker_image : local.worker_image_default
   remote_inference_url = "https://worker.akshrava.internal:8443/v1/infer"
   database_url         = "postgresql+asyncpg://akshrava:${random_password.db_password.result}@${google_sql_database_instance.postgres.private_ip_address}:5432/akshrava"
   database_url_sync    = "postgresql://akshrava:${random_password.db_password.result}@${google_sql_database_instance.postgres.private_ip_address}:5432/akshrava"
-  redis_url            = "redis://:${google_redis_instance.cache.auth_string}@${google_redis_instance.cache.host}:${google_redis_instance.cache.port}/0"
-  nonce_redis_url      = "redis://:${google_redis_instance.cache.auth_string}@${google_redis_instance.cache.host}:${google_redis_instance.cache.port}/1"
+  # Memorystore BASIC AUTH uses redis://; enable redis_transit_encryption (STANDARD_HA) for rediss://.
+  redis_scheme         = var.redis_transit_encryption ? "rediss" : "redis"
+  redis_url            = "${local.redis_scheme}://:${google_redis_instance.cache.auth_string}@${google_redis_instance.cache.host}:${google_redis_instance.cache.port}/0"
+  nonce_redis_url      = "${local.redis_scheme}://:${google_redis_instance.cache.auth_string}@${google_redis_instance.cache.host}:${google_redis_instance.cache.port}/1"
   deploy_remote_worker = var.detector == "remote"
 }
 
@@ -21,7 +25,7 @@ resource "google_secret_manager_secret" "jwt_public" {
 
 resource "google_secret_manager_secret_version" "jwt_public" {
   secret      = google_secret_manager_secret.jwt_public.id
-  secret_data = tls_private_key.jwt.public_key_pem
+  secret_data = local.jwt_public_pem
 }
 
 resource "google_secret_manager_secret" "jwt_private" {
@@ -33,7 +37,7 @@ resource "google_secret_manager_secret" "jwt_private" {
 
 resource "google_secret_manager_secret_version" "jwt_private" {
   secret      = google_secret_manager_secret.jwt_private.id
-  secret_data = tls_private_key.jwt.private_key_pem
+  secret_data = local.jwt_private_pem
 }
 
 resource "google_secret_manager_secret" "worker_shared" {
@@ -117,7 +121,7 @@ resource "google_secret_manager_secret" "worker_tls_ca" {
 
 resource "google_secret_manager_secret_version" "worker_tls_ca" {
   secret      = google_secret_manager_secret.worker_tls_ca.id
-  secret_data = tls_self_signed_cert.worker_ca.cert_pem
+  secret_data = local.worker_ca_cert_pem
 }
 
 resource "google_secret_manager_secret" "worker_tls_server_cert" {
@@ -129,7 +133,7 @@ resource "google_secret_manager_secret" "worker_tls_server_cert" {
 
 resource "google_secret_manager_secret_version" "worker_tls_server_cert" {
   secret      = google_secret_manager_secret.worker_tls_server_cert.id
-  secret_data = tls_locally_signed_cert.worker_server.cert_pem
+  secret_data = local.worker_server_cert_pem
 }
 
 resource "google_secret_manager_secret" "worker_tls_server_key" {
@@ -141,7 +145,7 @@ resource "google_secret_manager_secret" "worker_tls_server_key" {
 
 resource "google_secret_manager_secret_version" "worker_tls_server_key" {
   secret      = google_secret_manager_secret.worker_tls_server_key.id
-  secret_data = tls_private_key.worker_server.private_key_pem
+  secret_data = local.worker_server_key_pem
 }
 
 resource "google_secret_manager_secret" "worker_tls_client_cert" {
@@ -153,7 +157,7 @@ resource "google_secret_manager_secret" "worker_tls_client_cert" {
 
 resource "google_secret_manager_secret_version" "worker_tls_client_cert" {
   secret      = google_secret_manager_secret.worker_tls_client_cert.id
-  secret_data = tls_locally_signed_cert.worker_client.cert_pem
+  secret_data = local.worker_client_cert_pem
 }
 
 resource "google_secret_manager_secret" "worker_tls_client_key" {
@@ -165,5 +169,17 @@ resource "google_secret_manager_secret" "worker_tls_client_key" {
 
 resource "google_secret_manager_secret_version" "worker_tls_client_key" {
   secret      = google_secret_manager_secret.worker_tls_client_key.id
-  secret_data = tls_private_key.worker_client.private_key_pem
+  secret_data = local.worker_client_key_pem
+}
+
+resource "google_secret_manager_secret" "metrics_scrape_token" {
+  secret_id = "akshrava-metrics-scrape-token"
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "metrics_scrape_token" {
+  secret      = google_secret_manager_secret.metrics_scrape_token.id
+  secret_data = random_password.metrics_scrape_token.result
 }

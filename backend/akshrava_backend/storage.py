@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import logging
 from typing import Optional
 
 from sqlalchemy import DateTime, Float, Integer, String, delete, event, inspect, select, text
@@ -7,6 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from .domain import GeometryProfile
+
+logger = logging.getLogger(__name__)
 
 
 class Base(DeclarativeBase):
@@ -55,9 +58,18 @@ class AlertEvent(Base):
 
 
 class Store:
-    def __init__(self, url, *, bootstrap_schema: bool = True, expected_schema_revision: Optional[str] = None):
+    def __init__(
+        self,
+        url,
+        *,
+        redis_url: Optional[str] = None,
+        bootstrap_schema: bool = True,
+        expected_schema_revision: Optional[str] = None,
+    ):
         self.engine = create_async_engine(url, future=True)
         self.bootstrap_schema = bootstrap_schema
+        self.redis_url = redis_url
+        self._redis_client = None
         self._revocation_cache = {}  # device_id -> (revoked_bool, expiry_timestamp)
         self._cache_ttl = 15.0
         self.expected_schema_revision = expected_schema_revision
@@ -69,6 +81,18 @@ class Store:
                 cursor.execute("PRAGMA busy_timeout=5000")
                 cursor.close()
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False, class_=AsyncSession)
+
+    async def _get_redis_client(self):
+        if self._redis_client is None and self.redis_url:
+            from redis.asyncio import Redis
+            self._redis_client = Redis.from_url(self.redis_url)
+        return self._redis_client
+
+    async def close(self):
+        if self._redis_client is not None:
+            await self._redis_client.close()
+            self._redis_client = None
+        await self.engine.dispose()
 
     async def initialize(self):
         """Initialize only disposable development/test schemas.
@@ -170,9 +194,26 @@ class Store:
             device.revoked_at = datetime.now(timezone.utc)
             await session.commit()
             self._revocation_cache.pop(device_id, None)
+            if self.redis_url:
+                try:
+                    client = await self._get_redis_client()
+                    if client:
+                        await client.delete("revocation:%s" % device_id)
+                except Exception:
+                    logger.warning("Redis cache delete failed during revocation", exc_info=True)
             return True
 
     async def is_device_revoked(self, device_id: str) -> bool:
+        if self.redis_url:
+            try:
+                client = await self._get_redis_client()
+                if client:
+                    cached = await client.get("revocation:%s" % device_id)
+                    if cached is not None:
+                        return cached == b"1"
+            except Exception:
+                logger.warning("Redis cache lookup failed for revocation, falling back to local/db", exc_info=True)
+
         import time
         now = time.monotonic()
         if device_id in self._revocation_cache:
@@ -183,6 +224,14 @@ class Store:
             device = await session.get(Device, device_id)
             revoked = bool(device and device.revoked_at is not None)
         self._revocation_cache[device_id] = (revoked, now + self._cache_ttl)
+
+        if self.redis_url:
+            try:
+                client = await self._get_redis_client()
+                if client:
+                    await client.set("revocation:%s" % device_id, b"1" if revoked else b"0", ex=int(self._cache_ttl))
+            except Exception:
+                logger.warning("Redis cache save failed for revocation", exc_info=True)
         return revoked
 
     async def ping(self):

@@ -63,6 +63,9 @@ class Hazard:
 @dataclass
 class SessionState:
     device_id: str
+    # Connection-scoped key for tracker lifetime. Must not be bare device_id: an old socket's
+    # teardown must not wipe tracker state belonging to a newer reconnect of the same phone.
+    session_key: str = ""
     trace_prefix: str = ""
     calibration_id: str = ""
     tracks: List[Track] = field(default_factory=list)

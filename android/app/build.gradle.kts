@@ -39,6 +39,8 @@ android {
 
     buildTypes {
         release {
+            // Keep minify off until ProGuard/R8 keep rules are audited for CameraX, OkHttp, and TTS.
+            // Enabling without that audit risks stripping reflection-heavy release paths.
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             if (releaseSigningConfigured) signingConfig = signingConfigs.getByName("release")

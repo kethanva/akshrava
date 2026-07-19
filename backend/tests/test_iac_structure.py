@@ -30,6 +30,9 @@ def test_iac_app_structure():
     assert re.search(r'name\s*=\s*"JWT_SECRET"', tf_content), "JWT_SECRET is missing from Cloud Run"
     assert re.search(r'name\s*=\s*"REMOTE_WORKER_SECRET"', tf_content), "REMOTE_WORKER_SECRET is missing from Cloud Run"
     assert re.search(r'name\s*=\s*"REMOTE_INFERENCE_URL"', tf_content), "REMOTE_INFERENCE_URL is missing from Cloud Run"
+    assert re.search(r'name\s*=\s*"METRICS_SCRAPE_TOKEN"', tf_content), "METRICS_SCRAPE_TOKEN is missing from Cloud Run"
+    assert "cpu_idle = false" in tf_content, "Cloud Run should keep CPU allocated for WSS"
+    assert "api_allow_unauthenticated" in tf_content, "Public invoker must be gated"
     
     # Test GPU Worker VM
     assert 'resource "google_compute_instance" "worker"' in tf_content, "GPU Worker instance is missing"

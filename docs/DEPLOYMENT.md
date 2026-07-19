@@ -156,12 +156,25 @@ fail-closed contract:
 
 ```bash
 ./scripts/build_gcp_images.sh "$PROJECT_ID" us-central1
-cp gcp/terraform.tfvars.example gcp/terraform.tfvars   # set project_id
-terraform -chdir=gcp init && terraform -chdir=gcp apply
-gcloud run jobs execute akshrava-migrate --region us-central1 --wait
+# Copy the printed api_image / worker_image digests into gcp/terraform.tfvars
+cp gcp/terraform.tfvars.example gcp/terraform.tfvars   # set project_id + digests
+# Optional remote state + CMEK: copy gcp/backend.tf.example → gcp/backend.tf
+terraform -chdir=gcp init && ./scripts/gcp_migrate_then_deploy.sh "$PROJECT_ID" us-central1
 terraform -chdir=gcp output websocket_url
 ```
 
+`gcp_migrate_then_deploy.sh` runs `terraform apply` then `gcloud run jobs execute akshrava-migrate
+--wait` so Alembic must succeed before you treat the new API revision as live.
+
+Cloud Run defaults to **authenticated invokers only** (`api_allow_unauthenticated=false`). Grant
+`api_invoker_members` for an edge proxy, or set `api_allow_unauthenticated=true` only for a
+temporary public pilot. `/healthz` and `/readyz` remain usable for probes; `/metrics` requires
+`METRICS_SCRAPE_TOKEN` (Secret Manager) via `X-Akshrava-Metrics-Token` or `Authorization: Bearer`.
+
+WSS reliability: the API service uses `cpu_idle=false` and `min_instance_count=1`.
+
+Redis: AUTH is always on. Set `redis_transit_encryption=true` to move to Memorystore STANDARD_HA
+with `rediss://` URLs when in-transit TLS is required.
 Default `detector = "noop"` brings up API + SQL + Redis so Android can complete an authenticated
 session without GPU weights. Switch to `detector = "remote"` only with a 64-char
 `yolo_weights_sha256` and weights installed on the worker model volume.

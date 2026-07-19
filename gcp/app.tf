@@ -112,7 +112,8 @@ resource "google_cloud_run_v2_service" "api" {
     service_account = google_service_account.api_sa.email
     timeout         = "3600s"
     scaling {
-      min_instance_count = var.environment == "production" ? 1 : 0
+      # Keep at least one warm instance for WSS reliability in pilot/production.
+      min_instance_count = 1
       max_instance_count = 10
     }
     vpc_access {
@@ -171,6 +172,8 @@ resource "google_cloud_run_v2_service" "api" {
           cpu    = "2"
           memory = "2Gi"
         }
+        # Keep CPU allocated outside requests so WebSocket sessions stay alive.
+        cpu_idle = false
       }
 
       volume_mounts {
@@ -293,6 +296,15 @@ resource "google_cloud_run_v2_service" "api" {
           }
         }
       }
+      env {
+        name = "METRICS_SCRAPE_TOKEN"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.metrics_scrape_token.secret_id
+            version = "latest"
+          }
+        }
+      }
     }
   }
 
@@ -301,13 +313,25 @@ resource "google_cloud_run_v2_service" "api" {
     google_vpc_access_connector.connector,
     google_redis_instance.cache,
     google_sql_user.db_user,
+    google_cloud_run_v2_job.migrate,
   ]
 }
 
+# Prefer authenticated invokers. Public allUsers is opt-in via api_allow_unauthenticated.
 resource "google_cloud_run_v2_service_iam_member" "api_public_invoker" {
+  count    = var.api_allow_unauthenticated ? 1 : 0
   project  = var.project_id
   location = var.region
   name     = google_cloud_run_v2_service.api.name
   role     = "roles/run.invoker"
   member   = "allUsers"
+}
+
+resource "google_cloud_run_v2_service_iam_member" "api_invokers" {
+  for_each = toset(var.api_invoker_members)
+  project  = var.project_id
+  location = var.region
+  name     = google_cloud_run_v2_service.api.name
+  role     = "roles/run.invoker"
+  member   = each.value
 }

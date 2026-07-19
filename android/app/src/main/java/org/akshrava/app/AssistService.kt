@@ -10,11 +10,15 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.graphics.Color
+import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Size
+import okhttp3.OkHttpClient
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -28,6 +32,7 @@ import androidx.lifecycle.LifecycleService
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 class AssistService : LifecycleService() {
     companion object {
@@ -39,6 +44,10 @@ class AssistService : LifecycleService() {
         private const val THERMAL_THROTTLE_C = 43f
         private const val THERMAL_CLEAR_C = 41f
         private const val HEARTBEAT_INTERVAL_MS = 30_000L
+        /** Partial wake lock is timed so a hung teardown cannot hold the CPU forever. */
+        private const val WAKE_LOCK_TIMEOUT_MS = 60 * 60_000L
+        /** Hard upper bound on FGS teardown even if TTS never completes. */
+        private const val STOP_HARD_TIMEOUT_MS = 3_000L
     }
 
     private lateinit var frameExecutor: ExecutorService
@@ -46,6 +55,7 @@ class AssistService : LifecycleService() {
     private lateinit var poseTracker: PoseTracker
     private lateinit var alertManager: AlertManager
     private lateinit var client: ProtocolClient
+    private lateinit var http: OkHttpClient
     private lateinit var calibrationId: String
     private var headsetControls: HeadsetControls? = null
     private var reflexEngine: ReflexEngine = DisabledReflexEngine()
@@ -53,6 +63,8 @@ class AssistService : LifecycleService() {
     private var cameraProvider: ProcessCameraProvider? = null
     private val framePending = AtomicBoolean(false)
     private val lookRequested = AtomicBoolean(false)
+    private val bindGeneration = AtomicInteger(0)
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var frameId = 0L
     private var lastCaptureMs = 0L
     private var lastThermalCheckMs = 0L
@@ -80,6 +92,10 @@ class AssistService : LifecycleService() {
 
     private fun startAssistance() {
         val config = AppConfigStore.load(this)
+        if (!endpointAllowed(config.endpoint)) {
+            stopSelf()
+            return
+        }
         calibrationId = config.calibrationId
         createChannel()
         startForegroundCompat(notification())
@@ -88,7 +104,10 @@ class AssistService : LifecycleService() {
         poseTracker = PoseTracker(this).also { it.start() }
         alertManager = AlertManager(this, config.language)
         val manager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = manager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Akshrava:camera").also { it.acquire() }
+        wakeLock = manager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Akshrava:camera").also {
+            it.acquire(WAKE_LOCK_TIMEOUT_MS)
+        }
+        http = OkHttpClient.Builder().pingInterval(20, java.util.concurrent.TimeUnit.SECONDS).build()
         client = ProtocolClient(
             endpoint = config.endpoint,
             token = config.deviceToken,
@@ -101,7 +120,8 @@ class AssistService : LifecycleService() {
             },
             onHighAlert = {
                 capturePolicy.markHighAlert(SystemClock.elapsedRealtime())
-            }
+            },
+            http = http
         )
         client.connect()
         reflexEngine = ReflexFactory.create(this)
@@ -116,12 +136,32 @@ class AssistService : LifecycleService() {
         Watchdog.schedule(this)
         alertManager.status("Assistance started")
     }
+
+    private fun endpointAllowed(endpoint: String): Boolean {
+        val uri = Uri.parse(endpoint)
+        val localMock = BuildConfig.DEBUG && uri.scheme == "ws" &&
+            uri.host in setOf("127.0.0.1", "localhost", "10.0.2.2")
+        return uri.scheme == "wss" || localMock
+    }
     
     private fun bindCamera() {
+        val generation = bindGeneration.incrementAndGet()
         val future = ProcessCameraProvider.getInstance(this)
         future.addListener({
             try {
+                if (stopping || generation != bindGeneration.get()) {
+                    // Bind completed after stop: never attach an analyzer to a shutdown executor.
+                    runCatching {
+                        val provider = future.get()
+                        provider.unbindAll()
+                    }
+                    return@addListener
+                }
                 val provider = future.get()
+                if (stopping || generation != bindGeneration.get()) {
+                    provider.unbindAll()
+                    return@addListener
+                }
                 cameraProvider = provider
                 val analysis = ImageAnalysis.Builder()
                     .setResolutionSelector(
@@ -140,12 +180,18 @@ class AssistService : LifecycleService() {
                     .setTargetRotation(currentDisplayRotation())
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
+                if (stopping || generation != bindGeneration.get() || frameExecutor.isShutdown) {
+                    provider.unbindAll()
+                    return@addListener
+                }
                 analysis.setAnalyzer(frameExecutor) { image -> analyzeImage(image) }
                 provider.unbindAll()
                 provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, analysis)
             } catch (_: Exception) {
-                updateNotification("Rear camera unavailable")
-                stopAfterCameraFailure()
+                if (!stopping) {
+                    updateNotification("Rear camera unavailable")
+                    stopAfterCameraFailure()
+                }
             }
         }, ContextCompat.getMainExecutor(this))
     }
@@ -317,6 +363,8 @@ class AssistService : LifecycleService() {
         alertManager.speakThen("Rear camera unavailable. Use cane or guide.") {
             ContextCompat.getMainExecutor(this).execute { stopAssistance() }
         }
+        // Hard timeout so a stuck TTS callback cannot leave the FGS running forever.
+        mainHandler.postDelayed({ stopAssistance() }, STOP_HARD_TIMEOUT_MS)
     }
 
     private fun createChannel() {
@@ -360,6 +408,8 @@ class AssistService : LifecycleService() {
         // so make teardown explicitly idempotent rather than recursively re-entering it.
         if (stopping) return
         stopping = true
+        bindGeneration.incrementAndGet()
+        mainHandler.removeCallbacksAndMessages(null)
         SessionFlags.setActive(this, false)
         Watchdog.cancel(this)
         headsetControls?.stop()

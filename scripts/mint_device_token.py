@@ -12,6 +12,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("device_id")
     parser.add_argument("--days", type=int, default=30)
+    parser.add_argument(
+        "--diagnostic-consent",
+        action="store_true",
+        help="Embed diagnostic_consent=true so the API may upload opted-in frames (fail-closed otherwise).",
+    )
     args = parser.parse_args()
     algorithm = os.environ.get("JWT_ALGORITHM", "RS256").upper()
     if algorithm == "RS256":
@@ -29,13 +34,16 @@ def main():
     else:
         sys.exit("JWT_ALGORITHM must be HS256 or RS256.")
     now = datetime.now(timezone.utc)
+    claims = {
+        "sub": args.device_id,
+        "aud": "akshrava-device",
+        "iat": now,
+        "exp": now + timedelta(days=args.days),
+    }
+    if args.diagnostic_consent:
+        claims["diagnostic_consent"] = True
     token = jwt.encode(
-        {
-            "sub": args.device_id,
-            "aud": "akshrava-device",
-            "iat": now,
-            "exp": now + timedelta(days=args.days),
-        },
+        claims,
         secret,
         algorithm=algorithm,
     )

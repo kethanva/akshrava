@@ -12,11 +12,15 @@ data class EncodedFrame(val jpeg: ByteArray, val width: Int, val height: Int)
 /**
  * CPU-only conversion scoped to one assistance-service lifecycle.
  *
+ * FrameEncoder is not thread-safe: AssistService runs analysis on a single-thread executor
+ * and must be the only caller of [encode]. Scratch buffers are reused across frames.
+ *
  * Keeps all orientation and downscale work in NV21 so we never allocate Bitmaps
  * (and the GC pauses that follow) on the analysis thread.
  */
 class FrameEncoder {
-    // Analysis is single-threaded, but guard reusable scratch buffers for any future caller.
+    // Analysis is single-threaded (AssistService frameExecutor). Do not call encode() from
+    // additional threads without external synchronization — scratch buffers would race.
     private var nv21Scratch = ByteArray(0)
     private var transformScratch = ByteArray(0)
 

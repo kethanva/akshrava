@@ -113,8 +113,13 @@ class CloudFallbackDetector(Detector):
                 detections.append(Detection(label=label, confidence=item.confidence, box=box))
         return detections, False
 
-    async def detect_async_with_status(self, jpeg: bytes) -> Tuple[List[Detection], bool]:
-        return await self.detect_async_with_status_for_device("", jpeg)
+    async def detect_async(self, jpeg: bytes) -> List[Detection]:
+        detections, _ = await self.detect_async_with_status_for_device("", jpeg)
+        return detections
+
+    async def detect_async_for_device(self, device_id: str, jpeg: bytes) -> List[Detection]:
+        detections, _ = await self.detect_async_with_status_for_device(device_id, jpeg)
+        return detections
 
     async def detect_async_with_status_for_device(self, device_id: str, jpeg: bytes) -> Tuple[List[Detection], bool]:
         local_detections = await self.local.detect_async_for_device(device_id, jpeg)

@@ -121,3 +121,33 @@ async def test_production_store_requires_the_expected_alembic_revision(tmp_path)
     with pytest.raises(RuntimeError, match="revision mismatch"):
         await store.initialize()
     await store.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_device_revocation_uses_redis_cache():
+    class MockRedis:
+        def __init__(self):
+            self.data = {}
+        async def get(self, key):
+            return self.data.get(key)
+        async def set(self, key, value, ex=None):
+            self.data[key] = value
+        async def delete(self, key):
+            self.data.pop(key, None)
+        async def close(self):
+            pass
+
+    mock_client = MockRedis()
+    store = Store("sqlite+aiosqlite:///:memory:", redis_url="redis://localhost:6379")
+    store._redis_client = mock_client
+    await store.initialize()
+    try:
+        await store.upsert_device("test-device-redis", "r0")
+        assert not await store.is_device_revoked("test-device-redis")
+        assert mock_client.data.get("revocation:test-device-redis") == b"0"
+        mock_client.data["revocation:test-device-redis"] = b"1"
+        assert await store.is_device_revoked("test-device-redis")
+        assert await store.revoke_device("test-device-redis")
+        assert "revocation:test-device-redis" not in mock_client.data
+    finally:
+        await store.close()

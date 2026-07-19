@@ -10,6 +10,7 @@ import android.os.PowerManager
 import android.provider.Settings
 import android.text.InputType
 import android.view.View
+import android.view.WindowManager
 import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
@@ -43,12 +44,17 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
         val config = AppConfigStore.load(this)
         endpoint = field(getString(R.string.hint_endpoint), config.endpoint)
-        token = field(getString(R.string.hint_token), config.deviceToken).apply {
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or
+        token = field(getString(R.string.hint_token), "").apply {
+            // Mask bearer tokens; never leave a provisioned secret visible in the form.
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD or
                 InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
             importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
+            if (config.deviceToken.isNotBlank()) {
+                hint = getString(R.string.hint_token_saved)
+            }
         }
         calibration = field(getString(R.string.hint_calibration), config.calibrationId)
         language = Spinner(this).apply {
@@ -113,11 +119,14 @@ class MainActivity : AppCompatActivity() {
     private fun saveConfig(): Boolean {
         val previous = AppConfigStore.load(this)
         val selectedLanguage = languageTags.getOrElse(language.selectedItemPosition) { "en-IN" }
+        val typedToken = token.text.toString()
+        // Empty field keeps the previously Keystore-saved token; a new value replaces it.
+        val deviceToken = typedToken.ifBlank { previous.deviceToken }
         val saved = AppConfigStore.save(
             this,
             previous.copy(
                 endpoint = endpoint.text.toString(),
-                deviceToken = token.text.toString(),
+                deviceToken = deviceToken,
                 calibrationId = calibration.text.toString(),
                 language = selectedLanguage,
             )
@@ -127,6 +136,9 @@ class MainActivity : AppCompatActivity() {
             status.text = getString(R.string.status_keystore_failed)
             return false
         }
+        // Clear the bearer from the UI after a successful Keystore write.
+        token.setText("")
+        token.hint = getString(R.string.hint_token_saved)
         return true
     }
 

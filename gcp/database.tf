@@ -36,15 +36,17 @@ resource "google_sql_user" "db_user" {
 }
 
 resource "google_redis_instance" "cache" {
-  name               = "akshrava-redis"
-  tier               = "BASIC"
-  memory_size_gb     = 1
-  region             = var.region
-  authorized_network = google_compute_network.vpc.id
-  connect_mode       = "PRIVATE_SERVICE_ACCESS"
-  auth_enabled       = true
-  redis_version      = "REDIS_7_0"
-  depends_on         = [google_service_networking_connection.private_connection]
+  name = "akshrava-redis"
+  # BASIC does not support in-transit TLS. STANDARD_HA is required when redis_transit_encryption=true.
+  tier                    = var.redis_transit_encryption ? "STANDARD_HA" : "BASIC"
+  memory_size_gb          = 1
+  region                  = var.region
+  authorized_network      = google_compute_network.vpc.id
+  connect_mode            = "PRIVATE_SERVICE_ACCESS"
+  auth_enabled            = true
+  redis_version           = "REDIS_7_0"
+  transit_encryption_mode = var.redis_transit_encryption ? "SERVER_AUTHENTICATION" : "DISABLED"
+  depends_on              = [google_service_networking_connection.private_connection]
 }
 
 resource "google_artifact_registry_repository" "containers" {

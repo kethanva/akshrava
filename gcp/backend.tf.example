@@ -1,0 +1,17 @@
+# Optional remote state. Copy to backend.tf (or merge into providers.tf) before applying
+# shared environments. Leave commented locally; terraform validate does not require this file.
+#
+# CMEK guidance: create a Cloud KMS key in the same region as the bucket, grant the GCS
+# service account cryptoKeyEncrypterDecrypter, then set default_kms_key_name on the bucket.
+# Rotate the CMEK on your org schedule; if Terraform state was ever copied outside the
+# bucket, treat JWT/worker private keys in that state as compromised and rotate them
+# (re-mint device tokens after replacing akshrava-jwt-private).
+#
+# terraform {
+#   backend "gcs" {
+#     bucket = "akshrava-tfstate-<project-id>"
+#     prefix = "gcp"
+#     # Optional CMEK for state objects (preferred for pilot/production):
+#     # encryption_key = "projects/<project>/locations/<region>/keyRings/<ring>/cryptoKeys/<key>"
+#   }
+# }
