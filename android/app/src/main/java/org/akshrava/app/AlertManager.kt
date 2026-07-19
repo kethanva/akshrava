@@ -55,13 +55,16 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
                 override fun onError(utteranceId: String) = complete(utteranceId)
                 override fun onError(utteranceId: String, errorCode: Int) = complete(utteranceId)
             })
-            pendingStatus?.let {
-                pendingStatus = null
-                speak(it.text, flush = true, id = nextStatusId(), onComplete = it.onComplete)
-            }
+            // pendingStatus is written from status() on the camera analyzer's background
+            // executor thread and read here on whatever thread the TTS engine completes init
+            // on -- not necessarily the same thread. Guard it with the same lock already used
+            // for completionCallbacks rather than relying on @Volatile visibility alone, since
+            // this is a read-then-clear that must not race a concurrent status() write.
+            val toSpeak = synchronized(completionLock) { pendingStatus.also { pendingStatus = null } }
+            toSpeak?.let { speak(it.text, flush = true, id = nextStatusId(), onComplete = it.onComplete) }
         } else {
-            pendingStatus?.onComplete?.invoke()
-            pendingStatus = null
+            val toDrop = synchronized(completionLock) { pendingStatus.also { pendingStatus = null } }
+            toDrop?.onComplete?.invoke()
         }
     }
 
@@ -93,9 +96,23 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
         if (ready) {
             speak(text, flush = true, id = nextStatusId(), onComplete = onComplete)
         } else {
-            pendingStatus?.onComplete?.invoke()
-            pendingStatus = PendingStatus(text, onComplete)
+            val replaced = synchronized(completionLock) {
+                pendingStatus.also { pendingStatus = PendingStatus(text, onComplete) }
+            }
+            replaced?.onComplete?.invoke()
         }
+    }
+
+    /** Speak then run [onDone] (camera-failure teardown, etc.). */
+    fun speakThen(text: String, utteranceId: String = "speak_then", onDone: () -> Unit) {
+        status(text, onComplete = onDone)
+    }
+
+    /** User-pulled look summary: flush and bypass object cooldown / busy collapse. */
+    fun speakComposed(text: String, urgent: Boolean = true) {
+        val now = SystemClock.elapsedRealtime()
+        markUtterance(now)
+        speak(text, flush = urgent, id = "look-${++statusSequence}")
     }
 
     private fun summarize(now: Long) {
@@ -108,7 +125,7 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
     }
 
     private fun pruneRecent(now: Long) {
-        while (recentUtterances.isNotEmpty() && now - recentUtterances.peekFirst() > BUSY_WINDOW_MS) {
+        while (recentUtterances.isNotEmpty() && now - recentUtterances.peekFirst()!! > BUSY_WINDOW_MS) {
             recentUtterances.pollFirst()
         }
     }
@@ -159,10 +176,10 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
         val pending = synchronized(completionLock) {
             val values = completionCallbacks.values.toMutableList()
             completionCallbacks.clear()
+            pendingStatus?.onComplete?.let { values += it }
+            pendingStatus = null
             values
         }
-        pendingStatus?.onComplete?.let { pending += it }
-        pendingStatus = null
         tts?.shutdown()
         tts = null
         pending.forEach { it.invoke() }

@@ -1,11 +1,15 @@
 import base64
 import json
+import asyncio
+import time
+from dataclasses import replace
 
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from akshrava_backend import main
+from akshrava_backend.application import SessionApplicationService
 from akshrava_backend.main import app
 
 
@@ -59,14 +63,64 @@ def test_event_feed_requires_matching_device_token():
         ).status_code == 200
 
 
+def test_revoked_device_is_closed_before_its_next_frame(monkeypatch):
+    checks = 0
+
+    async def revoked_after_handshake(_device_id):
+        nonlocal checks
+        checks += 1
+        return checks > 1
+
+    monkeypatch.setattr(main.store, "is_device_revoked", revoked_after_handshake)
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/session?token=dev-device-token") as websocket:
+            assert websocket.receive_json()["type"] == "ready"
+            websocket.send_json(
+                {
+                    "type": "frame", "id": 1, "capture_mono_ms": 100, "w": 1, "h": 1,
+                    "jpeg_bytes": len(JPEG), "camera_calibration_id": "test-r0",
+                }
+            )
+            with pytest.raises(WebSocketDisconnect) as disconnect:
+                websocket.receive_json()
+    assert disconnect.value.code == 4403
+
+
 def test_metrics_endpoint_exposes_aggregate_operational_metrics():
     with TestClient(app) as client:
         response = client.get("/metrics")
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/plain")
     assert "akshrava_frames_processed_total" in response.text
+    assert "akshrava_session_admission_rejected_total" in response.text
+    assert "akshrava_frame_age_milliseconds_bucket" in response.text
     assert "akshrava_inference_duration_milliseconds_bucket" in response.text
     assert 'akshrava_pipeline_stage_duration_milliseconds_bucket{stage="decode"' in response.text
+
+
+def test_metrics_observe_phone_supplied_frame_age_from_websocket_result():
+    before = int(time.time() * 1000) - 120
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/session?token=dev-device-token") as websocket:
+            websocket.receive_json()
+            websocket.send_json(
+                {
+                    "type": "frame",
+                    "id": 77,
+                    "capture_mono_ms": 100,
+                    "capture_epoch_ms": before,
+                    "w": 1,
+                    "h": 1,
+                    "jpeg_bytes": len(JPEG),
+                    "camera_calibration_id": "test-r0",
+                }
+            )
+            websocket.send_bytes(JPEG)
+            assert websocket.receive_json()["type"] == "result"
+            websocket.receive_json()
+        metrics_text = client.get("/metrics").text
+    assert "akshrava_frame_age_milliseconds_count" in metrics_text
+    assert 'akshrava_frame_age_milliseconds_bucket{le="500"}' in metrics_text
 
 
 def test_readiness_requires_a_usable_database_connection():
@@ -74,6 +128,17 @@ def test_readiness_requires_a_usable_database_connection():
         response = client.get("/readyz")
     assert response.status_code == 200
     assert response.json()["ok"] is True
+
+
+def test_readiness_times_out_instead_of_hanging(monkeypatch):
+    async def slow_ping():
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr(main.store, "ping", slow_ping)
+    monkeypatch.setattr(main, "settings", replace(main.settings, ready_timeout_ms=100))
+    with TestClient(app) as client:
+        response = client.get("/readyz")
+    assert response.status_code == 503
 
 
 def test_websocket_rejects_non_monotonic_frame_headers():
@@ -107,12 +172,42 @@ def test_websocket_rejects_non_object_or_oversized_control_messages():
             assert websocket.receive_json()["code"] == "protocol_error"
 
 
+def test_priority_look_includes_summary(tmp_path, monkeypatch):
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/session?token=dev-device-token") as websocket:
+            assert websocket.receive_json()["type"] == "ready"
+            websocket.send_json({"type": "look"})
+            assert websocket.receive_json()["type"] == "look_ack"
+            websocket.send_json(
+                {
+                    "type": "frame",
+                    "id": 9,
+                    "capture_mono_ms": 300,
+                    "w": 1,
+                    "h": 1,
+                    "jpeg_bytes": len(JPEG),
+                    "camera_calibration_id": "test-r0",
+                    "priority": True,
+                    "mode": "priority",
+                }
+            )
+            websocket.send_bytes(JPEG)
+            result = websocket.receive_json()
+            assert result["type"] == "result"
+            assert result["priority"] is True
+            assert result["look_summary"]
+            assert "approach" not in result["look_summary"].lower()
+            assert "safe" not in result["look_summary"].lower()
+            assert websocket.receive_json()["type"] == "quality"
+
+
 def test_inference_failure_explicitly_disables_vision(monkeypatch):
     class BrokenVision:
         async def analyze(self, state, header, jpeg):
             raise RuntimeError("model unavailable")
 
     monkeypatch.setattr(main, "vision", BrokenVision())
+    monkeypatch.setattr(main, "session_application", SessionApplicationService(main.store, main.vision))
     with TestClient(app) as client:
         with client.websocket_connect("/v1/session?token=dev-device-token") as websocket:
             websocket.receive_json()

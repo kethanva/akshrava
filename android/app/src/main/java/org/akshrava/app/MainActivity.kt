@@ -8,6 +8,8 @@ import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
+import android.text.InputType
+import android.view.View
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -22,16 +24,32 @@ class MainActivity : AppCompatActivity() {
     private lateinit var calibration: EditText
     private lateinit var status: TextView
 
-    private val permissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
-        if (result[Manifest.permission.CAMERA] == true) startServiceIfConfigured()
-        else status.text = "Camera permission is required to start assistance."
+    private val permissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        when {
+            !hasPermission(Manifest.permission.CAMERA) -> {
+                status.text = "Camera permission is required to start assistance."
+            }
+            needsNotificationPermission() && !hasPermission(Manifest.permission.POST_NOTIFICATIONS) -> {
+                // A foreground service can technically start without this permission on Android
+                // 13+, but this safety app needs its persistent status and Stop control visible.
+                status.text = "Notification permission is required for visible assistance controls."
+            }
+            else -> startServiceIfConfigured()
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val config = AppConfigStore.load(this)
         endpoint = field("Secure WebSocket endpoint", config.endpoint)
-        token = field("Device token", config.deviceToken)
+        // A device token is a bearer credential: no autocorrect/suggestion strip or keyboard
+        // learning, and no autofill save prompt offering to store it elsewhere. Kept visible
+        // (not dot-masked) because the provisioning volunteer needs to verify what was pasted.
+        token = field("Device token", config.deviceToken).apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or
+                InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
+        }
         calibration = field("Calibration ID", config.calibrationId)
         status = TextView(this).apply { text = "Configure once with a volunteer, then press Start assistance."; textSize = 18f }
         val start = Button(this).apply {
@@ -62,10 +80,15 @@ class MainActivity : AppCompatActivity() {
     private fun requestAndStart() {
         saveConfig()
         val required = mutableListOf(Manifest.permission.CAMERA)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) required.add(Manifest.permission.POST_NOTIFICATIONS)
-        val missing = required.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
+        if (needsNotificationPermission()) required.add(Manifest.permission.POST_NOTIFICATIONS)
+        val missing = required.filterNot(::hasPermission)
         if (missing.isEmpty()) startServiceIfConfigured() else permissions.launch(missing.toTypedArray())
     }
+
+    private fun needsNotificationPermission(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+
+    private fun hasPermission(permission: String): Boolean =
+        ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
 
     private fun saveConfig() {
         val previous = AppConfigStore.load(this)

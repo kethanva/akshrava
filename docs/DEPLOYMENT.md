@@ -9,7 +9,9 @@ returns detector boxes. It has no database, phone endpoint, device token or aler
 
 - Keep `DETECTOR=noop` until the model licence, exact model file/hash, target-device benchmark,
   labelled evaluation and controlled-course gate are approved.
-- Set unique, high-entropy `JWT_SECRET` and `POSTGRES_PASSWORD` values. Never use the examples.
+- Set unique, high-entropy `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, and Grafana credentials. In
+  pilot/production configure `JWT_ALGORITHM=RS256` and mount only `JWT_PUBLIC_KEY_FILE` on the API;
+  keep the matching private key solely on the provisioning workstation. Never use examples.
 - Set `AKSHRAVA_ENV=pilot` or `production`; the service rejects `DEV_AUTH_BYPASS=true` outside
   an explicit `development` environment.
 - Provision a domain and DNS before enabling Caddy. The public phone endpoint must be WSS.
@@ -20,12 +22,14 @@ returns detector boxes. It has no database, phone endpoint, device token or aler
 ```bash
 cd infra
 cp .env.example .env
-# Set POSTGRES_PASSWORD, JWT_SECRET and DOMAIN in .env.
+# Set passwords, RS256 public-key path, and DOMAIN in .env.
 ../scripts/cloud_preflight.sh .env
 docker compose --env-file .env --profile control-plane --profile edge up -d --build
 ```
 
-The API is deliberately bound to `127.0.0.1:8000`; Caddy is the public TLS/WSS endpoint. Open
+The one-shot `migrate` role runs Alembic before the API starts. Application processes perform no
+schema mutations; a failed migration prevents rollout. The API is deliberately bound to
+`127.0.0.1:8000`; Caddy is the public TLS/WSS endpoint. Open
 only TCP 80 and 443 to the host. Confirm `/healthz` through the local API before provisioning a
 device. Start the optional monitoring services only on a protected host or through an SSH tunnel:
 
@@ -40,11 +44,25 @@ your operational tooling before treating those rules as pager alerts.
 
 ## GPU-worker deployment
 
-Use a private WireGuard/overlay address or a mutually authenticated TLS proxy between the hosts.
-Do **not** expose port 8000 to the public internet. Set the same `REMOTE_WORKER_SECRET` on both
+Use a private WireGuard/overlay address **and** a mutually authenticated TLS proxy between the
+hosts. Do **not** expose port 8000 to the public internet. In pilot/production, set
+`REMOTE_INFERENCE_URL` to an `https://` worker endpoint; the backend rejects plaintext worker
+URLs outside development and refuses to start unless `REMOTE_TLS_CA_FILE`,
+`REMOTE_TLS_CLIENT_CERT_FILE`, and `REMOTE_TLS_CLIENT_KEY_FILE` are configured. The API mounts
+those files read-only from `WORKER_MTLS_DIR`; the proxy must verify the client certificate.
+Set the same `REMOTE_WORKER_SECRET` on both
 hosts, set the control plane to `DETECTOR=remote`, and point `REMOTE_INFERENCE_URL` at the worker
-`/v1/infer` endpoint. The control plane timeout defaults to 450 ms; a failed or late worker result
-causes the existing fail-closed phone messaging.
+`/v1/infer` endpoint. For more than one warm worker, prefer `REMOTE_INFERENCE_REGISTRY_JSON`:
+
+```json
+[{"id":"gpu-a","url":"https://gpu-a.internal/v1/infer"},{"id":"gpu-b","url":"https://gpu-b.internal/v1/infer"}]
+```
+
+The control plane uses the registry IDs for stable device-to-worker placement and then fails
+through to the next warm peer after a transport failure. A comma-separated `REMOTE_INFERENCE_URL`
+list is still accepted for simple deployments and is converted into static worker IDs. The
+control-plane timeout defaults to 450 ms; a failed or late worker result causes the existing
+fail-closed phone messaging.
 
 On the GPU host, use the same approved model mount and only the GPU profile:
 
@@ -55,7 +73,9 @@ GPU_WORKER_BIND_ADDRESS=10.0.0.12 docker compose --env-file .env --profile gpu-w
 ```
 
 `api-gpu` uses a CUDA PyTorch runtime and one Gunicorn worker so a single GPU model is not
-replicated accidentally. It refuses to start if CUDA is unavailable. It has a health endpoint at
+replicated accidentally. In production its signed-request nonce is claimed atomically in Redis,
+so separate worker replicas can reject replayed requests consistently. It refuses to start if
+CUDA is unavailable. It has a health endpoint at
 `/readyz` and a private metrics endpoint. Add its private endpoint to
 `infra/prometheus-targets/gpu-workers.json` on the monitoring host, then reload Prometheus. The
 worker uses HMAC request authentication with timestamp replay protection; network isolation and
@@ -65,9 +85,9 @@ TLS/mTLS remain mandatory deployment controls.
 
 Only after the release gate is met, set `INSTALL_YOLO=true`, mount an approved model file via
 `MODEL_DIR`, set `DETECTOR=ultralytics` (single-host) or `DETECTOR=remote` (split deployment),
-and record the file SHA-256 in the deployment record.
-`YOLO_WEIGHTS` must resolve to that read-only mounted file. The server must never download weights
-while serving a session.
+set `YOLO_WEIGHTS_SHA256` to the approved file digest, and record it in the deployment record.
+`YOLO_WEIGHTS` must resolve to that read-only mounted file. The server and GPU worker verify the
+digest before loading the detector and must never download weights while serving a session.
 
 An optional selected-provider image fallback is described in [CLOUD_IMAGE_FALLBACK.md](CLOUD_IMAGE_FALLBACK.md).
 It is disabled by default and requires fresh privacy/consent, cost and latency sign-off.
@@ -90,6 +110,12 @@ know any cloud-provider credentials:
 process liveness endpoint. Caddy exposes neither `/metrics` nor Grafana/Prometheus publicly; use
 an SSH tunnel or other separately authenticated admin access.
 
+## Schema changes
+
+All production changes are Alembic revisions under `backend/migrations`. Rehearse each upgrade and
+downgrade against a restored backup, run `alembic upgrade head` as the one-shot deploy role, and
+record the revision in the release log. Do not add runtime DDL to API startup.
+
 There is no enabled Android fallback. If the network, control plane, or GPU worker fails, the app
 must say vision assistance is unavailable and the user must continue with a cane or guide.
 
@@ -103,6 +129,8 @@ measurement evidence.
 
 ## Scale and failover boundary
 
-One configured remote worker endpoint is adequate for the supervised pilot. Before multi-worker
-or interruptible-GPU operation, add an authenticated endpoint registry, health-checked re-pointing
-and a warm-spare drill. Do not claim automatic GPU failover from this Compose deployment alone.
+Redis now provides atomic session admission, nonce claims and per-device frame-rate limits across
+API/worker replicas. The static inference registry provides stable device-to-worker placement and
+warm-peer fail-through, but it does not by itself provide automatic health re-pointing. Production
+still requires authenticated registry updates, health-checked routing, a warm spare, and a
+rehearsed failover/restore drill.

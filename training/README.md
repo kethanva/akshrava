@@ -49,7 +49,7 @@ yolo export model=best_11n.pt format=tflite int8=True imgsz=320 data=training/ak
 ```
 
 INT8 needs calibration images (`data=`); use ~500 walking frames. **Record the exported file's
-SHA-256 in the release manifest** — a floating dependency in a safety component is how "it worked
+SHA-256 in the release manifest and set `YOLO_WEIGHTS_SHA256` in deployment** — a floating dependency in a safety component is how "it worked
 last month" happens.
 
 > Note: the on-device always-on reflex is currently **deferred** (see `../NOT_NOW.md`). This

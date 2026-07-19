@@ -27,8 +27,8 @@ require_secret() {
 }
 
 require_secret POSTGRES_PASSWORD
-require_secret JWT_SECRET
 require_secret GRAFANA_PASSWORD
+require_secret REDIS_PASSWORD
 
 postgres_password=$(value_for POSTGRES_PASSWORD)
 if [[ ! "$postgres_password" =~ ^[A-Za-z0-9_-]+$ ]]; then
@@ -48,6 +48,36 @@ case "$detector" in
   *) echo "DETECTOR must be noop, ultralytics or remote." >&2; exit 1 ;;
 esac
 
+environment=$(value_for AKSHRAVA_ENV)
+if [[ "$environment" != "pilot" && "$environment" != "production" ]]; then
+  echo "AKSHRAVA_ENV must be pilot or production for deployment." >&2
+  exit 1
+fi
+if [[ "$environment" == "production" ]]; then
+  redis_url=$(value_for REDIS_URL)
+  nonce_redis_url=$(value_for NONCE_REDIS_URL)
+  # Empty values select the authenticated Compose defaults. Explicit values must be TLS Redis
+  # endpoints so cross-host/API-replica coordination is never sent in cleartext.
+  if [[ -n "$redis_url" && ! "$redis_url" =~ ^rediss:// ]] || [[ -n "$nonce_redis_url" && ! "$nonce_redis_url" =~ ^rediss:// ]]; then
+    echo "Production REDIS_URL and NONCE_REDIS_URL must use rediss:// when explicitly set." >&2
+    exit 1
+  fi
+fi
+if [[ "$(value_for DEV_AUTH_BYPASS)" == "true" ]]; then
+  echo "DEV_AUTH_BYPASS must be false for deployment." >&2
+  exit 1
+fi
+jwt_algorithm=$(value_for JWT_ALGORITHM)
+if [[ -z "$jwt_algorithm" ]]; then jwt_algorithm=RS256; fi
+if [[ "$jwt_algorithm" != "RS256" ]]; then
+  echo "Deployments require JWT_ALGORITHM=RS256; HS256 is local-development only." >&2
+  exit 1
+fi
+if [[ -z "$(value_for JWT_PUBLIC_KEY_FILE)" ]]; then
+  echo "Deployments require JWT_PUBLIC_KEY_FILE for device-token verification." >&2
+  exit 1
+fi
+
 if [[ "$field_mode" == "--field" && "$detector" != "ultralytics" && "$detector" != "remote" ]]; then
   echo "--field requires DETECTOR=ultralytics or DETECTOR=remote; noop is transport-only bench mode." >&2
   exit 1
@@ -55,15 +85,38 @@ fi
 
 if [[ "$detector" == "remote" ]]; then
   remote_url=$(value_for REMOTE_INFERENCE_URL)
+  remote_registry=$(value_for REMOTE_INFERENCE_REGISTRY_JSON)
   remote_secret=$(value_for REMOTE_WORKER_SECRET)
-  if [[ ! "$remote_url" =~ ^https?:// ]] || [[ ${#remote_secret} -lt 32 ]] || [[ "$remote_secret" == *replace-with* ]]; then
-    echo "DETECTOR=remote requires an http(s) REMOTE_INFERENCE_URL and a non-example REMOTE_WORKER_SECRET of at least 32 characters." >&2
+  if [[ -n "$remote_registry" ]]; then
+    if ! python3 -c '
+import json
+import sys
+items = json.loads(sys.argv[1])
+if not isinstance(items, list):
+    raise SystemExit(1)
+enabled = [str(item.get("url", "")).strip() for item in items if isinstance(item, dict) and item.get("enabled", True)]
+if not enabled or any(not url.startswith("https://") for url in enabled):
+    raise SystemExit(1)
+' "$remote_registry"; then
+      echo "REMOTE_INFERENCE_REGISTRY_JSON must list at least one enabled HTTPS worker endpoint." >&2
+      exit 1
+    fi
+  elif [[ ! "$remote_url" =~ ^https:// ]]; then
+    echo "DETECTOR=remote requires an HTTPS REMOTE_INFERENCE_URL or REMOTE_INFERENCE_REGISTRY_JSON." >&2
     exit 1
   fi
+  if [[ ${#remote_secret} -lt 32 ]] || [[ "$remote_secret" == *replace-with* ]]; then
+    echo "DETECTOR=remote requires a non-example REMOTE_WORKER_SECRET of at least 32 characters." >&2
+    exit 1
+  fi
+  for name in REMOTE_TLS_CA_FILE REMOTE_TLS_CLIENT_CERT_FILE REMOTE_TLS_CLIENT_KEY_FILE; do
+    [[ -n "$(value_for "$name")" ]] || { echo "DETECTOR=remote requires $name for mTLS." >&2; exit 1; }
+  done
 fi
 
 if [[ "$field_mode" == "--gpu-worker" ]]; then
-  [[ ${#$(value_for REMOTE_WORKER_SECRET)} -ge 32 ]] || {
+  worker_secret=$(value_for REMOTE_WORKER_SECRET)
+  [[ ${#worker_secret} -ge 32 ]] || {
     echo "--gpu-worker requires REMOTE_WORKER_SECRET of at least 32 characters." >&2; exit 1;
   }
   [[ "$(value_for INSTALL_YOLO)" == "true" ]] || {
@@ -71,6 +124,9 @@ if [[ "$field_mode" == "--gpu-worker" ]]; then
   }
   [[ "$(value_for YOLO_WEIGHTS)" == /models/* ]] || {
     echo "--gpu-worker requires a YOLO_WEIGHTS path under /models/." >&2; exit 1;
+  }
+  [[ -n "$(value_for YOLO_WEIGHTS_SHA256)" ]] || {
+    echo "--gpu-worker requires YOLO_WEIGHTS_SHA256." >&2; exit 1;
   }
 fi
 
@@ -93,13 +149,27 @@ if [[ "$detector" == "ultralytics" || "$field_mode" == "--gpu-worker" ]]; then
   install_yolo=$(value_for INSTALL_YOLO)
   model_dir=$(value_for MODEL_DIR)
   weights=$(value_for YOLO_WEIGHTS)
+  expected_sha=$(value_for YOLO_WEIGHTS_SHA256)
   if [[ "$install_yolo" != "true" ]] || [[ "$weights" != /models/* ]]; then
     echo "ultralytics requires INSTALL_YOLO=true and a YOLO_WEIGHTS path under /models/." >&2
     exit 1
   fi
+  if [[ ! "$expected_sha" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "YOLO_WEIGHTS_SHA256 must be the approved model file SHA-256." >&2
+    exit 1
+  fi
   model_name=${weights#/models/}
-  if [[ ! -f "$(dirname "$env_file")/$model_dir/$model_name" ]]; then
+  model_path="$(dirname "$env_file")/$model_dir/$model_name"
+  if [[ ! -f "$model_path" ]]; then
     echo "Approved model file is missing from MODEL_DIR; refusing field deployment." >&2
+    exit 1
+  fi
+  actual_sha=$(sha256sum "$model_path" 2>/dev/null | awk '{print $1}')
+  if [[ -z "$actual_sha" ]] && command -v shasum >/dev/null 2>&1; then
+    actual_sha=$(shasum -a 256 "$model_path" | awk '{print $1}')
+  fi
+  if [[ "$actual_sha" != "$expected_sha" ]]; then
+    echo "YOLO_WEIGHTS_SHA256 does not match the mounted model file." >&2
     exit 1
   fi
 fi

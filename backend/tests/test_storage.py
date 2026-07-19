@@ -79,3 +79,29 @@ async def test_geometry_profile_is_unavailable_until_explicitly_verified(tmp_pat
         assert profile.calibration_id == "r0"
     finally:
         await store.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_revoked_device_is_denied_by_the_connection_check(tmp_path):
+    store = Store("sqlite+aiosqlite:///%s" % (tmp_path / "revocation.db"))
+    await store.initialize()
+    try:
+        await store.upsert_device("pilot-phone-1", "r0")
+        assert not await store.is_device_revoked("pilot-phone-1")
+        assert await store.revoke_device("pilot-phone-1")
+        assert await store.is_device_revoked("pilot-phone-1")
+        assert not await store.revoke_device("missing-device")
+    finally:
+        await store.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_production_store_requires_the_expected_alembic_revision(tmp_path):
+    store = Store(
+        "sqlite+aiosqlite:///%s" % (tmp_path / "revision.db"),
+        bootstrap_schema=True,
+        expected_schema_revision="20260719_01",
+    )
+    with pytest.raises(RuntimeError, match="revision mismatch"):
+        await store.initialize()
+    await store.engine.dispose()

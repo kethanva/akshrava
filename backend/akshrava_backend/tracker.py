@@ -14,8 +14,11 @@ def _iou(a, b):
 
 
 class SimpleTracker:
-    """Per-device low-rate tracker for persistence only; never infers approach speed.
-    
+    """Low-rate tracker helper for persistence only; never infers approach speed.
+
+    VisionService keeps one SimpleTracker per WebSocket session (keyed by device_id)
+    so track ID counters do not collide across concurrent phones. Association state
+    lives on SessionState.tracks — reconnecting opens a fresh session tracker.
     Implements ByteTrack-style two-stage association without a Kalman filter.
     """
 

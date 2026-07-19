@@ -8,13 +8,13 @@ import android.os.SystemClock
 
 /**
  * Platform-honest liveness check (§3.4). Modern Android forbids background starts of a camera
- * foreground service, so this never restarts anything silently. It only wakes every ~10 minutes,
+ * foreground service, so this never restarts anything silently. It wakes every three minutes,
  * and if a session that is meant to be running has gone silent it hands off to a loud, spoken
  * prompt asking the user to press Start again. The real recovery for a missed prompt is the
  * operator calling the user's contact.
  */
 object Watchdog {
-    private const val INTERVAL_MS = 10 * 60_000L
+    internal const val INTERVAL_MS = 3 * 60_000L
     private const val REQUEST_CODE = 7001
 
     fun schedule(context: Context) {

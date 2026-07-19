@@ -20,7 +20,9 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, Request, Response
 
 from .detector import Detector, jpeg_dimensions, make_detector
+from .coordination import nonce_store_for
 from .metrics import Metrics
+from .model_integrity import verify_model_sha256
 
 
 @dataclass(frozen=True)
@@ -33,18 +35,24 @@ class WorkerSettings:
     require_gpu: bool = True
     batch_max_size: int = 8
     batch_wait_ms: int = 12
+    environment: str = "development"
+    nonce_redis_url: str = ""
+    yolo_weights_sha256: str = ""
 
     @classmethod
     def from_env(cls):
         settings = cls(
             shared_secret=os.getenv("WORKER_SHARED_SECRET", ""),
             yolo_weights=os.getenv("YOLO_WEIGHTS", "/models/yolo11s.pt"),
+            yolo_weights_sha256=os.getenv("YOLO_WEIGHTS_SHA256", "").strip().lower(),
             max_image_bytes=int(os.getenv("MAX_IMAGE_BYTES", "200000")),
             max_frame_side=int(os.getenv("MAX_FRAME_SIDE", "1280")),
             request_max_age_seconds=int(os.getenv("WORKER_REQUEST_MAX_AGE_SECONDS", "30")),
             require_gpu=os.getenv("REQUIRE_GPU", "true").lower() in {"1", "true", "yes", "on"},
             batch_max_size=int(os.getenv("WORKER_BATCH_MAX_SIZE", "8")),
             batch_wait_ms=int(os.getenv("WORKER_BATCH_WAIT_MS", "12")),
+            environment=os.getenv("AKSHRAVA_ENV", "development").lower(),
+            nonce_redis_url=os.getenv("NONCE_REDIS_URL", "").strip(),
         )
         if len(settings.shared_secret) < 32:
             raise ValueError("WORKER_SHARED_SECRET must be at least 32 characters")
@@ -58,6 +66,12 @@ class WorkerSettings:
             raise ValueError("WORKER_BATCH_MAX_SIZE must be between 1 and 64")
         if not 0 <= settings.batch_wait_ms <= 50:
             raise ValueError("WORKER_BATCH_WAIT_MS must be between 0 and 50")
+        if settings.environment not in {"development", "pilot", "production"}:
+            raise ValueError("AKSHRAVA_ENV must be development, pilot or production")
+        if settings.environment != "development" and not settings.yolo_weights_sha256:
+            raise ValueError("YOLO_WEIGHTS_SHA256 is required outside development")
+        if settings.environment == "production" and not settings.nonce_redis_url.startswith(("redis://", "rediss://")):
+            raise ValueError("NONCE_REDIS_URL is required in production")
         return settings
 
 
@@ -128,13 +142,26 @@ def create_worker_app(
                 raise RuntimeError("GPU worker requires a CUDA-enabled PyTorch runtime") from exc
             if not torch.cuda.is_available():
                 raise RuntimeError("GPU worker started without CUDA; refusing CPU inference")
-        configured_detector = detector or make_detector("ultralytics", configured_settings.yolo_weights)
+        if detector is None:
+            verify_model_sha256(
+                configured_settings.yolo_weights,
+                configured_settings.yolo_weights_sha256,
+                required=configured_settings.environment != "development",
+            )
+        configured_detector = detector or make_detector(
+            "ultralytics",
+            configured_settings.yolo_weights,
+            yolo_weights_sha256=configured_settings.yolo_weights_sha256,
+            require_yolo_sha256=configured_settings.environment != "development",
+        )
         app.state.worker_settings = configured_settings
         app.state.worker_detector = configured_detector
         app.state.inference_queue = asyncio.Queue(maxsize=configured_settings.batch_max_size * 8)
         app.state.batch_task = asyncio.create_task(_batch_loop(app))
-        app.state.nonce_lock = asyncio.Lock()
-        app.state.used_nonces = {}
+        app.state.nonce_store = nonce_store_for(
+            redis_url=configured_settings.nonce_redis_url,
+            require_distributed=configured_settings.environment == "production",
+        )
         app.state.metrics = Metrics()
         try:
             yield
@@ -144,6 +171,7 @@ def create_worker_app(
                 await app.state.batch_task
             except asyncio.CancelledError:
                 pass
+            await app.state.nonce_store.close()
 
     app = FastAPI(title="Akshrava GPU inference worker", version="0.1.0", lifespan=lifespan)
 
@@ -153,6 +181,10 @@ def create_worker_app(
 
     @app.get("/readyz")
     async def readyz():
+        try:
+            await app.state.nonce_store.health()
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="worker replay protection unavailable") from exc
         return {"ok": True, "role": "gpu-worker", "detector": "ultralytics"}
 
     @app.get("/metrics", include_in_schema=False)
@@ -162,27 +194,28 @@ def create_worker_app(
     @app.post("/v1/infer")
     async def infer(request: Request):
         body = await request.body()
-        # Base64 expands 200 KB images by approximately one third; this hard cap prevents an
-        # authenticated control plane from accidentally exhausting a small worker.
         settings_value = app.state.worker_settings
         if len(body) > settings_value.max_image_bytes * 2:
             raise HTTPException(status_code=413, detail="worker request too large")
         nonce = _authenticated_body(request, body, settings_value)
-        now = time.time()
-        async with app.state.nonce_lock:
-            cutoff = now - settings_value.request_max_age_seconds
-            app.state.used_nonces = {
-                value: seen_at for value, seen_at in app.state.used_nonces.items() if seen_at >= cutoff
-            }
-            if nonce in app.state.used_nonces:
-                raise HTTPException(status_code=409, detail="replayed worker request")
-            app.state.used_nonces[nonce] = now
         try:
-            payload = json.loads(body)
-            image_b64 = payload["image_b64"]
-            if not isinstance(image_b64, str):
-                raise ValueError("image_b64 must be text")
-            jpeg = base64.b64decode(image_b64, validate=True)
+            first_use = await app.state.nonce_store.claim(nonce, settings_value.request_max_age_seconds)
+        except Exception as exc:
+            # A failed coordinator is a security failure, never a reason to accept a potentially
+            # replayed request on another replica.
+            raise HTTPException(status_code=503, detail="worker replay protection unavailable") from exc
+        if not first_use:
+            raise HTTPException(status_code=409, detail="replayed worker request")
+        try:
+            content_type = request.headers.get("content-type", "").split(";", 1)[0].lower()
+            if content_type == "image/jpeg":
+                jpeg = body
+            else:
+                payload = json.loads(body)
+                image_b64 = payload["image_b64"]
+                if not isinstance(image_b64, str):
+                    raise ValueError("image_b64 must be text")
+                jpeg = base64.b64decode(image_b64, validate=True)
             if len(jpeg) > settings_value.max_image_bytes:
                 raise ValueError("image too large")
             width, height = jpeg_dimensions(jpeg)

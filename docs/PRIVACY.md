@@ -84,7 +84,7 @@ person's signature as consent evidence.
 | Keys | Separate per-environment keys; rotate device tokens at re-provisioning |
 | Access | Least-privilege service accounts; MFA for console access |
 | Logs | No frames in logs; no PII in structured telemetry |
-| Device tokens | Short-lived JWT (HS256); re-authenticated on each WebSocket connection |
+| Device tokens | Short-lived JWT (RS256 in pilot/production); re-authenticated on each WebSocket connection |
 
 ---
 
