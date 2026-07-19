@@ -4,6 +4,7 @@
 **/.venv/
 **/.ruff_cache/
 **/.pytest_cache/
+**/.coverage
 **/*.egg-info/
 **/build/
 **/__pycache__/
