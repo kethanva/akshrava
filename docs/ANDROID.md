@@ -22,7 +22,8 @@ The active service is bounded to:
 
 - one 640×480 CameraX analysis stream and one analyzer thread;
 - one JPEG frame in flight, no local recorder or image backlog;
-- normally 1 FPS walking, 0.2 FPS stationary, and no more than 2 FPS during a short re-check;
+- capture cadence decided by `CapturePolicy`: normally 1 FPS walking, 0.2 FPS stationary, no
+  more than 2 FPS during a short re-check, and lower rates for thermal/battery protection;
 - 25 Hz pose sensors only while assistance is active; and
 - no bundled TFLite model, OCR, Bluetooth integration, or unreviewed offline fallback.
 

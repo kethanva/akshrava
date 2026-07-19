@@ -33,6 +33,8 @@ Use URL-safe secret values for `POSTGRES_PASSWORD` because Compose places it in 
 Caddy obtains and renews TLS for `DOMAIN`; expose TCP 80/443 to the host and point its DNS A/AAAA record at the server first. The raw API port 8000 is a development port—firewall it in a public deployment.
 
 Use `/readyz`, not `/healthz`, for deployment readiness: it verifies the database connection.
+In production it also verifies the Redis-backed coordination controls used for session admission
+and frame limiting.
 Take a backup and test restoring it before each release:
 
 ```bash
@@ -64,9 +66,16 @@ Revocation is checked during WebSocket upgrade, before every frame header, and d
 An already-open session is closed before its next frame; issue a new device ID/token after
 re-provisioning, and do not "unrevoke" a lost device.
 
+## Operational signals
+
+Prometheus must alert on control-plane availability, GPU-worker availability, late-suppressed
+results, session-admission saturation, and aggregate capture-to-API frame age. These metrics are
+intentionally aggregate: no device, route, or carrier labels are exported from `/metrics`.
+Carrier/device p95 is a field-log analysis task after explicit consent, not a public metrics label.
+
 ## Model activation
 
-After the licence decision and model validation, set `INSTALL_YOLO=true`, mount the approved local model directory through `MODEL_DIR`, record the weight SHA-256, and set `DETECTOR=ultralytics` for a single host or `DETECTOR=remote` for the control plane of a split deployment. `YOLO_WEIGHTS` must point at that read-only `/models/...` file on the inference host; the server rejects a missing path and never downloads weights during a session. A model deployment must run the regression suite and controlled-course release gate before it reaches a phone.
+After the licence decision and model validation, set `INSTALL_YOLO=true`, mount the approved local model directory through `MODEL_DIR`, record the weight SHA-256, set `YOLO_WEIGHTS_SHA256` to that digest, and set `DETECTOR=ultralytics` for a single host or `DETECTOR=remote` for the control plane of a split deployment. Use `REMOTE_INFERENCE_REGISTRY_JSON` for multiple GPU workers so each device is placed stably and can fail through to a warm peer. `YOLO_WEIGHTS` must point at that read-only `/models/...` file on the inference host; the server rejects a missing path or mismatched digest and never downloads weights during a session. A model deployment must run the regression suite and controlled-course release gate before it reaches a phone.
 
 The APK contains no Android TFLite fallback. Do not add an arbitrary `best_11n.tflite` file: a
 future fallback needs an exact model asset, labels, tensor layout, preprocessing/postprocessing

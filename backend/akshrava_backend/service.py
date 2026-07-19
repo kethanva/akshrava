@@ -64,9 +64,9 @@ class VisionService:
         # result attribution and model-runtime races. Noop/remote override requires_serial_execution.
         if self.detector.requires_serial_execution():
             async with self._inference_lock:
-                detections, cloud_fallback_unavailable = await self._detect(jpeg)
+                detections, cloud_fallback_unavailable = await self._detect(state.device_id, jpeg)
         else:
-            detections, cloud_fallback_unavailable = await self._detect(jpeg)
+            detections, cloud_fallback_unavailable = await self._detect(state.device_id, jpeg)
         detect_ms = int((time.monotonic() - detected_started) * 1000)
         track_score_started = time.monotonic()
         pose_discontinuity = self._pose_discontinuity(state, header)
@@ -141,10 +141,18 @@ class VisionService:
         # bounded pool lazily instead of retaining an executor that has already been shut down.
         self._executor = self._new_executor()
 
-    async def _detect(self, jpeg: bytes):
-        method = getattr(self.detector, "detect_with_status", None)
+    async def _detect(self, device_id: str, jpeg: bytes):
+        device_method = getattr(self.detector, "detect_with_status_for_device", None)
+        method = device_method or getattr(self.detector, "detect_with_status", None)
         loop = asyncio.get_running_loop()
-        function = method if method is not None else self.detector.detect
+        if device_method is not None:
+            def function(frame):
+                return device_method(device_id, frame)
+        elif method is not None:
+            function = method
+        else:
+            def function(frame):
+                return self.detector.detect_for_device(device_id, frame)
         try:
             result = await asyncio.wait_for(
                 loop.run_in_executor(self._executor, function, jpeg),

@@ -74,9 +74,15 @@ class CloudFallbackDetector(Detector):
     def detect(self, jpeg: bytes) -> List[Detection]:
         return self.detect_with_status(jpeg)[0]
 
+    def detect_for_device(self, device_id: str, jpeg: bytes) -> List[Detection]:
+        return self.detect_with_status_for_device(device_id, jpeg)[0]
+
     def detect_with_status(self, jpeg: bytes) -> Tuple[List[Detection], bool]:
+        return self.detect_with_status_for_device("", jpeg)
+
+    def detect_with_status_for_device(self, device_id: str, jpeg: bytes) -> Tuple[List[Detection], bool]:
         """Return frame-local availability with detections; never share it between devices."""
-        local_detections = self.local.detect(jpeg)
+        local_detections = self.local.detect_for_device(device_id, jpeg)
         if local_detections:
             return local_detections, False
         try:

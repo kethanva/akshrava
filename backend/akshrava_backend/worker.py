@@ -22,6 +22,7 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from .detector import Detector, jpeg_dimensions, make_detector
 from .coordination import nonce_store_for
 from .metrics import Metrics
+from .model_integrity import verify_model_sha256
 
 
 @dataclass(frozen=True)
@@ -36,12 +37,14 @@ class WorkerSettings:
     batch_wait_ms: int = 12
     environment: str = "development"
     nonce_redis_url: str = ""
+    yolo_weights_sha256: str = ""
 
     @classmethod
     def from_env(cls):
         settings = cls(
             shared_secret=os.getenv("WORKER_SHARED_SECRET", ""),
             yolo_weights=os.getenv("YOLO_WEIGHTS", "/models/yolo11s.pt"),
+            yolo_weights_sha256=os.getenv("YOLO_WEIGHTS_SHA256", "").strip().lower(),
             max_image_bytes=int(os.getenv("MAX_IMAGE_BYTES", "200000")),
             max_frame_side=int(os.getenv("MAX_FRAME_SIDE", "1280")),
             request_max_age_seconds=int(os.getenv("WORKER_REQUEST_MAX_AGE_SECONDS", "30")),
@@ -65,6 +68,8 @@ class WorkerSettings:
             raise ValueError("WORKER_BATCH_WAIT_MS must be between 0 and 50")
         if settings.environment not in {"development", "pilot", "production"}:
             raise ValueError("AKSHRAVA_ENV must be development, pilot or production")
+        if settings.environment != "development" and not settings.yolo_weights_sha256:
+            raise ValueError("YOLO_WEIGHTS_SHA256 is required outside development")
         if settings.environment == "production" and not settings.nonce_redis_url.startswith(("redis://", "rediss://")):
             raise ValueError("NONCE_REDIS_URL is required in production")
         return settings
@@ -137,7 +142,18 @@ def create_worker_app(
                 raise RuntimeError("GPU worker requires a CUDA-enabled PyTorch runtime") from exc
             if not torch.cuda.is_available():
                 raise RuntimeError("GPU worker started without CUDA; refusing CPU inference")
-        configured_detector = detector or make_detector("ultralytics", configured_settings.yolo_weights)
+        if detector is None:
+            verify_model_sha256(
+                configured_settings.yolo_weights,
+                configured_settings.yolo_weights_sha256,
+                required=configured_settings.environment != "development",
+            )
+        configured_detector = detector or make_detector(
+            "ultralytics",
+            configured_settings.yolo_weights,
+            yolo_weights_sha256=configured_settings.yolo_weights_sha256,
+            require_yolo_sha256=configured_settings.environment != "development",
+        )
         app.state.worker_settings = configured_settings
         app.state.worker_detector = configured_detector
         app.state.inference_queue = asyncio.Queue(maxsize=configured_settings.batch_max_size * 8)
@@ -178,8 +194,6 @@ def create_worker_app(
     @app.post("/v1/infer")
     async def infer(request: Request):
         body = await request.body()
-        # Base64 expands 200 KB images by approximately one third; this hard cap prevents an
-        # authenticated control plane from accidentally exhausting a small worker.
         settings_value = app.state.worker_settings
         if len(body) > settings_value.max_image_bytes * 2:
             raise HTTPException(status_code=413, detail="worker request too large")
@@ -193,11 +207,15 @@ def create_worker_app(
         if not first_use:
             raise HTTPException(status_code=409, detail="replayed worker request")
         try:
-            payload = json.loads(body)
-            image_b64 = payload["image_b64"]
-            if not isinstance(image_b64, str):
-                raise ValueError("image_b64 must be text")
-            jpeg = base64.b64decode(image_b64, validate=True)
+            content_type = request.headers.get("content-type", "").split(";", 1)[0].lower()
+            if content_type == "image/jpeg":
+                jpeg = body
+            else:
+                payload = json.loads(body)
+                image_b64 = payload["image_b64"]
+                if not isinstance(image_b64, str):
+                    raise ValueError("image_b64 must be text")
+                jpeg = base64.b64decode(image_b64, validate=True)
             if len(jpeg) > settings_value.max_image_bytes:
                 raise ValueError("image too large")
             width, height = jpeg_dimensions(jpeg)

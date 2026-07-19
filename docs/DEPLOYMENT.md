@@ -10,7 +10,7 @@ returns detector boxes. It has no database, phone endpoint, device token or aler
 - Keep `DETECTOR=noop` until the model licence, exact model file/hash, target-device benchmark,
   labelled evaluation and controlled-course gate are approved.
 - Set unique, high-entropy `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, and Grafana credentials. In
-  production configure `JWT_ALGORITHM=RS256` and mount only `JWT_PUBLIC_KEY_FILE` on the API;
+  pilot/production configure `JWT_ALGORITHM=RS256` and mount only `JWT_PUBLIC_KEY_FILE` on the API;
   keep the matching private key solely on the provisioning workstation. Never use examples.
 - Set `AKSHRAVA_ENV=pilot` or `production`; the service rejects `DEV_AUTH_BYPASS=true` outside
   an explicit `development` environment.
@@ -52,9 +52,16 @@ URLs outside development and refuses to start unless `REMOTE_TLS_CA_FILE`,
 those files read-only from `WORKER_MTLS_DIR`; the proxy must verify the client certificate.
 Set the same `REMOTE_WORKER_SECRET` on both
 hosts, set the control plane to `DETECTOR=remote`, and point `REMOTE_INFERENCE_URL` at the worker
-`/v1/infer` endpoint. A comma-separated ordered list of endpoints configures warm-worker failover;
-the API retries the next worker only after a transport failure and fails closed when all are down.
-The control plane timeout defaults to 450 ms; a failed or late worker result causes the existing
+`/v1/infer` endpoint. For more than one warm worker, prefer `REMOTE_INFERENCE_REGISTRY_JSON`:
+
+```json
+[{"id":"gpu-a","url":"https://gpu-a.internal/v1/infer"},{"id":"gpu-b","url":"https://gpu-b.internal/v1/infer"}]
+```
+
+The control plane uses the registry IDs for stable device-to-worker placement and then fails
+through to the next warm peer after a transport failure. A comma-separated `REMOTE_INFERENCE_URL`
+list is still accepted for simple deployments and is converted into static worker IDs. The
+control-plane timeout defaults to 450 ms; a failed or late worker result causes the existing
 fail-closed phone messaging.
 
 On the GPU host, use the same approved model mount and only the GPU profile:
@@ -78,9 +85,9 @@ TLS/mTLS remain mandatory deployment controls.
 
 Only after the release gate is met, set `INSTALL_YOLO=true`, mount an approved model file via
 `MODEL_DIR`, set `DETECTOR=ultralytics` (single-host) or `DETECTOR=remote` (split deployment),
-and record the file SHA-256 in the deployment record.
-`YOLO_WEIGHTS` must resolve to that read-only mounted file. The server must never download weights
-while serving a session.
+set `YOLO_WEIGHTS_SHA256` to the approved file digest, and record it in the deployment record.
+`YOLO_WEIGHTS` must resolve to that read-only mounted file. The server and GPU worker verify the
+digest before loading the detector and must never download weights while serving a session.
 
 An optional selected-provider image fallback is described in [CLOUD_IMAGE_FALLBACK.md](CLOUD_IMAGE_FALLBACK.md).
 It is disabled by default and requires fresh privacy/consent, cost and latency sign-off.
@@ -122,6 +129,8 @@ measurement evidence.
 
 ## Scale and failover boundary
 
-Redis now provides atomic nonce claims and per-device frame-rate limits across API/worker replicas.
-It does not by itself provide automatic GPU failover: production still requires an authenticated
-worker registry, health-checked routing, a warm spare, and a rehearsed failover/restore drill.
+Redis now provides atomic session admission, nonce claims and per-device frame-rate limits across
+API/worker replicas. The static inference registry provides stable device-to-worker placement and
+warm-peer fail-through, but it does not by itself provide automatic health re-pointing. Production
+still requires authenticated registry updates, health-checked routing, a warm spare, and a
+rehearsed failover/restore drill.

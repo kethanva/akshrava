@@ -19,7 +19,7 @@ from .detector import jpeg_dimensions, make_detector
 from .metrics import Metrics
 from .rate_limit import FrameRateLimiter
 from .service import VisionService
-from .session_admission import SessionAdmission
+from .session_admission import session_admission_for
 from .storage import Store
 
 logging.basicConfig(level=logging.INFO)
@@ -51,6 +51,9 @@ vision = VisionService(
         settings.remote_tls_ca_file,
         settings.remote_tls_client_cert_file,
         settings.remote_tls_client_key_file,
+        settings.remote_inference_registry_json,
+        settings.yolo_weights_sha256,
+        settings.environment != "development",
     ),
     store,
     settings.alert_max_age_ms,
@@ -63,7 +66,11 @@ device_rate_limiter = device_rate_limiter_for(
     redis_url=settings.redis_url,
     require_distributed=settings.environment == "production",
 )
-session_admission = SessionAdmission(settings.max_active_sessions)
+session_admission = session_admission_for(
+    redis_url=settings.redis_url,
+    maximum=settings.max_active_sessions,
+    require_distributed=settings.environment == "production",
+)
 
 
 @asynccontextmanager
@@ -86,6 +93,7 @@ async def lifespan(app):
         if shutdown is not None:
             shutdown()
         await device_rate_limiter.close()
+        await session_admission.shutdown()
 
 
 app = FastAPI(title="Akshrava backend", version="0.1.0", lifespan=lifespan)
@@ -103,6 +111,7 @@ async def readyz():
         await asyncio.wait_for(store.ping(), timeout=settings.ready_timeout_ms / 1000.0)
         if settings.environment == "production":
             await asyncio.wait_for(device_rate_limiter.health(), timeout=settings.ready_timeout_ms / 1000.0)
+            await asyncio.wait_for(session_admission.health(), timeout=settings.ready_timeout_ms / 1000.0)
     except Exception:
         logger.exception("database readiness check failed")
         raise HTTPException(status_code=503, detail="database unavailable")
@@ -181,9 +190,13 @@ async def session(websocket: WebSocket):
     if await store.is_device_revoked(device_id):
         await websocket.close(code=4403)
         return
-    if not session_admission.try_open():
+    session_id = secrets.token_urlsafe(18)
+    session_opened = False
+    if not await session_admission.try_open(session_id):
+        metrics.session_admission_rejected()
         await websocket.close(code=1013)
         return
+    session_opened = True
     await websocket.accept()
     metrics.session_opened()
     state = SessionState(device_id=device_id, trace_prefix=secrets.token_urlsafe(12))
@@ -315,6 +328,10 @@ async def session(websocket: WebSocket):
                 stages = dict(result.get("pipeline_stage_ms", {}))
                 stages["decode"] = decode_ms
                 metrics.observe_result(result["server_inference_ms"], result["hazard"] is not None, stages)
+                if header.capture_epoch_ms is not None:
+                    frame_age_ms = int(result["server_received_epoch_ms"]) - header.capture_epoch_ms
+                    if 0 <= frame_age_ms <= 60_000:
+                        metrics.observe_frame_age(frame_age_ms)
                 if result.get("late_suppressed"):
                     metrics.late_suppressed()
                 await websocket.send_json(result)
@@ -333,6 +350,7 @@ async def session(websocket: WebSocket):
             await websocket.send_json({"type": "error", "code": "protocol_error", "detail": str(exc)})
             await websocket.close(code=4400)
     finally:
-        session_admission.close()
-        metrics.session_closed()
+        if session_opened:
+            await session_admission.close(session_id)
+            metrics.session_closed()
         await session_application.close_session(state)

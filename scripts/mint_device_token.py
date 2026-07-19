@@ -13,7 +13,7 @@ def main():
     parser.add_argument("device_id")
     parser.add_argument("--days", type=int, default=30)
     args = parser.parse_args()
-    algorithm = os.environ.get("JWT_ALGORITHM", "HS256").upper()
+    algorithm = os.environ.get("JWT_ALGORITHM", "RS256").upper()
     if algorithm == "RS256":
         key_file = os.environ.get("JWT_PRIVATE_KEY_FILE", "")
         if not key_file:

@@ -16,6 +16,7 @@ class Settings:
     max_active_sessions: int
     detector: str
     yolo_weights: str
+    yolo_weights_sha256: str
     max_image_bytes: int
     max_frame_side: int
     dev_auth_bypass: bool
@@ -28,6 +29,7 @@ class Settings:
     azure_vision_endpoint: str
     azure_vision_key: str
     remote_inference_url: str
+    remote_inference_registry_json: str
     remote_worker_secret: str
     remote_inference_timeout_ms: int
     ready_timeout_ms: int
@@ -50,6 +52,7 @@ class Settings:
             max_active_sessions=int(os.getenv("MAX_ACTIVE_SESSIONS", "200")),
             detector=os.getenv("DETECTOR", "noop"),
             yolo_weights=os.getenv("YOLO_WEIGHTS", "yolo11s.pt"),
+            yolo_weights_sha256=os.getenv("YOLO_WEIGHTS_SHA256", "").strip().lower(),
             max_image_bytes=int(os.getenv("MAX_IMAGE_BYTES", "200000")),
             max_frame_side=int(os.getenv("MAX_FRAME_SIDE", "1280")),
             dev_auth_bypass=_env_bool("DEV_AUTH_BYPASS", False),
@@ -62,6 +65,7 @@ class Settings:
             azure_vision_endpoint=os.getenv("AZURE_VISION_ENDPOINT", ""),
             azure_vision_key=os.getenv("AZURE_VISION_KEY", ""),
             remote_inference_url=os.getenv("REMOTE_INFERENCE_URL", "").strip(),
+            remote_inference_registry_json=os.getenv("REMOTE_INFERENCE_REGISTRY_JSON", "").strip(),
             remote_worker_secret=os.getenv("REMOTE_WORKER_SECRET", ""),
             remote_inference_timeout_ms=int(os.getenv("REMOTE_INFERENCE_TIMEOUT_MS", "450")),
             ready_timeout_ms=int(os.getenv("READY_TIMEOUT_MS", "2000")),
@@ -83,10 +87,10 @@ class Settings:
             raise ValueError("JWT_SECRET must be set when DEV_AUTH_BYPASS is false")
         if settings.jwt_algorithm == "HS256" and not settings.dev_auth_bypass and len(settings.jwt_secret) < 32:
             raise ValueError("JWT_SECRET must be at least 32 characters when DEV_AUTH_BYPASS is false")
+        if settings.environment != "development" and settings.jwt_algorithm != "RS256":
+            raise ValueError("pilot and production require JWT_ALGORITHM=RS256 with per-device provisioning keys")
         if settings.jwt_algorithm == "RS256" and not settings.jwt_public_key_file:
             raise ValueError("JWT_PUBLIC_KEY_FILE is required when JWT_ALGORITHM=RS256")
-        if settings.environment == "production" and settings.jwt_algorithm != "RS256":
-            raise ValueError("production requires JWT_ALGORITHM=RS256 with per-device provisioning keys")
         if not 1 <= settings.max_active_sessions <= 100_000:
             raise ValueError("MAX_ACTIVE_SESSIONS must be between 1 and 100000")
         if settings.alert_max_age_ms <= 0:
@@ -101,11 +105,27 @@ class Settings:
             raise ValueError("CLOUD_MIN_CONFIDENCE must be between 0 and 1")
         if settings.detector not in {"noop", "ultralytics", "remote"}:
             raise ValueError("DETECTOR must be noop, ultralytics or remote")
+        if settings.environment != "development" and settings.detector == "ultralytics" and not settings.yolo_weights_sha256:
+            raise ValueError("YOLO_WEIGHTS_SHA256 is required when DETECTOR=ultralytics outside development")
         if settings.detector == "remote":
             allowed_schemes = ("http://", "https://") if settings.environment == "development" else ("https://",)
             remote_urls = [url.strip().rstrip("/") for url in settings.remote_inference_url.split(",") if url.strip()]
+            if settings.remote_inference_registry_json:
+                import json
+
+                try:
+                    registry_items = json.loads(settings.remote_inference_registry_json)
+                except json.JSONDecodeError as exc:
+                    raise ValueError("REMOTE_INFERENCE_REGISTRY_JSON must be valid JSON") from exc
+                if not isinstance(registry_items, list):
+                    raise ValueError("REMOTE_INFERENCE_REGISTRY_JSON must be a list")
+                remote_urls = [
+                    str(item.get("url", "")).strip().rstrip("/")
+                    for item in registry_items
+                    if isinstance(item, dict) and item.get("enabled", True)
+                ]
             if not remote_urls or any(not url.startswith(allowed_schemes) for url in remote_urls):
-                raise ValueError("REMOTE_INFERENCE_URL must use HTTPS outside development when DETECTOR=remote")
+                raise ValueError("remote inference endpoints must use HTTPS outside development when DETECTOR=remote")
             if len(settings.remote_worker_secret) < 32:
                 raise ValueError("REMOTE_WORKER_SECRET must be at least 32 characters when DETECTOR=remote")
             if settings.environment != "development" and not all((
