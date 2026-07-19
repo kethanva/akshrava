@@ -73,7 +73,8 @@ if [[ "$detector" == "remote" ]]; then
 fi
 
 if [[ "$field_mode" == "--gpu-worker" ]]; then
-  [[ ${#$(value_for REMOTE_WORKER_SECRET)} -ge 32 ]] || {
+  worker_secret=$(value_for REMOTE_WORKER_SECRET)
+  [[ ${#worker_secret} -ge 32 ]] || {
     echo "--gpu-worker requires REMOTE_WORKER_SECRET of at least 32 characters." >&2; exit 1;
   }
   [[ "$(value_for INSTALL_YOLO)" == "true" ]] || {
