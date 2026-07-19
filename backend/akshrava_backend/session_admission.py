@@ -156,5 +156,5 @@ def session_admission_for(*, redis_url: str, maximum: int, require_distributed: 
     if redis_url:
         return RedisSessionAdmission(redis_url, maximum)
     if require_distributed:
-        raise ValueError("REDIS_URL is required for production distributed session admission")
+        raise ValueError("REDIS_URL is required outside development for distributed session admission")
     return InMemorySessionAdmission(maximum)

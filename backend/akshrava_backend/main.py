@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 import logging
 import secrets
 from contextlib import asynccontextmanager, suppress
@@ -74,12 +75,12 @@ metrics = Metrics()
 session_application = SessionApplicationService(store, vision)
 device_rate_limiter = device_rate_limiter_for(
     redis_url=settings.redis_url,
-    require_distributed=settings.environment == "production",
+    require_distributed=settings.environment != "development",
 )
 session_admission = session_admission_for(
     redis_url=settings.redis_url,
     maximum=settings.max_active_sessions,
-    require_distributed=settings.environment == "production",
+    require_distributed=settings.environment != "development",
 )
 gcp_storage = GcpDiagnosticStorage(settings.gcp_diagnostics_bucket)
 
@@ -149,7 +150,11 @@ async def prometheus_metrics(
         provided = (x_akshrava_metrics_token or "").strip()
         if not provided and authorization and authorization.lower().startswith("bearer "):
             provided = authorization[7:].strip()
-        if not expected or provided != expected:
+        if (
+            not expected
+            or not provided
+            or not hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
+        ):
             raise HTTPException(status_code=404, detail="not found")
     return Response(metrics.render(), media_type="text/plain; version=0.0.4; charset=utf-8")
 

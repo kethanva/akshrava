@@ -6,12 +6,13 @@ locals {
   api_image            = var.api_image != "" ? var.api_image : local.api_image_default
   worker_image         = var.worker_image != "" ? var.worker_image : local.worker_image_default
   remote_inference_url = "https://worker.akshrava.internal:8443/v1/infer"
-  database_url         = "postgresql+asyncpg://akshrava:${random_password.db_password.result}@${google_sql_database_instance.postgres.private_ip_address}:5432/akshrava"
-  database_url_sync    = "postgresql://akshrava:${random_password.db_password.result}@${google_sql_database_instance.postgres.private_ip_address}:5432/akshrava"
+  database_url         = "postgresql+asyncpg://akshrava:${urlencode(random_password.db_password.result)}@${google_sql_database_instance.postgres.private_ip_address}:5432/akshrava"
+  database_url_sync    = "postgresql://akshrava:${urlencode(random_password.db_password.result)}@${google_sql_database_instance.postgres.private_ip_address}:5432/akshrava"
   # Memorystore BASIC AUTH uses redis://; enable redis_transit_encryption (STANDARD_HA) for rediss://.
   redis_scheme         = var.redis_transit_encryption ? "rediss" : "redis"
-  redis_url            = "${local.redis_scheme}://:${google_redis_instance.cache.auth_string}@${google_redis_instance.cache.host}:${google_redis_instance.cache.port}/0"
-  nonce_redis_url      = "${local.redis_scheme}://:${google_redis_instance.cache.auth_string}@${google_redis_instance.cache.host}:${google_redis_instance.cache.port}/1"
+  redis_auth           = urlencode(google_redis_instance.cache.auth_string)
+  redis_url            = "${local.redis_scheme}://:${local.redis_auth}@${google_redis_instance.cache.host}:${google_redis_instance.cache.port}/0"
+  nonce_redis_url      = "${local.redis_scheme}://:${local.redis_auth}@${google_redis_instance.cache.host}:${google_redis_instance.cache.port}/1"
   deploy_remote_worker = var.detector == "remote"
 }
 

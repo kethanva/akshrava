@@ -144,7 +144,7 @@ async def test_device_revocation_uses_redis_cache():
     try:
         await store.upsert_device("test-device-redis", "r0")
         assert not await store.is_device_revoked("test-device-redis")
-        assert "revocation:test-device-redis" not in mock_client.data
+        assert mock_client.data.get("revocation:test-device-redis") == b"0"
         mock_client.data["revocation:test-device-redis"] = b"1"
         assert await store.is_device_revoked("test-device-redis")
         assert await store.revoke_device("test-device-redis")
@@ -155,16 +155,18 @@ async def test_device_revocation_uses_redis_cache():
 
 
 @pytest.mark.asyncio
-async def test_revocation_does_not_publish_false_to_redis():
+async def test_revocation_publishes_short_ttl_negative_and_revoke_overwrites():
     class MockRedis:
         def __init__(self):
             self.data = {}
+            self.expiry = {}
 
         async def get(self, key):
             return self.data.get(key)
 
         async def set(self, key, value, ex=None):
             self.data[key] = value
+            self.expiry[key] = ex
 
         async def delete(self, key):
             self.data.pop(key, None)
@@ -179,6 +181,12 @@ async def test_revocation_does_not_publish_false_to_redis():
     try:
         await store.upsert_device("active-device", "r0")
         assert not await store.is_device_revoked("active-device")
-        assert "revocation:active-device" not in mock_client.data
+        assert mock_client.data.get("revocation:active-device") == b"0"
+        assert mock_client.expiry.get("revocation:active-device") == 5
+        # Second call must not hit DB again while local/redis negative is fresh.
+        assert not await store.is_device_revoked("active-device")
+        assert await store.revoke_device("active-device")
+        assert mock_client.data.get("revocation:active-device") == b"1"
+        assert await store.is_device_revoked("active-device")
     finally:
         await store.close()

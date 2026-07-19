@@ -145,8 +145,8 @@ class Settings:
             raise ValueError("REMOTE_INFERENCE_TIMEOUT_MS must be between 50 and 10000")
         if not 100 <= settings.ready_timeout_ms <= 10_000:
             raise ValueError("READY_TIMEOUT_MS must be between 100 and 10000")
-        if settings.environment == "production" and not settings.redis_url.startswith(("redis://", "rediss://")):
-            raise ValueError("REDIS_URL is required in production for distributed session and replay controls")
+        if settings.environment != "development" and not settings.redis_url.startswith(("redis://", "rediss://")):
+            raise ValueError("REDIS_URL is required outside development for distributed session and rate limits")
         if not 50 <= settings.inference_timeout_ms <= 10_000:
             raise ValueError("INFERENCE_TIMEOUT_MS must be between 50 and 10000")
         if not 1 <= settings.inference_executor_workers <= 32:

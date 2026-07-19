@@ -22,6 +22,7 @@ def _pilot_rs256(monkeypatch):
     monkeypatch.setenv("JWT_ALGORITHM", "RS256")
     monkeypatch.setenv("JWT_PUBLIC_KEY_FILE", "/run/secrets/jwt/device-public.pem")
     monkeypatch.setenv("METRICS_SCRAPE_TOKEN", "test-metrics-token")
+    monkeypatch.setenv("REDIS_URL", "redis://localhost:6379/0")
 
 
 def test_pilot_rejects_hs256_device_tokens(monkeypatch):
@@ -82,6 +83,14 @@ def test_production_requires_redis_for_distributed_safety_controls(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", "x" * 32)
     monkeypatch.setenv("JWT_ALGORITHM", "RS256")
     monkeypatch.setenv("JWT_PUBLIC_KEY_FILE", "/run/secrets/jwt/device-public.pem")
+    monkeypatch.setenv("METRICS_SCRAPE_TOKEN", "test-metrics-token")
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    with pytest.raises(ValueError, match="REDIS_URL"):
+        Settings.from_env()
+
+
+def test_pilot_requires_redis_for_distributed_safety_controls(monkeypatch):
+    _pilot_rs256(monkeypatch)
     monkeypatch.delenv("REDIS_URL", raising=False)
     with pytest.raises(ValueError, match="REDIS_URL"):
         Settings.from_env()

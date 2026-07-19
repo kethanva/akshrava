@@ -211,7 +211,11 @@ def create_worker_app(
             authorization = request.headers.get("authorization") or ""
             if not provided and authorization.lower().startswith("bearer "):
                 provided = authorization[7:].strip()
-            if not expected or provided != expected:
+            if (
+                not expected
+                or not provided
+                or not hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
+            ):
                 raise HTTPException(status_code=404, detail="not found")
         return Response(app.state.metrics.render(), media_type="text/plain; version=0.0.4; charset=utf-8")
 

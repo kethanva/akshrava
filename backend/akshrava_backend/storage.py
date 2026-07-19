@@ -72,6 +72,8 @@ class Store:
         self._redis_client = None
         self._revocation_cache = {}  # device_id -> (revoked_bool, expiry_timestamp)
         self._cache_ttl = 15.0
+        # Short negative TTL: avoid Postgres on every frame while keeping revoke lag ≤ this window.
+        self._negative_cache_ttl = 5.0
         self.expected_schema_revision = expected_schema_revision
         if url.startswith("sqlite"):
             @event.listens_for(self.engine.sync_engine, "connect")
@@ -224,29 +226,25 @@ class Store:
         now = time.monotonic()
         if device_id in self._revocation_cache:
             revoked, expiry = self._revocation_cache[device_id]
-            # Never honour a cached False across replicas — only positive (revoked) may be sticky.
-            if revoked and now < expiry:
-                return True
-            if not revoked and now < expiry:
-                # Short-lived local negative only when Redis is unavailable.
-                if not self.redis_url:
-                    return False
+            if now < expiry:
+                return revoked
         async with self.sessions() as session:
             device = await session.get(Device, device_id)
             revoked = bool(device and device.revoked_at is not None)
-        if revoked:
-            self._revocation_cache[device_id] = (True, now + self._cache_ttl)
-        elif not self.redis_url:
-            self._revocation_cache[device_id] = (False, now + self._cache_ttl)
-        else:
-            self._revocation_cache.pop(device_id, None)
+        # Positives stick longer; negatives use a short TTL so revoke still propagates quickly.
+        ttl = self._cache_ttl if revoked else self._negative_cache_ttl
+        self._revocation_cache[device_id] = (revoked, now + ttl)
 
-        if revoked and self.redis_url:
+        if self.redis_url:
             try:
                 client = await self._get_redis_client()
                 if client:
-                    # Write-through positives only; never publish False (avoids revoke lag).
-                    await client.set("revocation:%s" % device_id, b"1", ex=max(int(self._cache_ttl), 60))
+                    # Positives and short-TTL negatives are both safe: revoke always overwrites with b"1".
+                    await client.set(
+                        "revocation:%s" % device_id,
+                        b"1" if revoked else b"0",
+                        ex=max(int(ttl), 1),
+                    )
             except Exception:
                 logger.warning("Redis cache save failed for revocation", exc_info=True)
         return revoked

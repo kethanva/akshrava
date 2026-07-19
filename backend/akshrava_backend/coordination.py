@@ -170,7 +170,7 @@ def device_rate_limiter_for(*, redis_url: str, require_distributed: bool) -> Dev
     if redis_url:
         return RedisDeviceRateLimiter(redis_url)
     if require_distributed:
-        raise ValueError("REDIS_URL is required for production distributed frame limits")
+        raise ValueError("REDIS_URL is required outside development for distributed frame limits")
     return InMemoryDeviceRateLimiter()
 
 
