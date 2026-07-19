@@ -76,8 +76,8 @@ Default detector is `DETECTOR=noop` until licensed weights and release gates exi
 |---|---|
 | `android/` | Kotlin app: CameraX, NV21 encode, WSS client, TTS/haptics, watchdog |
 | `backend/akshrava_backend/` | FastAPI control plane, vision policy, optional GPU worker |
+| `gcp/` | GCP Terraform (Cloud Run API, private GPU worker, SQL, Redis, mTLS, secrets) |
 | `infra/` | Compose profiles: `control-plane`, `gpu-worker`, edge, monitoring |
-| `terraform/` | GCP IaC (VPC, Cloud Run app, Cloud SQL, Redis, secrets, storage) |
 | `docs/` | Protocol, ops, privacy, field guide, Android matrix |
 | `scripts/` | `verify_phases.sh`, backend run/test, token minting |
 | `Important Architecture.md` | Full product / safety / release boundary |
@@ -174,9 +174,31 @@ docker compose --profile control-plane up -d
 # docker compose --profile gpu-worker up -d
 ```
 
-See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) and [`docs/OPERATIONS.md`](docs/OPERATIONS.md). Terraform under `terraform/` targets GCP when you leave the laptop bench.
+See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) and [`docs/OPERATIONS.md`](docs/OPERATIONS.md). GCP live deploy lives under [`gcp/`](gcp/) — see the **GCP** section in the deployment guide.
 
 ---
+
+## Deploy on Google Cloud
+
+```bash
+# 1) Build images (API includes gcp extras for diagnostic uploads)
+./scripts/build_gcp_images.sh YOUR_PROJECT_ID us-central1
+
+# 2) Apply IaC (defaults DETECTOR=noop so phones can connect before GPU weights exist)
+cp gcp/terraform.tfvars.example gcp/terraform.tfvars
+# edit project_id
+terraform -chdir=gcp init
+terraform -chdir=gcp apply
+
+# 3) Run schema migrations once
+gcloud run jobs execute akshrava-migrate --region us-central1 --wait
+
+# 4) Point the Android debug/release WSS URL at the output
+terraform -chdir=gcp output websocket_url
+# Provision device JWTs with the private key from Secret Manager: akshrava-jwt-private
+```
+
+When licensed weights are ready: set `detector = "remote"`, `yolo_weights_sha256 = "<64 hex>"`, place weights on the worker at `/var/lib/akshrava/models/yolo11s.pt`, rebuild/push the worker image, and `terraform apply` again.
 
 ## Alert vocabulary (allowed)
 

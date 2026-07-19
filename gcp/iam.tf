@@ -14,6 +14,7 @@ locals {
     google_secret_manager_secret.jwt_public.secret_id,
     google_secret_manager_secret.worker_shared.secret_id,
     google_secret_manager_secret.database_url.secret_id,
+    google_secret_manager_secret.database_url_sync.secret_id,
     google_secret_manager_secret.redis_url.secret_id,
     google_secret_manager_secret.worker_tls_ca.secret_id,
     google_secret_manager_secret.worker_tls_client_cert.secret_id,

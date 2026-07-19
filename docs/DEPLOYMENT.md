@@ -134,3 +134,43 @@ API/worker replicas. The static inference registry provides stable device-to-wor
 warm-peer fail-through, but it does not by itself provide automatic health re-pointing. Production
 still requires authenticated registry updates, health-checked routing, a warm spare, and a
 rehearsed failover/restore drill.
+
+## GCP (Cloud Run + private GPU worker)
+
+The [`gcp/`](../gcp/) Terraform module provisions the live Google Cloud path that matches the app
+fail-closed contract:
+
+| Resource | Role |
+|---|---|
+| Cloud Run `akshrava-api` | Phone WSS control plane (RS256 JWT, 1h request timeout) |
+| Cloud Run Job `akshrava-migrate` | Alembic `upgrade head` before serving |
+| Cloud SQL Postgres (private IP) | Alert/device/audit store — no raw frames |
+| Memorystore Redis | Session admission + worker nonce claims |
+| GCE `g2-standard-4` + L4 | GPU worker (only when `detector=remote`) |
+| Caddy on worker `:8443` | HTTPS + client-cert mTLS in front of `/v1/infer` |
+| Artifact Registry | `akshrava-api` / `akshrava-worker` images |
+| Secret Manager | DB URL, Redis URLs, HMAC secret, JWT keys, mTLS PEMs |
+| GCS diagnostics bucket | Consented uploads only (`GCP_DIAGNOSTICS_BUCKET`) |
+
+### Operator sequence
+
+```bash
+./scripts/build_gcp_images.sh "$PROJECT_ID" us-central1
+cp gcp/terraform.tfvars.example gcp/terraform.tfvars   # set project_id
+terraform -chdir=gcp init && terraform -chdir=gcp apply
+gcloud run jobs execute akshrava-migrate --region us-central1 --wait
+terraform -chdir=gcp output websocket_url
+```
+
+Default `detector = "noop"` brings up API + SQL + Redis so Android can complete an authenticated
+session without GPU weights. Switch to `detector = "remote"` only with a 64-char
+`yolo_weights_sha256` and weights installed on the worker model volume.
+
+Fetch the provisioning private key (never mount it on Cloud Run):
+
+```bash
+gcloud secrets versions access latest --secret=akshrava-jwt-private > jwt-private.pem
+```
+
+Point the Android app at the `websocket_url` output (`wss://…/v1/session`). Release builds still
+require WSS only.

@@ -5,7 +5,7 @@ output "cloud_run_url" {
 
 output "websocket_url" {
   description = "Phone ProtocolClient endpoint."
-  value       = replace(google_cloud_run_v2_service.api.uri, "https://", "wss://") + "/v1/session"
+  value       = "${replace(google_cloud_run_v2_service.api.uri, "https://", "wss://")}/v1/session"
 }
 
 output "artifact_registry" {

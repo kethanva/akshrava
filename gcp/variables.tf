@@ -5,8 +5,8 @@ variable "project_id" {
 
 variable "credentials_file" {
   type        = string
-  description = "Path to the GCP Service Account JSON credentials file."
   default     = ""
+  description = "Optional path to a GCP service-account JSON. Empty uses Application Default Credentials."
 }
 
 variable "region" {
@@ -43,6 +43,18 @@ variable "detector" {
   }
 }
 
+variable "api_image" {
+  type        = string
+  default     = ""
+  description = "Optional override for the API image. Defaults to Artifact Registry akshrava-api:latest."
+}
+
+variable "worker_image" {
+  type        = string
+  default     = ""
+  description = "Optional override for the GPU worker image. Defaults to Artifact Registry akshrava-worker:latest."
+}
+
 variable "yolo_weights_sha256" {
   type        = string
   default     = ""
@@ -53,4 +65,11 @@ variable "database_schema_revision" {
   type        = string
   default     = "20260719_01"
   description = "Must match backend Settings expected_schema_revision / alembic head marker."
+}
+
+check "remote_requires_weights_sha" {
+  assert {
+    condition     = var.detector != "remote" || length(var.yolo_weights_sha256) == 64
+    error_message = "detector=remote requires yolo_weights_sha256 (64 hex chars)."
+  }
 }

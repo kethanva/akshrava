@@ -1,0 +1,9 @@
+project_id = "your-gcp-project-id"
+# credentials_file = "/absolute/path/to/sa.json"  # optional; otherwise use ADC
+region      = "us-central1"
+zone        = "us-central1-a"
+environment = "pilot"
+detector    = "noop"
+# When ready for GPU inference:
+# detector            = "remote"
+# yolo_weights_sha256 = "hex64..."

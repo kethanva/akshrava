@@ -32,7 +32,7 @@ class GcpDiagnosticStorage:
         import asyncio
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._upload_blocking, file_name, jpeg_bytes)
-        return f"https://storage.googleapis.com/{self.bucket_name}/{file_name}"
+        return f"gs://{self.bucket_name}/{file_name}"
 
     def _upload_blocking(self, file_name: str, jpeg_bytes: bytes):
         blob = self.bucket.blob(file_name)

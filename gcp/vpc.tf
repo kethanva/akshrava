@@ -70,9 +70,10 @@ resource "google_dns_managed_zone" "internal" {
 }
 
 resource "google_dns_record_set" "worker" {
+  count        = local.deploy_remote_worker ? 1 : 0
   name         = "worker.akshrava.internal."
   type         = "A"
   ttl          = 30
   managed_zone = google_dns_managed_zone.internal.name
-  rrdatas      = [google_compute_instance.worker.network_interface[0].network_ip]
+  rrdatas      = [google_compute_instance.worker[0].network_interface[0].network_ip]
 }

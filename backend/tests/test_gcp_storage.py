@@ -28,7 +28,7 @@ async def test_upload_frame_succeeds_with_mock_client():
         mock_blob.upload_from_string.assert_called_once_with(
             b"fake-jpeg-data", content_type="image/jpeg"
         )
-        assert url == "https://storage.googleapis.com/test-bucket/frame_1.jpg"
+        assert url == "gs://test-bucket/frame_1.jpg"
 
 def test_gcp_storage_requires_bucket_name():
     storage_service = GcpDiagnosticStorage(bucket_name="")

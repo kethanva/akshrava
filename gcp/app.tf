@@ -1,4 +1,5 @@
 resource "google_compute_instance" "worker" {
+  count        = local.deploy_remote_worker ? 1 : 0
   name         = "akshrava-gpu-worker"
   machine_type = "g2-standard-4"
   zone         = var.zone
@@ -55,6 +56,7 @@ resource "google_compute_instance" "worker" {
 }
 
 resource "google_compute_firewall" "allow_run_to_worker_mtls" {
+  count   = local.deploy_remote_worker ? 1 : 0
   name    = "akshrava-allow-run-to-worker-mtls"
   network = google_compute_network.vpc.name
 
@@ -86,7 +88,7 @@ resource "google_cloud_run_v2_job" "migrate" {
           name = "DATABASE_URL"
           value_source {
             secret_key_ref {
-              secret  = google_secret_manager_secret.database_url.secret_id
+              secret  = google_secret_manager_secret.database_url_sync.secret_id
               version = "latest"
             }
           }
@@ -210,7 +212,7 @@ resource "google_cloud_run_v2_service" "api" {
       }
       env {
         name  = "REMOTE_INFERENCE_URL"
-        value = local.remote_inference_url
+        value = local.deploy_remote_worker ? local.remote_inference_url : ""
       }
       env {
         name  = "REMOTE_TLS_CA_FILE"
