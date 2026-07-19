@@ -12,8 +12,8 @@ import kotlin.math.roundToInt
 
 data class EncodedFrame(val jpeg: ByteArray, val width: Int, val height: Int)
 
-/** CPU-only conversion used at <=2 FPS. It favours correct rotation and predictable JPEG over speed. */
-object FrameEncoder {
+/** CPU-only conversion scoped to one assistance-service lifecycle. */
+class FrameEncoder {
     // Analysis is single-threaded, but guard this reusable scratch buffer for any future caller.
     private var nv21Scratch = ByteArray(0)
     fun encode(image: ImageProxy, maxSide: Int, quality: Int): EncodedFrame {

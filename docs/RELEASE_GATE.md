@@ -9,8 +9,8 @@ This repository is a bench-test implementation until every relevant item below i
 - [ ] `AKSHRAVA_ENV` is `pilot` or `production`; geometry output remains disabled unless the
       device has a verified calibration profile and controlled-course evidence.
 - [ ] `cloud_preflight.sh .env --field` passes; HTTPS/WSS DNS, Caddy certificate renewal,
-  firewalling of port 8000, database backup/restore, token expiry, and emergency JWT-secret
-  rotation are exercised. Per-device token revocation is not implemented; do not claim it is.
+  firewalling of port 8000, database backup/restore, token expiry, per-device revocation and
+  emergency JWT-secret rotation are exercised.
 - [ ] `/readyz` remains healthy through a database restart/recovery drill, alert-event retention
   is observed, and monitoring/admin ports are reachable only through protected operator access.
 - [ ] The approved detector package, exact weights SHA-256, licence decision, latency measurement, and rollback image are recorded. `noop` is never represented as vision assistance.

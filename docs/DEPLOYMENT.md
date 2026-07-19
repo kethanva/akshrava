@@ -40,8 +40,10 @@ your operational tooling before treating those rules as pager alerts.
 
 ## GPU-worker deployment
 
-Use a private WireGuard/overlay address or a mutually authenticated TLS proxy between the hosts.
-Do **not** expose port 8000 to the public internet. Set the same `REMOTE_WORKER_SECRET` on both
+Use a private WireGuard/overlay address **and** a mutually authenticated TLS proxy between the
+hosts. Do **not** expose port 8000 to the public internet. In pilot/production, set
+`REMOTE_INFERENCE_URL` to an `https://` worker endpoint; the backend rejects plaintext worker
+URLs outside development. Set the same `REMOTE_WORKER_SECRET` on both
 hosts, set the control plane to `DETECTOR=remote`, and point `REMOTE_INFERENCE_URL` at the worker
 `/v1/infer` endpoint. The control plane timeout defaults to 450 ms; a failed or late worker result
 causes the existing fail-closed phone messaging.

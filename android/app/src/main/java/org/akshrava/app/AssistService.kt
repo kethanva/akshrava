@@ -43,6 +43,7 @@ class AssistService : LifecycleService() {
     }
 
     private lateinit var frameExecutor: ExecutorService
+    private lateinit var frameEncoder: FrameEncoder
     private lateinit var poseTracker: PoseTracker
     private lateinit var alertManager: AlertManager
     private lateinit var client: ProtocolClient
@@ -80,6 +81,7 @@ class AssistService : LifecycleService() {
         createChannel()
         startForegroundCompat(notification())
         frameExecutor = Executors.newSingleThreadExecutor()
+        frameEncoder = FrameEncoder()
         poseTracker = PoseTracker(this).also { it.start() }
         alertManager = AlertManager(this, config.language)
         val manager = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -164,7 +166,7 @@ class AssistService : LifecycleService() {
             previousThumbnail = thumbnail
 
             if (!framePending.compareAndSet(false, true)) return
-            val frame = FrameEncoder.encode(image, quality.maxSide, quality.jpegQ)
+            val frame = frameEncoder.encode(image, quality.maxSide, quality.jpegQ)
 
             lastCaptureMs = now
             SessionFlags.heartbeat(this)

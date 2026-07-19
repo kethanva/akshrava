@@ -15,8 +15,8 @@ The key honesty boundary is kinematic: at the 0.2–3 FPS envelope used by a rec
 | Capability | Current repository behaviour | May be enabled only after evidence |
 |---|---|---|
 | Server detector | `DETECTOR=noop` by default; transport, freshness and policy can be exercised without inventing vision | Approved/licensed weights, fixed runtime, target-device and route-disjoint evaluation, regression and controlled-course gates |
-| Tracking | Per-device `SimpleTracker` with persistence and short miss coasting; coasting never creates motion claims | A benchmarked tracker may replace it, but never justify “approaching” speech at low FPS |
-| Range | Pose is transmitted as a validity signal; implementation always returns `range_valid=false`; no numeric distance | Per-device intrinsics, mount/ground-plane calibration and validation; at most a broad `nearby/ahead` band when valid |
+| Tracking | Per-session track lists via `SimpleTracker` (shared helper; association state on `SessionState`); short miss retention never creates motion claims | A benchmarked tracker may replace it, but never justify “approaching” speech at low FPS |
+| Range | Pose is a validity signal; missing/unverified geometry keeps `range_valid=false`. A verified `calibration_profiles` row plus pose/agreement gates may set `range_valid=true`; no numeric distance is spoken | Controlled-course evidence that the verified profile is trustworthy on that mount/route |
 | Local fallback | No TFLite/LiteRT model is bundled; offline state says assistance is unavailable | A pinned, evaluated model asset and complete preprocessing/postprocessing contract, device benchmark and controlled-course evidence |
 | Pilot use | Bench tests and supervised preparation only | A named mobility instructor, Tier-A device, valid consent, controlled-course pass and release-gate sign-off |
 
@@ -112,9 +112,9 @@ Use short message keys, offline TTS and haptics: `Obstacle ahead`, `Vehicle near
 
 ### Ingest and serving
 
-FastAPI handles the session protocol, but inference must not run in its event loop. Use a bounded async queue/batch window (at most four requests or about 8–15 ms when enabled) and a worker process; latency beats utilisation. The current service has no global inference lock, so independent sessions are not serialised behind one request. Persisted state is small and relational: device configuration, users, calibration/model versions, audit data and consent state in PostgreSQL (SQLite remains acceptable for early development).
+FastAPI handles the session protocol, but inference must not run in its event loop. The phone-facing control plane runs detectors in a thread executor; local Ultralytics instances still serialise through an inference lock, while `noop` and `remote` adapters do not. Bounded JPEG batching (default ≤8 / ~12 ms) exists only on the private GPU worker process (`DETECTOR=remote`), not as a control-plane gather queue. Persisted state is small and relational: device configuration, users, calibration/model versions, audit data and consent state in PostgreSQL (SQLite remains acceptable for early development).
 
-The intended pilot server is a pinned, approved detector exported to ONNX Runtime CUDA on a 24 GB GPU. A fixed 640 shape, conservative batch cap and explicit model SHA-256 are more important than an optimistic benchmark. One GPU is only a scheduled supervised-pilot resource until measured concurrency shows headroom; CPU is suitable for a bench demo, not a claimed sub-500 ms service. Triton or a split control/inference plane is a later response to measured multi-model or high-concurrency demand.
+The intended pilot inference path is a pinned, approved detector on a CUDA host (current code path: Ultralytics weights via `DETECTOR=ultralytics` or the HMAC GPU worker). A fixed 640 shape, conservative batch cap and explicit model SHA-256 are more important than an optimistic benchmark. One GPU is only a scheduled supervised-pilot resource until measured concurrency shows headroom; CPU is suitable for a bench demo, not a claimed sub-500 ms service. An ONNX Runtime / Triton split is a later response to measured multi-model or high-concurrency demand—not what the Compose stack ships today.
 
 ### Detection, association, geometry
 
@@ -122,11 +122,11 @@ Bootstrap classes are person, bicycle, motorcycle, car, bus and truck, mapped ca
 
 Association stabilises repeated detections, suppresses repeats and permits multi-frame confirmation. It does not repair detector misses or infer approach. Current `SimpleTracker` coasts boxes only to assist IoU matching over 1–3 FPS gaps. Any future ByteTrack-like replacement remains subject to the same kinematic boundary.
 
-Ground-plane geometry may later derive a rough band from a mounted camera height, pitch, intrinsics/FOV and a box bottom-centre ray. It must reject rather than guess when pose is stale, pitch/roll differs materially from calibration, contact is outside the lower image region, the ray is near parallel, or independent checks disagree. The current code intentionally returns `range_valid=false`; invalid range never becomes spoken distance or urgency. Monocular depth is offline error analysis only until separately proven.
+Ground-plane geometry may derive a rough band from a verified mount height, pitch, intrinsics/FOV and a box bottom-centre ray. It must reject rather than guess when pose is stale, roll exceeds limits, contact is outside the lower image region, the ray is near parallel, or independent checks disagree. Without a verified `calibration_profiles` record the code keeps `range_valid=false`. Invalid range never becomes spoken distance. Monocular depth is offline error analysis only until separately proven.
 
 ### Conservative hazard decision
 
-The scorer considers class, detector confidence, valid proximity, central path corridor and multi-frame stability. S1 urgent output is reserved for a validated nearby central obstruction; S2/caution requires repeated evidence. Vehicle language is awareness-only. A priority/on-demand look can bypass normal alert cooldowns and returns a `look_summary`, but it still respects freshness and safety vocabulary.
+The scorer considers class, detector confidence, valid proximity, central path corridor and multi-frame stability. S1 urgent output is reserved for a validated nearby central obstruction (`range_valid` plus confidence); S2/caution requires repeated evidence. Vehicle language is awareness-only. There is **no** priority/on-demand look mode, cooldown bypass, or `look_summary` in the current build—do not promise one (see `docs/TRIAL_PROTOCOL.md`).
 
 | Condition | Permitted response | Never infer |
 |---|---|---|
@@ -184,9 +184,10 @@ Run the repository verification baseline with:
 
 ```bash
 ./scripts/verify_phases.sh
+# equivalent: ./scripts/test_backend.sh  (also creates .venv / installs deps)
 ```
 
-It exercises Phase-0 fixture replay, alert-policy regression and backend tests. A green test suite proves only the tested implementation; it is not field-use approval. Run the backend tests and static checks in CI, and validate the Android build on the intended SDK/device.
+This runs the backend pytest suite under `DETECTOR=noop` (and ruff when installed). There is no separate Phase-0 fixture-replay binary or labelled regression-clip suite in this repository yet. A green test suite proves only the tested implementation; it is not field-use approval. Run the backend tests and static checks in CI, and validate the Android build on the intended SDK/device. See [docs/E2E_VERIFICATION.md](docs/E2E_VERIFICATION.md).
 
 | Gate | Minimum evidence before progressing |
 |---|---|

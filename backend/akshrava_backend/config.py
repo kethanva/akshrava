@@ -27,6 +27,7 @@ class Settings:
     remote_inference_url: str
     remote_worker_secret: str
     remote_inference_timeout_ms: int
+    ready_timeout_ms: int
 
     @classmethod
     def from_env(cls):
@@ -50,6 +51,7 @@ class Settings:
             remote_inference_url=os.getenv("REMOTE_INFERENCE_URL", "").rstrip("/"),
             remote_worker_secret=os.getenv("REMOTE_WORKER_SECRET", ""),
             remote_inference_timeout_ms=int(os.getenv("REMOTE_INFERENCE_TIMEOUT_MS", "450")),
+            ready_timeout_ms=int(os.getenv("READY_TIMEOUT_MS", "2000")),
         )
         if settings.environment not in {"development", "pilot", "production"}:
             raise ValueError("AKSHRAVA_ENV must be development, pilot or production")
@@ -72,10 +74,13 @@ class Settings:
         if settings.detector not in {"noop", "ultralytics", "remote"}:
             raise ValueError("DETECTOR must be noop, ultralytics or remote")
         if settings.detector == "remote":
-            if not settings.remote_inference_url.startswith(("http://", "https://")):
-                raise ValueError("REMOTE_INFERENCE_URL must be an http(s) URL when DETECTOR=remote")
+            allowed_schemes = ("http://", "https://") if settings.environment == "development" else ("https://",)
+            if not settings.remote_inference_url.startswith(allowed_schemes):
+                raise ValueError("REMOTE_INFERENCE_URL must use HTTPS outside development when DETECTOR=remote")
             if len(settings.remote_worker_secret) < 32:
                 raise ValueError("REMOTE_WORKER_SECRET must be at least 32 characters when DETECTOR=remote")
         if not 50 <= settings.remote_inference_timeout_ms <= 10_000:
             raise ValueError("REMOTE_INFERENCE_TIMEOUT_MS must be between 50 and 10000")
+        if not 100 <= settings.ready_timeout_ms <= 10_000:
+            raise ValueError("READY_TIMEOUT_MS must be between 100 and 10000")
         return settings

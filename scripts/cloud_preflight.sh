@@ -48,6 +48,16 @@ case "$detector" in
   *) echo "DETECTOR must be noop, ultralytics or remote." >&2; exit 1 ;;
 esac
 
+environment=$(value_for AKSHRAVA_ENV)
+if [[ "$environment" != "pilot" && "$environment" != "production" ]]; then
+  echo "AKSHRAVA_ENV must be pilot or production for deployment." >&2
+  exit 1
+fi
+if [[ "$(value_for DEV_AUTH_BYPASS)" == "true" ]]; then
+  echo "DEV_AUTH_BYPASS must be false for deployment." >&2
+  exit 1
+fi
+
 if [[ "$field_mode" == "--field" && "$detector" != "ultralytics" && "$detector" != "remote" ]]; then
   echo "--field requires DETECTOR=ultralytics or DETECTOR=remote; noop is transport-only bench mode." >&2
   exit 1
@@ -56,8 +66,8 @@ fi
 if [[ "$detector" == "remote" ]]; then
   remote_url=$(value_for REMOTE_INFERENCE_URL)
   remote_secret=$(value_for REMOTE_WORKER_SECRET)
-  if [[ ! "$remote_url" =~ ^https?:// ]] || [[ ${#remote_secret} -lt 32 ]] || [[ "$remote_secret" == *replace-with* ]]; then
-    echo "DETECTOR=remote requires an http(s) REMOTE_INFERENCE_URL and a non-example REMOTE_WORKER_SECRET of at least 32 characters." >&2
+  if [[ ! "$remote_url" =~ ^https:// ]] || [[ ${#remote_secret} -lt 32 ]] || [[ "$remote_secret" == *replace-with* ]]; then
+    echo "DETECTOR=remote requires an HTTPS REMOTE_INFERENCE_URL and a non-example REMOTE_WORKER_SECRET of at least 32 characters." >&2
     exit 1
   fi
 fi
