@@ -2,20 +2,24 @@ import asyncio
 import json
 import logging
 import time
+import secrets
 from contextlib import asynccontextmanager, suppress
 from typing import Optional
 
 from fastapi import FastAPI, Header, HTTPException, Response, WebSocket, WebSocketDisconnect
 
 from .auth import AuthError, device_id_from_token
+from .application import SessionApplicationService
 from .config import Settings
 from .domain import SessionState
 from .protocol import ProtocolError, parse_frame_header, quality_for_inference
 from .cloud_fallback import make_cloud_provider
+from .coordination import device_rate_limiter_for
 from .detector import jpeg_dimensions, make_detector
 from .metrics import Metrics
 from .rate_limit import FrameRateLimiter
 from .service import VisionService
+from .session_admission import SessionAdmission
 from .storage import Store
 
 logging.basicConfig(level=logging.INFO)
@@ -26,7 +30,11 @@ NORMAL_FRAME_RATE_PER_SECOND = 1.2
 MAX_CONTROL_MESSAGE_BYTES = 4096
 
 settings = Settings.from_env()
-store = Store(settings.database_url)
+store = Store(
+    settings.database_url,
+    bootstrap_schema=settings.environment == "development",
+    expected_schema_revision=None if settings.environment == "development" else settings.expected_schema_revision,
+)
 cloud_provider = make_cloud_provider(
     settings.cloud_fallback_provider, settings.aws_region,
     settings.azure_vision_endpoint, settings.azure_vision_key,
@@ -40,10 +48,22 @@ vision = VisionService(
         settings.remote_inference_url,
         settings.remote_worker_secret,
         settings.remote_inference_timeout_ms,
+        settings.remote_tls_ca_file,
+        settings.remote_tls_client_cert_file,
+        settings.remote_tls_client_key_file,
     ),
-    store, settings.alert_max_age_ms,
+    store,
+    settings.alert_max_age_ms,
+    inference_timeout_ms=settings.inference_timeout_ms,
+    inference_executor_workers=settings.inference_executor_workers,
 )
 metrics = Metrics()
+session_application = SessionApplicationService(store, vision)
+device_rate_limiter = device_rate_limiter_for(
+    redis_url=settings.redis_url,
+    require_distributed=settings.environment == "production",
+)
+session_admission = SessionAdmission(settings.max_active_sessions)
 
 
 @asynccontextmanager
@@ -62,6 +82,10 @@ async def lifespan(app):
         except asyncio.CancelledError:
             pass
         await store.engine.dispose()
+        shutdown = getattr(vision, "shutdown", None)
+        if shutdown is not None:
+            shutdown()
+        await device_rate_limiter.close()
 
 
 app = FastAPI(title="Akshrava backend", version="0.1.0", lifespan=lifespan)
@@ -77,6 +101,8 @@ async def readyz():
     """Readiness is separate from liveness so a dead database removes this API from service."""
     try:
         await asyncio.wait_for(store.ping(), timeout=settings.ready_timeout_ms / 1000.0)
+        if settings.environment == "production":
+            await asyncio.wait_for(device_rate_limiter.health(), timeout=settings.ready_timeout_ms / 1000.0)
     except Exception:
         logger.exception("database readiness check failed")
         raise HTTPException(status_code=503, detail="database unavailable")
@@ -155,16 +181,19 @@ async def session(websocket: WebSocket):
     if await store.is_device_revoked(device_id):
         await websocket.close(code=4403)
         return
+    if not session_admission.try_open():
+        await websocket.close(code=1013)
+        return
     await websocket.accept()
-    state = SessionState(device_id=device_id)
+    metrics.session_opened()
+    state = SessionState(device_id=device_id, trace_prefix=secrets.token_urlsafe(12))
     pending_header = None
     discard_next_binary = False
+    local_limiter = FrameRateLimiter(NORMAL_FRAME_RATE_PER_SECOND, NORMAL_FRAME_BURST)
     
     # Normal walking sessions are bounded at 1.2 FPS with a two-frame burst. This matches the
     # freshness policy and prevents one authenticated device from turning server queue time into
     # stale speech for everyone else.
-    limiter = FrameRateLimiter(NORMAL_FRAME_RATE_PER_SECOND, NORMAL_FRAME_BURST)
-    
     try:
         # A live socket is not necessarily a vision service.  The default detector is a bench
         # transport mode, so expose that fact to the phone before it captures or reassures anyone.
@@ -209,14 +238,36 @@ async def session(websocket: WebSocket):
                             # Headers and JPEGs are paired without an acknowledgement. Consume the
                             # corresponding JPEG so a rejected header cannot desynchronise the socket.
                             discard_next_binary = True
-                        elif not limiter.allow() or (previous is not None and (header.capture_mono_ms - previous < settings.min_frame_interval_ms)):
-                            metrics.reject_frame()
-                            await websocket.send_json({"type": "error", "code": "frame_rate_limited"})
-                            discard_next_binary = True
+                        elif not header.priority:
+                            try:
+                                rate_allowed = (
+                                    await device_rate_limiter.allow(
+                                        device_id, NORMAL_FRAME_RATE_PER_SECOND, NORMAL_FRAME_BURST
+                                    )
+                                    if settings.environment == "production"
+                                    else local_limiter.allow()
+                                )
+                            except Exception:
+                                logger.exception("frame admission control unavailable")
+                                await websocket.send_json({"type": "error", "code": "vision_unavailable"})
+                                await websocket.close(code=1011)
+                                return
+                            if not rate_allowed or (
+                                previous is not None
+                                and header.capture_mono_ms - previous < settings.min_frame_interval_ms
+                            ):
+                                metrics.reject_frame()
+                                await websocket.send_json({"type": "error", "code": "frame_rate_limited"})
+                                discard_next_binary = True
+                            else:
+                                pending_header = header
                         else:
                             pending_header = header
                 elif message_type == "status":
                     await websocket.send_json({"type": "status_ack"})
+                elif message_type == "look":
+                    # On-demand look is a priority frame header+binary; acknowledge intent.
+                    await websocket.send_json({"type": "look_ack"})
                 else:
                     await websocket.send_json({"type": "error", "code": "unknown_message"})
             elif message.get("bytes") is not None:
@@ -250,18 +301,14 @@ async def session(websocket: WebSocket):
                     await websocket.send_json({"type": "error", "code": "jpeg_dimension_mismatch"})
                     continue
                 decode_ms = int((time.monotonic() - decode_started) * 1000)
-                if state.calibration_id != header.calibration_id:
-                    state.calibration_id = header.calibration_id
-                    await store.upsert_device(device_id, header.calibration_id)
-                    state.geometry_profile = await store.geometry_profile(header.calibration_id)
-                state.last_capture_mono_ms = header.capture_mono_ms
                 try:
-                    result = await vision.analyze(state, header, jpeg)
+                    result = await session_application.analyze_frame(state, header, jpeg)
                 except Exception:
                     # Do not leave a phone believing vision is active after a model/runtime
                     # failure.  The client disables speech and reconnects only after this socket
                     # is closed, preventing a half-paired frame stream from continuing.
                     logger.exception("vision inference failed for device=%s frame_id=%s", device_id, header.frame_id)
+                    metrics.inference_failed()
                     await websocket.send_json({"type": "error", "code": "vision_unavailable"})
                     await websocket.close(code=1011)
                     return
@@ -285,3 +332,7 @@ async def session(websocket: WebSocket):
         with suppress(RuntimeError):
             await websocket.send_json({"type": "error", "code": "protocol_error", "detail": str(exc)})
             await websocket.close(code=4400)
+    finally:
+        session_admission.close()
+        metrics.session_closed()
+        await session_application.close_session(state)

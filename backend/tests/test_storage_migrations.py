@@ -1,21 +1,16 @@
-import pytest
-
-from akshrava_backend.storage import _alert_event_add_column_sql, _device_add_column_sql
+from pathlib import Path
 
 
-def test_alert_event_migration_sql_uses_only_reviewed_fragments():
-    assert _alert_event_add_column_sql("track_id") == "ALTER TABLE alert_events ADD COLUMN track_id INTEGER"
+def test_production_schema_is_owned_by_a_versioned_alembic_revision():
+    root = Path(__file__).resolve().parents[1]
+    revision = root / "migrations" / "versions" / "20260719_01_initial_schema.py"
+    assert revision.is_file()
+    source = revision.read_text()
+    assert 'revision = "20260719_01"' in source
+    assert "op.create_table(" in source
 
 
-def test_alert_event_migration_sql_rejects_unknown_columns():
-    with pytest.raises(ValueError):
-        _alert_event_add_column_sql("track_id; DROP TABLE alert_events")
-
-
-def test_device_migration_sql_uses_only_reviewed_fragments():
-    assert _device_add_column_sql("revoked_at") == "ALTER TABLE devices ADD COLUMN revoked_at TIMESTAMP WITH TIME ZONE"
-
-
-def test_device_migration_sql_rejects_unknown_columns():
-    with pytest.raises(ValueError):
-        _device_add_column_sql("revoked_at; DROP TABLE devices")
+def test_runtime_storage_contains_no_schema_alter_statements():
+    source = (Path(__file__).resolve().parents[1] / "akshrava_backend" / "storage.py").read_text()
+    assert "ALTER TABLE" not in source
+    assert "create_all" in source  # development/test bootstrap only

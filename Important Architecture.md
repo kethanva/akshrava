@@ -15,7 +15,7 @@ The key honesty boundary is kinematic: at the 0.2–3 FPS envelope used by a rec
 | Capability | Current repository behaviour | May be enabled only after evidence |
 |---|---|---|
 | Server detector | `DETECTOR=noop` by default; transport, freshness and policy can be exercised without inventing vision | Approved/licensed weights, fixed runtime, target-device and route-disjoint evaluation, regression and controlled-course gates |
-| Tracking | Per-session track lists via `SimpleTracker` (shared helper; association state on `SessionState`); short miss retention never creates motion claims | A benchmarked tracker may replace it, but never justify “approaching” speech at low FPS |
+| Tracking | Per-session track lists via `SimpleTracker` (one helper instance per WebSocket `device_id` for ID allocation; association state on `SessionState`); short miss retention never creates motion claims. Isolation is per-session, not durable across reconnects. | A benchmarked tracker may replace it, but never justify “approaching” speech at low FPS |
 | Range | Pose is a validity signal; missing/unverified geometry keeps `range_valid=false`. A verified `calibration_profiles` row plus pose/agreement gates may set `range_valid=true`; no numeric distance is spoken | Controlled-course evidence that the verified profile is trustworthy on that mount/route |
 | Local fallback | No TFLite/LiteRT model is bundled; offline state says assistance is unavailable | A pinned, evaluated model asset and complete preprocessing/postprocessing contract, device benchmark and controlled-course evidence |
 | Pilot use | Bench tests and supervised preparation only | A named mobility instructor, Tier-A device, valid consent, controlled-course pass and release-gate sign-off |
@@ -114,7 +114,7 @@ Use short message keys, offline TTS and haptics: `Obstacle ahead`, `Vehicle near
 
 FastAPI handles the session protocol, but inference must not run in its event loop. The phone-facing control plane runs detectors in a thread executor; local Ultralytics instances still serialise through an inference lock, while `noop` and `remote` adapters do not. Bounded JPEG batching (default ≤8 / ~12 ms) exists only on the private GPU worker process (`DETECTOR=remote`), not as a control-plane gather queue. Persisted state is small and relational: device configuration, users, calibration/model versions, audit data and consent state in PostgreSQL (SQLite remains acceptable for early development).
 
-The intended pilot inference path is a pinned, approved detector on a CUDA host (current code path: Ultralytics weights via `DETECTOR=ultralytics` or the HMAC GPU worker). A fixed 640 shape, conservative batch cap and explicit model SHA-256 are more important than an optimistic benchmark. The HMAC nonce cache is process-local, so the shipped GPU image is deliberately one Gunicorn worker and must not be horizontally scaled behind a load balancer. A multi-worker deployment first needs a shared atomic nonce store with expiry plus health-checked routing. One GPU is only a scheduled supervised-pilot resource until measured concurrency shows headroom; CPU is suitable for a bench demo, not a claimed sub-500 ms service. An ONNX Runtime / Triton split is a later response to measured multi-model or high-concurrency demand—not what the Compose stack ships today.
+The intended pilot inference path is a pinned, approved detector on a CUDA host (current code path: Ultralytics weights via `DETECTOR=ultralytics` or the HMAC GPU worker). A fixed 640 shape, conservative batch cap and explicit model SHA-256 are more important than an optimistic benchmark. GPU workers claim HMAC nonces atomically in Redis, enabling replay-safe replica deployment; configured warm endpoints fail over after a transport failure, while full fleet routing and capacity management remain an operational gate. One GPU is only a scheduled supervised-pilot resource until measured concurrency shows headroom; CPU is suitable for a bench demo, not a claimed sub-500 ms service. An ONNX Runtime / Triton split is a later response to measured multi-model or high-concurrency demand—not what the Compose stack ships today.
 
 ### Detection, association, geometry
 
@@ -126,7 +126,7 @@ Ground-plane geometry may derive a rough band from a verified mount height, pitc
 
 ### Conservative hazard decision
 
-The scorer considers class, detector confidence, valid proximity, central path corridor and multi-frame stability. S1 urgent output is reserved for a validated nearby central obstruction (`range_valid` plus confidence); S2/caution requires repeated evidence. Vehicle language is awareness-only. There is **no** priority/on-demand look mode, cooldown bypass, or `look_summary` in the current build—do not promise one (see `docs/TRIAL_PROTOCOL.md`).
+The scorer considers class, detector confidence, valid proximity, central path corridor and multi-frame stability. S1 urgent output is reserved for a validated nearby central obstruction (`range_valid` plus confidence); S2/caution requires repeated evidence. Vehicle language is awareness-only. On-demand **priority look** (`FrameHeader.priority` or `mode=priority`) skips alert cooldowns / device rate limits and returns a `look_summary` for that frame; the phone speaks it with a **500 ms** freshness budget. Look never invents approach or crossing advice. MediaSession long-press can request a priority frame after device-specific testing.
 
 | Condition | Permitted response | Never infer |
 |---|---|---|
@@ -187,7 +187,7 @@ Run the repository verification baseline with:
 # equivalent: ./scripts/test_backend.sh  (also creates .venv / installs deps)
 ```
 
-This runs the backend pytest suite under `DETECTOR=noop` (and ruff when installed). There is no separate Phase-0 fixture-replay binary or labelled regression-clip suite in this repository yet. A green test suite proves only the tested implementation; it is not field-use approval. Run the backend tests and static checks in CI, and validate the Android build on the intended SDK/device. See [docs/E2E_VERIFICATION.md](docs/E2E_VERIFICATION.md).
+This runs the backend pytest suite under `DETECTOR=noop` (and ruff when installed). There is no separate Phase-0 fixture-replay binary or labelled regression-clip suite in this repository yet. A green test suite proves only the tested implementation; it is not field-use approval. Run the backend tests and static checks in CI, and validate the Android build on the intended SDK/device. See [docs/RELEASE_AND_VERIFICATION.md](docs/RELEASE_AND_VERIFICATION.md).
 
 | Gate | Minimum evidence before progressing |
 |---|---|
@@ -218,7 +218,7 @@ Before Phase 1, name the NGO safety partner and stop authority; choose one famil
 
 - [README.md](README.md) — repository boundary and local setup.
 - [docs/PROTOCOL.md](docs/PROTOCOL.md) — exact WebSocket contract and enforced invariants.
-- [docs/ANDROID_DEVICE_SCOPE.md](docs/ANDROID_DEVICE_SCOPE.md) — Android resource policy.
+- [docs/ANDROID.md](docs/ANDROID.md) — Android compatibility and resource policy.
 - [docs/OPERATIONS.md](docs/OPERATIONS.md) — deployment, model activation and failure handling.
-- [docs/RELEASE_GATE.md](docs/RELEASE_GATE.md) and [docs/TRIAL_PROTOCOL.md](docs/TRIAL_PROTOCOL.md) — release and participant safeguards.
+- [docs/FIELD_GUIDE.md](docs/FIELD_GUIDE.md) — release and participant safeguards.
 - [RECYCLED_PHONE_ASSISTIVE_VISION_BUILD_PLAN.md](RECYCLED_PHONE_ASSISTIVE_VISION_BUILD_PLAN.md) — source planning rationale, cost assumptions, data strategy and longer-term decisions.

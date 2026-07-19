@@ -1,5 +1,6 @@
 from akshrava_backend.domain import Detection, GeometryProfile, SessionState
 from akshrava_backend.hazards import HazardScorer, _ground_plane_distance
+from akshrava_backend.alert_policy import AlertPolicy
 from akshrava_backend.tracker import SimpleTracker
 
 
@@ -65,21 +66,23 @@ def test_invalid_range_never_produces_single_frame_s1():
 
 def test_one_device_cannot_exhaust_another_devices_alert_budget():
     scorer = HazardScorer()
+    policy = AlertPolicy()
     first = SessionState(device_id="first", tracks=_stable_track())
     second = SessionState(device_id="second", tracks=_stable_track())
     for index in range(6):
         first.last_alert_at_ms.clear()
-        assert scorer.score(first, 640, 480, 20, -1200, 0) is not None, index
-    assert scorer.score(second, 640, 480, 20, -1200, 0) is not None
+        assert policy.admit(first, scorer.score(first, 640, 480, 20, -1200, 0), priority=False) is not None, index
+    assert policy.admit(second, scorer.score(second, 640, 480, 20, -1200, 0), priority=False) is not None
 
 def test_global_rate_limit():
     scorer = HazardScorer()
+    policy = AlertPolicy()
     state = SessionState(device_id="test", tracks=_stable_track())
     for _ in range(6):
         state.last_alert_at_ms.clear() # clear per-key
-        assert scorer.score(state, 640, 480, 20, -1200, 0) is not None
+        assert policy.admit(state, scorer.score(state, 640, 480, 20, -1200, 0), priority=False) is not None
     state.last_alert_at_ms.clear()
-    assert scorer.score(state, 640, 480, 20, -1200, 0) is None
+    assert policy.admit(state, scorer.score(state, 640, 480, 20, -1200, 0), priority=False) is None
 
 
 def test_upward_pitch_never_becomes_a_downward_ground_plane_estimate():
@@ -97,4 +100,49 @@ def test_only_a_verified_geometry_profile_can_enable_range_validation():
     # Even a verified profile must satisfy every pose/range gate; this fixture's one-frame S1
     # is allowed only when those values agree, never simply because an ID was supplied.
     assert hazard is None or hazard.range_valid
-    
+
+
+def test_priority_skip_cooldowns_returns_hazard():
+    state = SessionState(device_id="test", tracks=_stable_track())
+    scorer = HazardScorer()
+    policy = AlertPolicy()
+    first = policy.admit(state, scorer.score(state, 640, 480, 20, -1200, 0), priority=False)
+    assert first is not None
+    blocked = policy.admit(state, scorer.score(state, 640, 480, 20, -1200, 0), priority=False)
+    assert blocked is None
+    looked = policy.admit(state, scorer.score(state, 640, 480, 20, -1200, 0, skip_cooldowns=True), priority=True)
+    assert looked is not None
+    assert looked.message_key == first.message_key
+    assert "approach" not in looked.message_key
+
+
+def test_priority_skip_cooldowns_bypasses_device_rate_limit():
+    scorer = HazardScorer()
+    policy = AlertPolicy()
+    state = SessionState(device_id="test", tracks=_stable_track())
+    for _ in range(6):
+        state.last_alert_at_ms.clear()
+        assert policy.admit(state, scorer.score(state, 640, 480, 20, -1200, 0), priority=False) is not None
+    state.last_alert_at_ms.clear()
+    assert policy.admit(state, scorer.score(state, 640, 480, 20, -1200, 0), priority=False) is None
+    assert policy.admit(state, scorer.score(state, 640, 480, 20, -1200, 0, skip_cooldowns=True), priority=True) is not None
+
+
+def test_scorer_is_pure_and_never_mutates_alert_delivery_state():
+    state = SessionState(device_id="test", tracks=_stable_track())
+    before = (dict(state.last_alert_at_ms), list(state.alert_timestamps_ms))
+    assert HazardScorer().score(state, 640, 480, 20, -1200, 0) is not None
+    assert (state.last_alert_at_ms, state.alert_timestamps_ms) == before
+
+
+def test_on_demand_look_answers_a_never_before_seen_object_on_its_first_frame():
+    # Regression test: an on-demand look is, by construction, exactly one pulled frame -- there
+    # is no second observation coming. The scorer used to require two-frame persistence
+    # (track.hits >= 2) unconditionally, so a look query could never report a hazard for
+    # anything the tracker hadn't already seen twice -- defeating the feature's entire purpose,
+    # which is precisely the standing-still blind spot where ambient capture hasn't looked twice.
+    state = SessionState(device_id="test", tracks=_single_frame_track(confidence=0.9))
+    assert HazardScorer().score(state, 640, 480, 20, -1200, 0) is None  # ambient: still silent
+    looked = HazardScorer().score(state, 640, 480, 20, -1200, 0, skip_cooldowns=True)
+    assert looked is not None
+    assert looked.message_key == "obstacle_ahead"

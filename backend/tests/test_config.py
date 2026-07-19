@@ -34,3 +34,27 @@ def test_development_can_use_private_http_worker(monkeypatch):
     monkeypatch.setenv("REMOTE_INFERENCE_URL", "http://127.0.0.1:8000/v1/infer")
     monkeypatch.setenv("REMOTE_WORKER_SECRET", "y" * 32)
     assert Settings.from_env().remote_inference_url.startswith("http://")
+
+
+def test_production_requires_redis_for_distributed_safety_controls(monkeypatch):
+    monkeypatch.setenv("AKSHRAVA_ENV", "production")
+    monkeypatch.setenv("DEV_AUTH_BYPASS", "false")
+    monkeypatch.setenv("JWT_SECRET", "x" * 32)
+    monkeypatch.setenv("JWT_ALGORITHM", "RS256")
+    monkeypatch.setenv("JWT_PUBLIC_KEY_FILE", "/run/secrets/jwt/device-public.pem")
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    with pytest.raises(ValueError, match="REDIS_URL"):
+        Settings.from_env()
+
+
+def test_pilot_remote_inference_requires_mutual_tls_material(monkeypatch):
+    monkeypatch.setenv("AKSHRAVA_ENV", "pilot")
+    monkeypatch.setenv("DEV_AUTH_BYPASS", "false")
+    monkeypatch.setenv("JWT_SECRET", "x" * 32)
+    monkeypatch.setenv("DETECTOR", "remote")
+    monkeypatch.setenv("REMOTE_INFERENCE_URL", "https://worker.internal/v1/infer")
+    monkeypatch.setenv("REMOTE_WORKER_SECRET", "y" * 32)
+    for name in ("REMOTE_TLS_CA_FILE", "REMOTE_TLS_CLIENT_CERT_FILE", "REMOTE_TLS_CLIENT_KEY_FILE"):
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(ValueError, match="client certificate"):
+        Settings.from_env()

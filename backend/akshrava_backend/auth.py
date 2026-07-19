@@ -1,4 +1,5 @@
 from typing import Optional
+from pathlib import Path
 
 import jwt
 
@@ -7,6 +8,15 @@ from .config import Settings
 
 class AuthError(ValueError):
     pass
+
+
+def _verification_key(settings: Settings) -> str:
+    if settings.jwt_algorithm == "HS256":
+        return settings.jwt_secret
+    try:
+        return Path(settings.jwt_public_key_file).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise AuthError("device verification key unavailable") from exc
 
 
 def device_id_from_token(token: Optional[str], settings: Settings) -> str:
@@ -21,8 +31,8 @@ def device_id_from_token(token: Optional[str], settings: Settings) -> str:
         # expiry rather than trusting every caller of the mint script to set it.
         claims = jwt.decode(
             token,
-            settings.jwt_secret,
-            algorithms=["HS256"],
+            _verification_key(settings),
+            algorithms=[settings.jwt_algorithm],
             audience="akshrava-device",
             options={"require": ["exp", "sub", "aud"]},
         )

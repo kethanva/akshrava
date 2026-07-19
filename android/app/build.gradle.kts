@@ -16,10 +16,32 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    val releaseKeystorePath = providers.environmentVariable("ANDROID_KEYSTORE_PATH").orNull
+    val releaseKeystorePassword = providers.environmentVariable("ANDROID_KEYSTORE_PASSWORD").orNull
+    val releaseKeyAlias = providers.environmentVariable("ANDROID_KEY_ALIAS").orNull
+    val releaseKeyPassword = providers.environmentVariable("ANDROID_KEY_PASSWORD").orNull
+    val releaseSigningConfigured = listOf(
+        releaseKeystorePath, releaseKeystorePassword, releaseKeyAlias, releaseKeyPassword
+    ).all { !it.isNullOrBlank() }
+
+    if (providers.environmentVariable("REQUIRE_RELEASE_SIGNING").orNull == "true" && !releaseSigningConfigured) {
+        throw GradleException("Release signing is required but Android keystore environment variables are incomplete")
+    }
+
+    if (releaseSigningConfigured) {
+        signingConfigs.create("release") {
+            storeFile = file(releaseKeystorePath!!)
+            storePassword = releaseKeystorePassword
+            keyAlias = releaseKeyAlias
+            keyPassword = releaseKeyPassword
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            if (releaseSigningConfigured) signingConfig = signingConfigs.getByName("release")
         }
     }
 
@@ -47,5 +69,9 @@ dependencies {
     implementation("androidx.camera:camera-camera2:$cameraX")
     implementation("androidx.camera:camera-lifecycle:$cameraX")
     implementation("com.squareup.okhttp3:okhttp:5.4.0")
+    implementation("androidx.media:media:1.7.0")
     testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test:core-ktx:1.6.1")
 }

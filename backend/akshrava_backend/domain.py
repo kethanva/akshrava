@@ -15,6 +15,8 @@ class FrameHeader:
     roll_cdeg: Optional[int]
     pose_age_ms: Optional[int]
     mode: str
+    priority: bool = False
+    trace_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -60,6 +62,7 @@ class Hazard:
 @dataclass
 class SessionState:
     device_id: str
+    trace_prefix: str = ""
     calibration_id: str = ""
     tracks: List[Track] = field(default_factory=list)
     last_alert_at_ms: Dict[str, int] = field(default_factory=dict)

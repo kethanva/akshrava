@@ -1,5 +1,4 @@
 import math
-import time
 from typing import List, Optional, Tuple
 
 from .domain import GeometryProfile, Hazard, SessionState, Track
@@ -13,7 +12,6 @@ OBSTACLE_LABELS = {"person", "dog", "cat", "chair", "pole", "hawker_cart", "park
 # to the one alert that can least afford it. Everything else still needs two frames.
 S1_CONFIDENCE = 0.6
 MIN_CONFIDENCE = 0.45
-ALERT_COOLDOWN_MS = 5000
 S2_RISK_THRESHOLD = 0.4
 
 # ---------- geometry constants ----------
@@ -52,12 +50,6 @@ CLASS_WEIGHT = {
     "motorcycle": 1.2,
     "bicycle": 1.2,
 }
-
-# ---------- per-device rate limit ----------
-
-GLOBAL_RATE_LIMIT = 6
-GLOBAL_RATE_WINDOW_S = 60.0
-
 
 def _bearing(track: Track, width: int) -> str:
     center = (track.box[0] + track.box[2]) / 2.0
@@ -165,14 +157,7 @@ def _range_band(distance: Optional[float]) -> str:
 
 
 class HazardScorer:
-    """Produces bounded awareness prompts; intentionally no approach/crossing advice."""
-
-    @staticmethod
-    def _check_device_rate(state: SessionState, now_ms: int) -> bool:
-        """Return True if this device, not the whole fleet, may receive another alert."""
-        cutoff_ms = now_ms - int(GLOBAL_RATE_WINDOW_S * 1000)
-        state.alert_timestamps_ms[:] = [item for item in state.alert_timestamps_ms if item > cutoff_ms]
-        return len(state.alert_timestamps_ms) < GLOBAL_RATE_LIMIT
+    """Pure hazard ranking; intentionally no approach/crossing advice or state mutation."""
 
     def score(
         self,
@@ -183,6 +168,7 @@ class HazardScorer:
         pitch_cdeg: Optional[int],
         roll_cdeg: Optional[int],
         geometry_profile: Optional[GeometryProfile] = None,
+        skip_cooldowns: bool = False,
     ) -> Optional[Hazard]:
         candidates: List[Hazard] = []
         for track in state.tracks:
@@ -202,8 +188,10 @@ class HazardScorer:
                 pose_age_ms, pitch_cdeg, roll_cdeg, pinhole_dist, ground_dist, geometry_profile
             )
             
-            # Use pinhole as primary range estimate if valid, else ground
-            est_dist = pinhole_dist if pinhole_dist else ground_dist
+            # Use pinhole as primary range estimate if available, else ground. `is not None`
+            # matters here: a degenerate 0.0 estimate is falsy and would silently fall through
+            # to ground_dist under a plain truthiness check.
+            est_dist = pinhole_dist if pinhole_dist is not None else ground_dist
             band = _range_band(est_dist)
             
             bearing = _bearing(track, width)
@@ -212,7 +200,13 @@ class HazardScorer:
             cw = CLASS_WEIGHT.get(track.label, 1.0)
             proximity_validity = 1.0 if (valid_range and band == "near") else 0.6
             path_factor = 1.4 if bearing == "ahead" else 1.0
-            stability = 0.0 if track.hits < 2 else 1.0
+            # An on-demand look (skip_cooldowns) is, by design, exactly one pulled frame -- there
+            # is no second observation coming. Requiring hits >= 2 here would make the feature
+            # structurally unable to ever report a brand-new object, which defeats its purpose:
+            # the plan's own justification for it is the standing-still blind spot, precisely
+            # where ambient 0.2 FPS capture has NOT yet given the tracker a second look. Ordinary
+            # ambient (non-priority) frames still require two-frame persistence to fire.
+            stability = 1.0 if (skip_cooldowns or track.hits >= 2) else 0.0
             risk = cw * track.confidence * proximity_validity * path_factor * stability
 
             # ---------- severity assignment ----------
@@ -266,16 +260,4 @@ class HazardScorer:
         )
         candidate = candidates[0]
 
-        # Per-key cooldown (5 s). Deliberately NOT keyed on level/severity: a track flapping
-        # urgent<->caution between frames must not get two independent cooldowns and double-speak.
-        cooldown_key = "%s:%s" % (candidate.kind, candidate.bearing)
-        now = int(time.monotonic() * 1000)
-        previous = state.last_alert_at_ms.get(cooldown_key)
-        if previous is not None and now - previous < ALERT_COOLDOWN_MS:
-            return None
-        # Per-device rate limit (6 alerts / 60 s). One noisy device must not mute another.
-        if not self._check_device_rate(state, now):
-            return None
-        state.last_alert_at_ms[cooldown_key] = now
-        state.alert_timestamps_ms.append(now)
         return candidate

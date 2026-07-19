@@ -6,7 +6,7 @@ import time
 
 from fastapi.testclient import TestClient
 
-from akshrava_backend.detector import Detector, RemoteWorkerDetector
+from akshrava_backend.detector import Detector, FailoverRemoteWorkerDetector, RemoteWorkerDetector
 from akshrava_backend.domain import Detection
 from akshrava_backend.worker import WorkerSettings, create_worker_app
 
@@ -72,6 +72,17 @@ def test_gpu_worker_uses_detector_batch_contract():
     assert detector.batch_sizes == [1]
 
 
+def test_gpu_worker_readiness_fails_when_replay_protection_is_unavailable(monkeypatch):
+    settings = WorkerSettings(SECRET, "unused.pt", 200_000, 1280, 30, require_gpu=False)
+    app = create_worker_app(settings, FixedDetector())
+    with TestClient(app) as client:
+        async def unavailable():
+            raise RuntimeError("redis unavailable")
+
+        monkeypatch.setattr(app.state.nonce_store, "health", unavailable)
+        assert client.get("/readyz").status_code == 503
+
+
 def test_remote_detector_signs_and_validates_worker_response(monkeypatch):
     captured = {}
 
@@ -85,7 +96,7 @@ def test_remote_detector_signs_and_validates_worker_response(monkeypatch):
         def read(self, size):
             return b'{"detections":[{"label":"car","confidence":0.8,"box":[1,2,3,4]}]}'
 
-    def fake_urlopen(request, timeout):
+    def fake_urlopen(request, timeout, context=None):
         captured["signature"] = request.headers["X-akshrava-signature"]
         captured["timeout"] = timeout
         return Response()
@@ -95,3 +106,31 @@ def test_remote_detector_signs_and_validates_worker_response(monkeypatch):
     assert detector.detect(JPEG) == [Detection("car", 0.8, (1.0, 2.0, 3.0, 4.0))]
     assert captured["signature"]
     assert captured["timeout"] == 0.45
+
+
+def test_remote_detector_fails_over_to_warm_worker(monkeypatch):
+    calls = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self, size):
+            return b'{"detections":[]}'
+
+    def fake_urlopen(request, timeout, context=None):
+        calls.append(request.full_url)
+        if "one.internal" in request.full_url:
+            from urllib.error import URLError
+            raise URLError("preempted")
+        return Response()
+
+    monkeypatch.setattr("akshrava_backend.detector.urlopen", fake_urlopen)
+    detector = FailoverRemoteWorkerDetector(
+        ["https://one.internal/v1/infer", "https://two.internal/v1/infer"], SECRET, 450
+    )
+    assert detector.detect(JPEG) == []
+    assert calls == ["https://one.internal/v1/infer", "https://two.internal/v1/infer"]

@@ -29,6 +29,7 @@ require_secret() {
 require_secret POSTGRES_PASSWORD
 require_secret JWT_SECRET
 require_secret GRAFANA_PASSWORD
+require_secret REDIS_PASSWORD
 
 postgres_password=$(value_for POSTGRES_PASSWORD)
 if [[ ! "$postgres_password" =~ ^[A-Za-z0-9_-]+$ ]]; then
@@ -53,6 +54,16 @@ if [[ "$environment" != "pilot" && "$environment" != "production" ]]; then
   echo "AKSHRAVA_ENV must be pilot or production for deployment." >&2
   exit 1
 fi
+if [[ "$environment" == "production" ]]; then
+  redis_url=$(value_for REDIS_URL)
+  nonce_redis_url=$(value_for NONCE_REDIS_URL)
+  # Empty values select the authenticated Compose defaults. Explicit values must be TLS Redis
+  # endpoints so cross-host/API-replica coordination is never sent in cleartext.
+  if [[ -n "$redis_url" && ! "$redis_url" =~ ^rediss:// ]] || [[ -n "$nonce_redis_url" && ! "$nonce_redis_url" =~ ^rediss:// ]]; then
+    echo "Production REDIS_URL and NONCE_REDIS_URL must use rediss:// when explicitly set." >&2
+    exit 1
+  fi
+fi
 if [[ "$(value_for DEV_AUTH_BYPASS)" == "true" ]]; then
   echo "DEV_AUTH_BYPASS must be false for deployment." >&2
   exit 1
@@ -70,6 +81,9 @@ if [[ "$detector" == "remote" ]]; then
     echo "DETECTOR=remote requires an HTTPS REMOTE_INFERENCE_URL and a non-example REMOTE_WORKER_SECRET of at least 32 characters." >&2
     exit 1
   fi
+  for name in REMOTE_TLS_CA_FILE REMOTE_TLS_CLIENT_CERT_FILE REMOTE_TLS_CLIENT_KEY_FILE; do
+    [[ -n "$(value_for "$name")" ]] || { echo "DETECTOR=remote requires $name for mTLS." >&2; exit 1; }
+  done
 fi
 
 if [[ "$field_mode" == "--gpu-worker" ]]; then

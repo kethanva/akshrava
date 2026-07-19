@@ -40,7 +40,7 @@ class RecordingStore:
         self.alerts.append((device_id, frame_id, hazard))
 
 
-def _header(frame_id, capture_mono_ms):
+def _header(frame_id, capture_mono_ms, priority=False, mode="normal"):
     return FrameHeader(
         frame_id=frame_id,
         capture_mono_ms=capture_mono_ms,
@@ -52,7 +52,8 @@ def _header(frame_id, capture_mono_ms):
         pitch_cdeg=-1200,
         roll_cdeg=0,
         pose_age_ms=20,
-        mode="normal",
+        mode=mode,
+        priority=priority,
     )
 
 
@@ -135,3 +136,37 @@ async def test_fresh_large_pose_jump_drops_unmatched_stale_tracks():
     )
     await service.analyze(state, moved, b"")
     assert state.tracks == []
+
+
+@pytest.mark.asyncio
+async def test_per_session_trackers_do_not_share_id_counters():
+    service = VisionService(EmptyDetector(), RecordingStore())
+    a = service._tracker("device-a")
+    b = service._tracker("device-b")
+    assert a is not b
+    from akshrava_backend.domain import Detection
+
+    a.update([], [Detection("person", 0.9, (0, 0, 10, 10))])
+    b.update([], [Detection("person", 0.9, (0, 0, 10, 10))])
+    assert a._next_id == 2
+    assert b._next_id == 2
+
+
+@pytest.mark.asyncio
+async def test_priority_look_bypasses_cooldown_and_returns_look_summary():
+    service = VisionService(FixedPersonDetector(), RecordingStore(), language="en")
+    state = SessionState(device_id="look-device")
+    first = await service.analyze(state, _header(1, 1_000), b"jpeg")
+    second = await service.analyze(state, _header(2, 1_500), b"jpeg")
+    assert second["hazard"] is not None
+    blocked = await service.analyze(state, _header(3, 2_000), b"jpeg")
+    assert blocked["hazard"] is None
+    look = await service.analyze(
+        state, _header(4, 2_500, priority=True, mode="priority"), b"jpeg"
+    )
+    assert look["priority"] is True
+    assert look["hazard"] is not None
+    assert look["look_summary"]
+    assert "approach" not in look["look_summary"].lower()
+    assert "safe" not in look["look_summary"].lower()
+    assert first["look_summary"] is None

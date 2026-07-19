@@ -23,6 +23,7 @@ import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import androidx.core.app.ServiceCompat
 import androidx.lifecycle.LifecycleService
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -49,14 +50,18 @@ class AssistService : LifecycleService() {
     private lateinit var alertManager: AlertManager
     private lateinit var client: ProtocolClient
     private lateinit var calibrationId: String
+    private var headsetControls: HeadsetControls? = null
+    private var reflexEngine: ReflexEngine = DisabledReflexEngine()
     private var wakeLock: PowerManager.WakeLock? = null
     private var cameraProvider: ProcessCameraProvider? = null
     private val framePending = AtomicBoolean(false)
+    private val lookRequested = AtomicBoolean(false)
     private var frameId = 0L
     private var lastCaptureMs = 0L
     private var lastThermalCheckMs = 0L
     private var lastBatteryWarningMs = 0L
     private var lastCameraUnclearMs = 0L
+    private var lastHeartbeatMs = 0L
     private var consecutiveBlurredFrames = 0
     private var previousThumbnail: IntArray? = null
     @Volatile private var thermalThrottled = false
@@ -100,6 +105,13 @@ class AssistService : LifecycleService() {
             }
         )
         client.connect()
+        reflexEngine = ReflexFactory.create(this)
+        headsetControls = HeadsetControls(
+            this,
+            onRepeat = { alertManager.status("Repeat unavailable offline") },
+            onMute = { alertManager.status("Muted for fifteen minutes") },
+            onLook = { lookRequested.set(true) }
+        ).also { it.start() }
         bindCamera()
         SessionFlags.setActive(this, true)
         Watchdog.schedule(this)
@@ -143,15 +155,27 @@ class AssistService : LifecycleService() {
         try {
             val now = SystemClock.elapsedRealtime()
             maybeCheckThermal(now)
-            
+            // Heartbeat means "the camera pipeline is alive", not "a frame was uploaded". It
+            // must fire before any of the gates below (battery suspend, pending-frame,
+            // duplicate/blur drop) can return early, or a stationary user staring at an
+            // unchanging scene -- every frame legitimately a duplicate -- starves the watchdog
+            // and gets a loud false "assistance stopped" alarm despite the service running fine.
+            maybeHeartbeat(now)
+
             if (batteryCritical || captureSuspendedForBattery || captureSuspendedForFailure) {
                 return
             }
-            
+            // Bench mode (vision_enabled=false) or a dead vendor means nothing sent right now
+            // would be used. Skip the luma thumbnail, blur/duplicate checks and JPEG encode
+            // entirely rather than doing that work and then having sendFrame() discard it --
+            // this is heat and battery burned on the donated phones that can least afford it.
+            if (!client.canStream()) return
+
             if (framePending.get()) return
-            // A fresh turn asks for one immediate look; otherwise respect the adaptive interval.
+            val priority = lookRequested.getAndSet(false)
+            // Headset long-press look or a fresh turn asks for one immediate frame.
             val turning = poseTracker.consumeTurn()
-            if (!turning && now - lastCaptureMs < captureIntervalMs()) return
+            if (!priority && !turning && now - lastCaptureMs < captureIntervalMs()) return
 
             val thumbnail = FrameGate.luma(image)
             if (FrameGate.isBlurred(thumbnail)) {
@@ -166,7 +190,7 @@ class AssistService : LifecycleService() {
             } else {
                 consecutiveBlurredFrames = 0
             }
-            if (!turning) {
+            if (!priority && !turning) {
                 if (FrameGate.isDuplicate(previousThumbnail, thumbnail)) { previousThumbnail = thumbnail; return }
             }
             // Blur is recorded as a cheap diagnostic signal by FrameGate, but never used to drop
@@ -175,11 +199,22 @@ class AssistService : LifecycleService() {
 
             if (!framePending.compareAndSet(false, true)) return
             val frame = frameEncoder.encode(image, quality.maxSide, quality.jpegQ)
+            // Fail-closed offline: without licensed TFLite weights, reflex never speaks hazards.
+            if (reflexEngine.isArmed()) {
+                reflexEngine.evaluate(frame)
+            }
 
             lastCaptureMs = now
-            SessionFlags.heartbeat(this)
-            
-            val sent = client.sendFrame(++frameId, now, poseTracker.snapshot(), calibrationId, frame)
+
+            val sent = client.sendFrame(
+                ++frameId,
+                now,
+                poseTracker.snapshot(),
+                calibrationId,
+                frame,
+                mode = if (priority) "priority" else "normal",
+                priority = priority
+            )
             if (!sent) framePending.set(false)
         } catch (_: Exception) {
             framePending.set(false)
@@ -187,6 +222,12 @@ class AssistService : LifecycleService() {
         } finally {
             image.close()
         }
+    }
+
+    private fun maybeHeartbeat(now: Long) {
+        if (now - lastHeartbeatMs < HEARTBEAT_INTERVAL_MS) return
+        lastHeartbeatMs = now
+        SessionFlags.heartbeat(this)
     }
 
     private fun captureIntervalMs(): Long {
@@ -222,7 +263,9 @@ class AssistService : LifecycleService() {
                 if (!batteryCritical) {
                     batteryCritical = true
                     batteryLow = true
-                    alertManager.status("Battery critical. Vision assistance stopped.")
+                    // suspendCaptureForCriticalBattery() speaks its own status message; a
+                    // second status() call here would immediately flush (cut off) it, so the
+                    // first utterance would never actually be heard.
                     suspendCaptureForCriticalBattery()
                 }
             } else if (batteryPct < 15) {
@@ -249,16 +292,15 @@ class AssistService : LifecycleService() {
 
     private fun suspendCaptureForCriticalBattery() {
         if (captureSuspendedForBattery) return
+        // A partial teardown here used to leave sensors registered forever and, worse, left
+        // the lateinit `client` "initialized" -- so a later ACTION_START (the user pressing
+        // Start again, e.g. after plugging into the power bank) silently no-opped in
+        // onStartCommand's `if (!::client.isInitialized)` guard, with no feedback that the
+        // press did nothing. Stop the whole service cleanly instead, exactly like a camera
+        // failure, so the user gets one consistent "press Start again" recovery path.
         captureSuspendedForBattery = true
-        SessionFlags.setActive(this, false)
-        Watchdog.cancel(this)
-        // Unbind instead of merely returning from every camera callback, then keep the visible
-        // foreground notification/TTS alive so the volunteer can hear why capture stopped.
-        ContextCompat.getMainExecutor(this).execute {
-            cameraProvider?.unbindAll()
-            if (::client.isInitialized) client.close()
-            wakeLock?.let { if (it.isHeld) it.release() }
-            updateNotification("Battery critical. Assistance stopped")
+        alertManager.status("Battery critical. Vision assistance stopped. Use cane or guide.") {
+            ContextCompat.getMainExecutor(this).execute { stopAssistance() }
         }
     }
 
@@ -275,7 +317,7 @@ class AssistService : LifecycleService() {
         if (::poseTracker.isInitialized) poseTracker.stop()
         if (::frameExecutor.isInitialized) frameExecutor.shutdownNow()
         wakeLock?.let { if (it.isHeld) it.release() }
-        alertManager.status("Rear camera unavailable. Use cane or guide.") {
+        alertManager.speakThen("Rear camera unavailable. Use cane or guide.") {
             ContextCompat.getMainExecutor(this).execute { stopAssistance() }
         }
     }
@@ -305,9 +347,10 @@ class AssistService : LifecycleService() {
         // FOREGROUND_SERVICE_TYPE_CAMERA and the manifest camera type were introduced in API 30
         // (R), not 29 (Q). Passing it on Q throws (invalid foreground service type) -- and Tier-A
         // devices are floored at Android 10 (Q), so this must gate on R, not Q.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA)
-        } else startForeground(NOTIFICATION_ID, notification)
+        val serviceType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+        } else 0
+        ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, serviceType)
     }
 
     private fun updateNotification(status: String) {
@@ -322,6 +365,8 @@ class AssistService : LifecycleService() {
         stopping = true
         SessionFlags.setActive(this, false)
         Watchdog.cancel(this)
+        headsetControls?.stop()
+        headsetControls = null
         cameraProvider?.unbindAll()
         if (::client.isInitialized) client.close()
         if (::alertManager.isInitialized) alertManager.shutdown()

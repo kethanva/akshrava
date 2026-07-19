@@ -23,7 +23,7 @@ For an Android emulator/debug device only, configure `ws://10.0.2.2:8000/v1/sess
 ```bash
 cd infra
 cp .env.example .env
-# Edit passwords, JWT_SECRET and DOMAIN. Do not use example values.
+# Edit passwords, RS256 public-key path, and DOMAIN. Do not use example values.
 ../scripts/cloud_preflight.sh .env
 docker compose --env-file .env --profile control-plane --profile edge up -d --build
 ```
@@ -39,12 +39,14 @@ Take a backup and test restoring it before each release:
 ../scripts/backup_postgres.sh .env /secure/backup/directory
 ```
 
-Mint a device token from a machine with the same `JWT_SECRET`:
+Mint a production device token from the secured provisioning workstation; its private key is not
+mounted on the API host:
 
 ```bash
 cd backend
 source .venv/bin/activate
-JWT_SECRET='same-secret-as-server' python ../scripts/mint_device_token.py pilot-phone-001 --days 30
+JWT_ALGORITHM=RS256 JWT_PRIVATE_KEY_FILE=/secure/keys/device-private.pem \
+  python ../scripts/mint_device_token.py pilot-phone-001 --days 30
 ```
 
 The Android app encrypts this token using the device's Android Keystore before storing it. A
