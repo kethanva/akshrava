@@ -22,3 +22,19 @@ resource "google_sql_database" "database" {
   name     = "akshrava"
   instance = google_sql_database_instance.postgres.name
 }
+
+resource "random_password" "db_password" {
+  length  = 32
+  special = false
+}
+
+resource "google_sql_user" "db_user" {
+  name     = "akshrava"
+  instance = google_sql_database_instance.postgres.name
+  password = random_password.db_password.result
+}
+
+resource "google_secret_manager_secret_version" "db_password_version" {
+  secret      = google_secret_manager_secret.db_password.id
+  secret_data = random_password.db_password.result
+}

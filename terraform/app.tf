@@ -38,7 +38,7 @@ resource "google_cloud_run_v2_service" "api" {
       }
       env {
         name  = "DATABASE_URL"
-        value = "postgresql+asyncpg://akshrava:${google_sql_database_instance.postgres.private_ip_address}/akshrava"
+        value = "postgresql+asyncpg://akshrava:${random_password.db_password.result}@${google_sql_database_instance.postgres.private_ip_address}/akshrava"
       }
       env {
         name  = "DETECTOR"
@@ -65,6 +65,10 @@ resource "google_cloud_run_v2_service" "api" {
             version = "latest"
           }
         }
+      }
+      env {
+        name  = "GCP_DIAGNOSTICS_BUCKET"
+        value = google_storage_bucket.diagnostics.name
       }
     }
   }
