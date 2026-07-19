@@ -61,6 +61,29 @@ def test_event_feed_requires_matching_device_token():
         ).status_code == 200
 
 
+def test_revoked_device_is_closed_before_its_next_frame(monkeypatch):
+    checks = 0
+
+    async def revoked_after_handshake(_device_id):
+        nonlocal checks
+        checks += 1
+        return checks > 1
+
+    monkeypatch.setattr(main.store, "is_device_revoked", revoked_after_handshake)
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/session?token=dev-device-token") as websocket:
+            assert websocket.receive_json()["type"] == "ready"
+            websocket.send_json(
+                {
+                    "type": "frame", "id": 1, "capture_mono_ms": 100, "w": 1, "h": 1,
+                    "jpeg_bytes": len(JPEG), "camera_calibration_id": "test-r0",
+                }
+            )
+            with pytest.raises(WebSocketDisconnect) as disconnect:
+                websocket.receive_json()
+    assert disconnect.value.code == 4403
+
+
 def test_metrics_endpoint_exposes_aggregate_operational_metrics():
     with TestClient(app) as client:
         response = client.get("/metrics")

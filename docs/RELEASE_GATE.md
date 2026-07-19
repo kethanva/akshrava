@@ -4,7 +4,8 @@ This repository is a bench-test implementation until every relevant item below i
 
 ## Code and deployment
 
-- [ ] `./scripts/test_backend.sh` passes and the Android debug APK is assembled from the exact release commit.
+- [ ] `./scripts/test_backend.sh` passes, Android unit tests pass, and the Android debug APK is
+      assembled from the exact release commit.
 - [ ] A release build connects only to a real `wss://` endpoint; `DEV_AUTH_BYPASS=false`; a long random `JWT_SECRET` is stored outside Git.
 - [ ] `AKSHRAVA_ENV` is `pilot` or `production`; geometry output remains disabled unless the
       device has a verified calibration profile and controlled-course evidence.

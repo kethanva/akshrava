@@ -36,10 +36,13 @@ class ProtocolClient(
     private val onQuality: (Quality) -> Unit,
     private val onHighAlert: () -> Unit = {}
 ) : WebSocketListener() {
-    private companion object {
+    internal companion object {
         const val MAX_BACKOFF_ATTEMPT = 4          // 2^4 = 16 s, capped to 10 s
         const val MAX_BACKOFF_SECONDS = 10.0
         const val STALE_ALERT_MS = 500L
+
+        /** Device revocation is an operator action, not a network condition to retry. */
+        fun isPermanentAccessClose(code: Int): Boolean = code == 4401 || code == 4403
     }
 
     private val http = OkHttpClient.Builder().pingInterval(20, TimeUnit.SECONDS).build()
@@ -201,8 +204,13 @@ class ProtocolClient(
     override fun onClosing(webSocket: WebSocket, code: Int, reason: String) = settleFrame()
 
     override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-        if (code == 4401) {
-            handlePermanentFailure("Device authentication failed. Ask a volunteer to provision a new token.")
+        if (isPermanentAccessClose(code)) {
+            val message = if (code == 4403) {
+                "Device access has been revoked. Ask a volunteer to provision this phone."
+            } else {
+                "Device authentication failed. Ask a volunteer to provision a new token."
+            }
+            handlePermanentFailure(message)
         } else {
             handleDrop()
         }

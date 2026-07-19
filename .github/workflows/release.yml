@@ -40,7 +40,7 @@ jobs:
         working-directory: android
         run: |
           sdkmanager "platforms;android-36" "build-tools;36.0.0"
-          ./gradlew --no-daemon :app:assembleDebug
+          ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
