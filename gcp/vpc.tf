@@ -1,6 +1,7 @@
 resource "google_compute_network" "vpc" {
   name                    = "akshrava-vpc"
   auto_create_subnetworks = false
+  depends_on              = [google_project_service.required]
 }
 
 resource "google_compute_subnetwork" "subnet_app" {
@@ -19,7 +20,6 @@ resource "google_compute_subnetwork" "subnet_workers" {
   private_ip_google_access = true
 }
 
-# Private Service Connection for databases
 resource "google_compute_global_address" "private_ip_alloc" {
   name          = "akshrava-private-ip-alloc"
   purpose       = "VPC_PEERING"
@@ -34,7 +34,6 @@ resource "google_service_networking_connection" "private_connection" {
   reserved_peering_ranges = [google_compute_global_address.private_ip_alloc.name]
 }
 
-# NAT Gateway for worker nodes to access external APIs securely (without public IPs)
 resource "google_compute_router" "router" {
   name    = "akshrava-router"
   network = google_compute_network.vpc.id
@@ -49,10 +48,31 @@ resource "google_compute_router_nat" "nat" {
   source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
 }
 
-# Serverless VPC Access connector for Cloud Run
 resource "google_vpc_access_connector" "connector" {
   name          = "akshrava-connector"
   ip_cidr_range = "10.8.0.0/28"
   network       = google_compute_network.vpc.name
   region        = var.region
+  depends_on    = [google_project_service.required]
+}
+
+resource "google_dns_managed_zone" "internal" {
+  name        = "akshrava-internal"
+  dns_name    = "akshrava.internal."
+  description = "Private DNS for control-plane to GPU worker mTLS"
+  visibility  = "private"
+
+  private_visibility_config {
+    networks {
+      network_url = google_compute_network.vpc.id
+    }
+  }
+}
+
+resource "google_dns_record_set" "worker" {
+  name         = "worker.akshrava.internal."
+  type         = "A"
+  ttl          = 30
+  managed_zone = google_dns_managed_zone.internal.name
+  rrdatas      = [google_compute_instance.worker.network_interface[0].network_ip]
 }

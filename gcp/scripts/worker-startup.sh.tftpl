@@ -1,0 +1,71 @@
+#!/bin/bash
+set -euo pipefail
+
+PROJECT_ID="${project_id}"
+REGION="${region}"
+WORKER_IMAGE="${worker_image}"
+ENVIRONMENT="${environment}"
+YOLO_SHA="${yolo_weights_sha256}"
+CERT_DIR=/var/lib/akshrava/certs
+mkdir -p "$CERT_DIR" /var/lib/akshrava/models
+
+cos-extensions install gpu -- -version latest || true
+for _ in $(seq 1 60); do
+  if [[ -e /dev/nvidia0 ]]; then
+    break
+  fi
+  sleep 2
+done
+
+access_secret() {
+  local name="$1"
+  docker run --rm \
+    -e "CLOUDSDK_CORE_PROJECT=${PROJECT_ID}" \
+    google/cloud-sdk:slim \
+    gcloud secrets versions access latest --secret="$name"
+}
+
+access_secret akshrava-worker-tls-ca >"$CERT_DIR/ca.pem"
+access_secret akshrava-worker-tls-server-cert >"$CERT_DIR/server.pem"
+access_secret akshrava-worker-tls-server-key >"$CERT_DIR/server.key"
+chmod 600 "$CERT_DIR"/*
+
+WORKER_SECRET="$(access_secret akshrava-worker-secret)"
+NONCE_REDIS_URL="$(access_secret akshrava-nonce-redis-url)"
+
+cat >"$CERT_DIR/Caddyfile" <<'EOF'
+worker.akshrava.internal:8443 {
+  tls /etc/caddy/certs/server.pem /etc/caddy/certs/server.key {
+    client_auth {
+      mode require_and_verify
+      trusted_ca_cert_file /etc/caddy/certs/ca.pem
+    }
+  }
+  reverse_proxy 127.0.0.1:8000
+}
+EOF
+
+if command -v docker-credential-gcr >/dev/null 2>&1; then
+  docker-credential-gcr configure-docker "${REGION}-docker.pkg.dev" || true
+fi
+
+docker rm -f akshrava-worker akshrava-caddy 2>/dev/null || true
+
+docker run -d --restart=always --name akshrava-worker \
+  --device /dev/nvidia0 --device /dev/nvidia-uvm --device /dev/nvidiactl \
+  -p 127.0.0.1:8000:8000 \
+  -e AKSHRAVA_ENV="${ENVIRONMENT}" \
+  -e WORKER_SHARED_SECRET="${WORKER_SECRET}" \
+  -e NONCE_REDIS_URL="${NONCE_REDIS_URL}" \
+  -e REQUIRE_GPU=true \
+  -e YOLO_WEIGHTS=/models/yolo11s.pt \
+  -e YOLO_WEIGHTS_SHA256="${YOLO_SHA}" \
+  -v /var/lib/akshrava/models:/models:ro \
+  "${WORKER_IMAGE}"
+
+docker run -d --restart=always --name akshrava-caddy \
+  --network host \
+  -v "$CERT_DIR:/etc/caddy/certs:ro" \
+  -v "$CERT_DIR/Caddyfile:/etc/caddy/Caddyfile:ro" \
+  caddy:2.8-alpine \
+  caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
