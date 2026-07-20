@@ -38,12 +38,21 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Supervised GCP pilot WSS — volunteer screen still editable; release keeps invalid default.
+            buildConfigField(
+                "String",
+                "DEFAULT_WSS_ENDPOINT",
+                "\"wss://akshrava-api-c7d3j4nzdq-uc.a.run.app/v1/session\""
+            )
+        }
         release {
             // Keep minify off until ProGuard/R8 keep rules are audited for CameraX, OkHttp, and TTS.
             // Enabling without that audit risks stripping reflection-heavy release paths.
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             if (releaseSigningConfigured) signingConfig = signingConfigs.getByName("release")
+            buildConfigField("String", "DEFAULT_WSS_ENDPOINT", "\"wss://example.invalid/v1/session\"")
         }
     }
 

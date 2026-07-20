@@ -76,3 +76,16 @@ resource "google_artifact_registry_repository_iam_member" "cloudrun_ar_reader" {
   role       = "roles/artifactregistry.reader"
   member     = "serviceAccount:${google_service_account.api_sa.email}"
 }
+
+# COS metadata enables google-logging; the worker SA still needs IAM to write log entries.
+resource "google_project_iam_member" "worker_log_writer" {
+  project = var.project_id
+  role    = "roles/logging.logWriter"
+  member  = "serviceAccount:${google_service_account.worker_sa.email}"
+}
+
+resource "google_project_iam_member" "api_log_writer" {
+  project = var.project_id
+  role    = "roles/logging.logWriter"
+  member  = "serviceAccount:${google_service_account.api_sa.email}"
+}

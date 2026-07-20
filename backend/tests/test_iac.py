@@ -18,7 +18,8 @@ def test_terraform_formatting():
         ["terraform", "fmt", "-check"],
         cwd=IAC_DIR,
         capture_output=True,
-        text=True
+        text=True,
+        env={**os.environ, "TF_CLI_CONFIG_FILE": "/dev/null"}
     )
     assert result.returncode == 0, f"Terraform format check failed: {result.stdout}\n{result.stderr}"
 
@@ -30,7 +31,8 @@ def test_terraform_validation():
         ["terraform", "init", "-backend=false"],
         cwd=IAC_DIR,
         capture_output=True,
-        text=True
+        text=True,
+        env={**os.environ, "TF_CLI_CONFIG_FILE": "/dev/null"}
     )
     if init.returncode != 0:
         pytest.skip(f"Terraform init failed, skipping validation. Error: {init.stderr}")
@@ -39,6 +41,7 @@ def test_terraform_validation():
         ["terraform", "validate"],
         cwd=IAC_DIR,
         capture_output=True,
-        text=True
+        text=True,
+        env={**os.environ, "TF_CLI_CONFIG_FILE": "/dev/null"}
     )
     assert result.returncode == 0, f"Terraform validation failed: {result.stdout}\n{result.stderr}"

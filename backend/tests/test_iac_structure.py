@@ -51,6 +51,9 @@ def test_iac_app_structure():
     gpu_block = tf_content.split('variable "worker_use_gpu"', 1)[1].split("variable ", 1)[0]
     assert "default     = true" in gpu_block or "default = true" in gpu_block, "worker_use_gpu must default to true"
 
+    assert 'resource "google_compute_firewall" "allow_iap_ssh"' in tf_content, "IAP SSH firewall must be in Terraform"
+    assert "35.235.240.0/20" in tf_content, "IAP source range missing"
+
 def test_iac_database_structure():
     tf_content = get_all_tf_content()
     assert 'resource "google_sql_database_instance" "postgres"' in tf_content, "Database instance is missing"

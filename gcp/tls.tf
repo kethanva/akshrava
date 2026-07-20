@@ -119,11 +119,11 @@ resource "random_password" "metrics_scrape_token" {
 }
 
 locals {
-  jwt_public_pem         = var.manage_pki_in_terraform ? tls_private_key.jwt[0].public_key_pem : var.jwt_public_key_pem
-  jwt_private_pem        = var.manage_pki_in_terraform ? tls_private_key.jwt[0].private_key_pem : var.jwt_private_key_pem
-  worker_ca_cert_pem     = var.manage_pki_in_terraform ? tls_self_signed_cert.worker_ca[0].cert_pem : var.worker_ca_cert_pem
-  worker_server_cert_pem = var.manage_pki_in_terraform ? tls_locally_signed_cert.worker_server[0].cert_pem : var.worker_server_cert_pem
-  worker_server_key_pem  = var.manage_pki_in_terraform ? tls_private_key.worker_server[0].private_key_pem : var.worker_server_key_pem
-  worker_client_cert_pem = var.manage_pki_in_terraform ? tls_locally_signed_cert.worker_client[0].cert_pem : var.worker_client_cert_pem
-  worker_client_key_pem  = var.manage_pki_in_terraform ? tls_private_key.worker_client[0].private_key_pem : var.worker_client_key_pem
+  jwt_public_pem         = var.manage_pki_in_terraform ? tls_private_key.jwt[0].public_key_pem : (var.jwt_public_key_pem != "" ? var.jwt_public_key_pem : file("${path.module}/pki/jwt-public.pem"))
+  jwt_private_pem        = var.manage_pki_in_terraform ? tls_private_key.jwt[0].private_key_pem : (var.jwt_private_key_pem != "" ? var.jwt_private_key_pem : file("${path.module}/pki/jwt-private.pem"))
+  worker_ca_cert_pem     = var.manage_pki_in_terraform ? tls_self_signed_cert.worker_ca[0].cert_pem : (var.worker_ca_cert_pem != "" ? var.worker_ca_cert_pem : file("${path.module}/pki/worker-ca.pem"))
+  worker_server_cert_pem = var.manage_pki_in_terraform ? tls_locally_signed_cert.worker_server[0].cert_pem : (var.worker_server_cert_pem != "" ? var.worker_server_cert_pem : file("${path.module}/pki/worker-server-cert.pem"))
+  worker_server_key_pem  = var.manage_pki_in_terraform ? tls_private_key.worker_server[0].private_key_pem : (var.worker_server_key_pem != "" ? var.worker_server_key_pem : file("${path.module}/pki/worker-server-key.pem"))
+  worker_client_cert_pem = var.manage_pki_in_terraform ? tls_locally_signed_cert.worker_client[0].cert_pem : (var.worker_client_cert_pem != "" ? var.worker_client_cert_pem : file("${path.module}/pki/worker-client-cert.pem"))
+  worker_client_key_pem  = var.manage_pki_in_terraform ? tls_private_key.worker_client[0].private_key_pem : (var.worker_client_key_pem != "" ? var.worker_client_key_pem : file("${path.module}/pki/worker-client-key.pem"))
 }

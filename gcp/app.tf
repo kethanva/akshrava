@@ -74,6 +74,21 @@ resource "google_compute_firewall" "allow_run_to_worker_mtls" {
   target_tags   = ["akshrava-worker"]
 }
 
+# IAP TCP forwarding (35.235.240.0/20) for worker SSH diagnostics. Worker has no public IP.
+resource "google_compute_firewall" "allow_iap_ssh" {
+  name        = "allow-iap-ssh"
+  network     = google_compute_network.vpc.name
+  description = "Allow Identity-Aware Proxy SSH to akshrava worker VMs"
+
+  allow {
+    protocol = "tcp"
+    ports    = ["22"]
+  }
+
+  source_ranges = ["35.235.240.0/20"]
+  target_tags   = ["akshrava-worker"]
+}
+
 resource "google_cloud_run_v2_job" "migrate" {
   name     = "akshrava-migrate"
   location = var.region
@@ -267,7 +282,7 @@ resource "google_cloud_run_v2_service" "api" {
         value = "200"
       }
       env {
-        name  = "INFERENCE_TIMEOUT_MS"
+        name = "INFERENCE_TIMEOUT_MS"
         # CPU remote YOLO is slower than GPU; keep GPU/noop path tight.
         value = var.worker_use_gpu || var.detector != "remote" ? "800" : "9000"
       }

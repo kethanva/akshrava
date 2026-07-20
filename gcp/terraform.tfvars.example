@@ -18,15 +18,12 @@ api_invoker_members = ["serviceAccount:edge@PROJECT.iam.gserviceaccount.com"]
 # Memorystore in-transit TLS (upgrades to STANDARD_HA + rediss://):
 # redis_transit_encryption = true
 
-# External PKI is the default (manage_pki_in_terraform=false). Supply PEMs before plan:
+# External PKI is the default (manage_pki_in_terraform=false).
+# Place PEMs under gcp/pki/ (gitignored). tls.tf loads them via file("${path.module}/pki/...").
+# Do NOT use file() inside .tfvars — Terraform forbids function calls there.
 manage_pki_in_terraform = false
-jwt_public_key_pem      = file("jwt-public.pem")
-jwt_private_key_pem     = file("jwt-private.pem")
-worker_ca_cert_pem      = file("worker-ca.pem")
-worker_server_cert_pem  = file("worker-server.pem")
-worker_server_key_pem   = file("worker-server-key.pem")
-worker_client_cert_pem  = file("worker-client.pem")
-worker_client_key_pem   = file("worker-client-key.pem")
+# Optional overrides (empty → gcp/pki/*.pem):
+# jwt_public_key_pem = "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n"
 # Bootstrap-only (keys land in TF state — rotate if state is copied):
 # manage_pki_in_terraform = true
 

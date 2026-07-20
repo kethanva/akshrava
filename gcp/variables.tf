@@ -155,17 +155,4 @@ check "remote_requires_weights_sha" {
   }
 }
 
-check "external_pki_complete" {
-  assert {
-    condition = var.manage_pki_in_terraform || (
-      length(var.jwt_public_key_pem) > 0 &&
-      length(var.jwt_private_key_pem) > 0 &&
-      length(var.worker_ca_cert_pem) > 0 &&
-      length(var.worker_server_cert_pem) > 0 &&
-      length(var.worker_server_key_pem) > 0 &&
-      length(var.worker_client_cert_pem) > 0 &&
-      length(var.worker_client_key_pem) > 0
-    )
-    error_message = "manage_pki_in_terraform=false requires all jwt_* and worker_* PEM variables."
-  }
-}
+# Checks on variables removed because local file fallback natively validates existence at plan time.

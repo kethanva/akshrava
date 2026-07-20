@@ -30,7 +30,7 @@ object AppConfigStore {
     fun load(context: Context): AppConfig {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         return AppConfig(
-            endpoint = prefs.getString(ENDPOINT, "wss://example.invalid/v1/session")!!,
+            endpoint = prefs.getString(ENDPOINT, BuildConfig.DEFAULT_WSS_ENDPOINT)!!,
             deviceToken = loadToken(context),
             language = prefs.getString(LANGUAGE, "en-IN")!!,
             calibrationId = prefs.getString(CALIBRATION, "unprovisioned")!!
