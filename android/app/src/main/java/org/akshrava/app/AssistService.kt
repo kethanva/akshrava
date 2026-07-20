@@ -17,11 +17,15 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
+import android.graphics.SurfaceTexture
+import android.util.Log
 import android.util.Size
+import android.view.Surface
 import okhttp3.OkHttpClient
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
+import androidx.camera.core.Preview
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -61,6 +65,9 @@ class AssistService : LifecycleService() {
     private var reflexEngine: ReflexEngine = DisabledReflexEngine()
     private var wakeLock: PowerManager.WakeLock? = null
     private var cameraProvider: ProcessCameraProvider? = null
+    private var dummyPreviewSurface: Surface? = null
+    private var dummySurfaceTexture: SurfaceTexture? = null
+    private var lastDarkAnnounceMs = 0L
     private val framePending = AtomicBoolean(false)
     private val lookRequested = AtomicBoolean(false)
     private val bindGeneration = AtomicInteger(0)
@@ -172,6 +179,23 @@ class AssistService : LifecycleService() {
                 cameraProvider = provider
                 val analysisSide = analysisTargetSide(quality.maxSide)
                 boundAnalysisMaxSide = analysisSide
+                val rotation = currentDisplayRotation()
+                // Some OEMs (incl. OnePlus) deliver black ImageAnalysis buffers unless a Preview
+                // use-case is also bound. Feed an off-screen SurfaceTexture sized to the request.
+                releaseDummyPreview()
+                val preview = Preview.Builder()
+                    .setTargetRotation(rotation)
+                    .build()
+                val mainExecutor = ContextCompat.getMainExecutor(this)
+                preview.setSurfaceProvider { request ->
+                    val size = request.resolution
+                    val texture = SurfaceTexture(0).also {
+                        it.setDefaultBufferSize(size.width, size.height)
+                        dummySurfaceTexture = it
+                    }
+                    val surface = Surface(texture).also { dummyPreviewSurface = it }
+                    request.provideSurface(surface, mainExecutor) { }
+                }
                 val analysis = ImageAnalysis.Builder()
                     .setResolutionSelector(
                         ResolutionSelector.Builder()
@@ -186,24 +210,35 @@ class AssistService : LifecycleService() {
                     // Ask CameraX for the current display orientation before falling back to
                     // FrameEncoder rotation. This avoids the expensive rotate/decode/re-encode
                     // path on devices whose analysis stream can be delivered already oriented.
-                    .setTargetRotation(currentDisplayRotation())
+                    .setTargetRotation(rotation)
                     // Continuous capture path: drop oldest, keep latest under backlog.
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
                 if (stopping || generation != bindGeneration.get() || frameExecutor.isShutdown) {
                     provider.unbindAll()
+                    releaseDummyPreview()
                     return@addListener
                 }
                 analysis.setAnalyzer(frameExecutor) { image -> analyzeImage(image) }
                 provider.unbindAll()
-                provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, analysis)
-            } catch (_: Exception) {
+                provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+                Log.i("AkshravaVision", "camera bound preview+analysis rotation=$rotation")
+            } catch (ex: Exception) {
+                Log.e("AkshravaVision", "camera bind failed", ex)
+                releaseDummyPreview()
                 if (!stopping) {
                     updateNotification("Rear camera unavailable")
                     stopAfterCameraFailure()
                 }
             }
         }, ContextCompat.getMainExecutor(this))
+    }
+
+    private fun releaseDummyPreview() {
+        dummyPreviewSurface?.release()
+        dummyPreviewSurface = null
+        dummySurfaceTexture?.release()
+        dummySurfaceTexture = null
     }
 
     private fun analyzeImage(image: ImageProxy) {
@@ -235,6 +270,13 @@ class AssistService : LifecycleService() {
             if (!priority && !turning && now - lastCaptureMs < captureIntervalMs()) return
 
             val thumbnail = FrameGate.luma(image)
+            if (FrameGate.isNearBlack(thumbnail)) {
+                if (now - lastDarkAnnounceMs > 8_000L) {
+                    lastDarkAnnounceMs = now
+                    updateNotification("Camera is dark — uncover rear lens")
+                    alertManager.status("Camera is dark. Uncover the rear lens.")
+                }
+            }
             if (FrameGate.isBlurred(thumbnail)) {
                 consecutiveBlurredFrames += 1
                 // Blur never drops a frame. Persistent evidence only produces a bounded status
@@ -398,6 +440,7 @@ class AssistService : LifecycleService() {
         SessionFlags.setActive(this, false)
         Watchdog.cancel(this)
         cameraProvider?.unbindAll()
+        releaseDummyPreview()
         if (::client.isInitialized) client.close()
         if (::poseTracker.isInitialized) poseTracker.stop()
         if (::frameExecutor.isInitialized) frameExecutor.shutdownNow()
@@ -456,6 +499,7 @@ class AssistService : LifecycleService() {
         headsetControls?.stop()
         headsetControls = null
         cameraProvider?.unbindAll()
+        releaseDummyPreview()
         if (::client.isInitialized) client.close()
         if (::alertManager.isInitialized) alertManager.shutdown()
         if (::poseTracker.isInitialized) poseTracker.stop()

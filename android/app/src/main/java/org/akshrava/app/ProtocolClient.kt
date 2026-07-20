@@ -338,12 +338,27 @@ class ProtocolClient(
                 }
                 val hazard = payload.optJSONObject("hazard")
                 val isUrgent = hazard?.optString("level") == "urgent"
-                // Look answers use 500 ms even if the hazard is S1 — a user-pulled query must
-                // not be dropped by the tighter 250 ms S1 window on slow links.
+                // Look answers use the full freshness budget even if the hazard is S1 —
+                // a user-pulled query must not be dropped by the tighter S1 window on slow links.
                 val maxAge = when {
                     priority -> LOOK_FRESHNESS_MS
                     isUrgent -> URGENT_FRESHNESS_MS
                     else -> STALE_ALERT_MS
+                }
+                val detectionCount = payload.optInt("detection_count", -1)
+                val labels = payload.optJSONArray("detection_labels")
+                val labelHint = when {
+                    labels != null && labels.length() > 0 -> {
+                        buildString {
+                            for (i in 0 until minOf(labels.length(), 3)) {
+                                if (i > 0) append('+')
+                                append(labels.optString(i))
+                            }
+                        }
+                    }
+                    detectionCount > 0 -> "${detectionCount}dets"
+                    detectionCount == 0 -> "0dets"
+                    else -> null
                 }
                 if (age <= maxAge) {
                     val lookSummary = payload.optString("look_summary", "").ifBlank {
@@ -351,6 +366,7 @@ class ProtocolClient(
                     }
                     if (priority && lookSummary.isNotBlank()) {
                         alertManager.speakComposed(lookSummary, urgent = true)
+                        onState("Live · ${hazard?.optString("message_key") ?: labelHint ?: "look"}")
                     } else if (hazard != null) {
                         val isNear = hazard.optBoolean("range_valid", false) &&
                             hazard.optString("range_band") == "near"
@@ -363,7 +379,13 @@ class ProtocolClient(
                             isUrgent,
                             hazard.optString("haptic", "none")
                         )
+                        onState("Live · ${hazard.optString("message_key")}")
+                    } else if (labelHint != null) {
+                        onState("Live · $labelHint")
                     }
+                } else if (labelHint != null) {
+                    // Still surface detector output when speech was suppressed as late.
+                    onState("Live · $labelHint")
                 }
                 settleFrame()
             }

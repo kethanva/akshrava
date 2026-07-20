@@ -65,4 +65,12 @@ object FrameGate {
         variance /= samples
         return variance < BLUR_LAPLACIAN_VARIANCE
     }
+
+    /** Mean luma under ~8/255 ⇒ covered lens, pocket, or OEM black analysis buffers. */
+    fun isNearBlack(current: IntArray): Boolean {
+        if (current.isEmpty()) return true
+        var sum = 0L
+        for (v in current) sum += v
+        return sum / current.size < 8
+    }
 }
