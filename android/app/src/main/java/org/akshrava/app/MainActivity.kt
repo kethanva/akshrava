@@ -79,7 +79,8 @@ class MainActivity : AppCompatActivity() {
             text = getString(R.string.action_stop)
             contentDescription = getString(R.string.action_stop)
             setOnClickListener {
-                stopService(Intent(this@MainActivity, AssistService::class.java))
+                val stopIntent = Intent(this@MainActivity, AssistService::class.java).setAction(AssistService.ACTION_STOP)
+                startService(stopIntent)
                 status.text = getString(R.string.status_stopped)
             }
         }

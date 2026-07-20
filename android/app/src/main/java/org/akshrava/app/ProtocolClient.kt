@@ -138,7 +138,7 @@ class ProtocolClient(
     fun sendFrame(
         frameId: Long,
         captureMonoMs: Long,
-        pose: PoseSnapshot,
+        pose: PoseSnapshot?,
         calibrationId: String,
         frame: EncodedFrame,
         mode: String = "normal",
@@ -159,9 +159,9 @@ class ProtocolClient(
             .put("h", frame.height)
             .put("jpeg_bytes", frame.jpeg.size)
             .put("camera_calibration_id", calibrationId)
-            .put("pitch_cdeg", pose.pitchCdeg)
-            .put("roll_cdeg", pose.rollCdeg)
-            .put("pose_age_ms", pose.ageMs)
+            .put("pitch_cdeg", pose?.pitchCdeg)
+            .put("roll_cdeg", pose?.rollCdeg)
+            .put("pose_age_ms", pose?.ageMs)
             .put("mode", if (look) "priority" else mode)
             .put("priority", look)
             .put("language", wireLanguage(language))

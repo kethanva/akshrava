@@ -54,13 +54,13 @@ class AssistService : LifecycleService() {
         private const val STOP_HARD_TIMEOUT_MS = 3_000L
     }
 
-    private lateinit var frameExecutor: ExecutorService
-    private lateinit var frameEncoder: FrameEncoder
-    private lateinit var poseTracker: PoseTracker
-    private lateinit var alertManager: AlertManager
-    private lateinit var client: ProtocolClient
-    private lateinit var http: OkHttpClient
-    private lateinit var calibrationId: String
+    private var frameExecutor: ExecutorService? = null
+    private var frameEncoder: FrameEncoder? = null
+    private var poseTracker: PoseTracker? = null
+    private var alertManager: AlertManager? = null
+    private var client: ProtocolClient? = null
+    private var http: OkHttpClient? = null
+    private var calibrationId: String = ""
     private var headsetControls: HeadsetControls? = null
     private var reflexEngine: ReflexEngine = DisabledReflexEngine()
     private var wakeLock: PowerManager.WakeLock? = null
@@ -95,12 +95,14 @@ class AssistService : LifecycleService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> { stopAssistance(); return Service.START_NOT_STICKY }
-            ACTION_START -> if (!::client.isInitialized) startAssistance()
+            ACTION_START -> startAssistance()
         }
         return Service.START_NOT_STICKY
     }
 
     private fun startAssistance() {
+        if (!stopping && client != null) return
+        stopping = false
         val config = AppConfigStore.load(this)
         if (!endpointAllowed(config.endpoint)) {
             stopSelf()
@@ -112,20 +114,20 @@ class AssistService : LifecycleService() {
         frameExecutor = Executors.newSingleThreadExecutor()
         frameEncoder = FrameEncoder()
         poseTracker = PoseTracker(this).also { it.start() }
-        alertManager = AlertManager(this, config.language)
+        val am = AlertManager(this, config.language).also { alertManager = it }
         val manager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = manager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Akshrava:camera").also {
             it.acquire(WAKE_LOCK_TIMEOUT_MS)
         }
-        http = OkHttpClient.Builder().pingInterval(20, java.util.concurrent.TimeUnit.SECONDS).build()
+        val httpClient = OkHttpClient.Builder().pingInterval(20, java.util.concurrent.TimeUnit.SECONDS).build().also { http = it }
         // Donated / low-RAM phones start on a cheaper ladder before the first server quality hint.
         quality = DeviceCapability.initialQuality(this)
         capturePolicy.quality = quality
         boundAnalysisMaxSide = analysisTargetSide(quality.maxSide)
-        client = ProtocolClient(
+        val pc = ProtocolClient(
             endpoint = config.endpoint,
             token = config.deviceToken,
-            alertManager = alertManager,
+            alertManager = am,
             onState = { status -> updateNotification(status) },
             onFrameSettled = { framePending.set(false) },
             onQuality = { updated -> applyEffectiveQuality(linkQuality.onServerQuality(updated)) },
@@ -135,20 +137,20 @@ class AssistService : LifecycleService() {
             onRoundTripMs = { rtt -> applyEffectiveQuality(linkQuality.onRoundTrip(rtt)) },
             onSettleTimeout = { applyEffectiveQuality(linkQuality.onSettleTimeout()) },
             language = config.language,
-            http = http
-        )
-        client.connect()
+            http = httpClient
+        ).also { client = it }
+        pc.connect()
         reflexEngine = ReflexFactory.create(this)
         headsetControls = HeadsetControls(
             this,
-            onRepeat = { alertManager.repeatLast() },
-            onMute = { alertManager.muteFor(15 * 60_000L) },
-            onLook = { lookRequested.set(true); alertManager.acknowledgeLook() }
+            onRepeat = { am.repeatLast() },
+            onMute = { am.muteFor(15 * 60_000L) },
+            onLook = { lookRequested.set(true); am.acknowledgeLook() }
         ).also { it.start() }
         bindCamera()
         SessionFlags.setActive(this, true)
         Watchdog.schedule(this)
-        alertManager.status("Assistance started")
+        am.status("Assistance started")
     }
 
     private fun endpointAllowed(endpoint: String): Boolean {
@@ -214,12 +216,13 @@ class AssistService : LifecycleService() {
                     // Continuous capture path: drop oldest, keep latest under backlog.
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
-                if (stopping || generation != bindGeneration.get() || frameExecutor.isShutdown) {
+                val exec = frameExecutor
+                if (stopping || generation != bindGeneration.get() || exec == null || exec.isShutdown) {
                     provider.unbindAll()
                     releaseDummyPreview()
                     return@addListener
                 }
-                analysis.setAnalyzer(frameExecutor) { image -> analyzeImage(image) }
+                analysis.setAnalyzer(exec) { image -> analyzeImage(image) }
                 provider.unbindAll()
                 provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
                 Log.i("AkshravaVision", "camera bound preview+analysis rotation=$rotation")
@@ -260,13 +263,14 @@ class AssistService : LifecycleService() {
             // would be used. Skip the luma thumbnail, blur/duplicate checks and JPEG encode
             // entirely rather than doing that work and then having sendFrame() discard it --
             // this is heat and battery burned on the donated phones that can least afford it.
-            if (!client.canStream()) return
+            val currentClient = client
+            if (currentClient == null || !currentClient.canStream()) return
 
             // In-flight: CameraX KEEP_ONLY_LATEST already discards older frames; skip work.
             if (framePending.get()) return
             val priority = lookRequested.getAndSet(false)
             // Headset long-press look or a fresh turn asks for one immediate frame.
-            val turning = poseTracker.consumeTurn()
+            val turning = poseTracker?.consumeTurn() ?: false
             if (!priority && !turning && now - lastCaptureMs < captureIntervalMs()) return
 
             val thumbnail = FrameGate.luma(image)
@@ -274,7 +278,7 @@ class AssistService : LifecycleService() {
                 if (now - lastDarkAnnounceMs > 8_000L) {
                     lastDarkAnnounceMs = now
                     updateNotification("Camera is dark — uncover rear lens")
-                    alertManager.status("Camera is dark. Uncover the rear lens.")
+                    alertManager?.status("Camera is dark. Uncover the rear lens.")
                 }
             }
             if (FrameGate.isBlurred(thumbnail)) {
@@ -283,7 +287,7 @@ class AssistService : LifecycleService() {
                 // prompt, because the cane/guide is primary when the camera cannot be trusted.
                 if (consecutiveBlurredFrames >= 5 && now - lastCameraUnclearMs >= 60_000L) {
                     lastCameraUnclearMs = now
-                    alertManager.status("Camera view unclear. Use cane or guide.")
+                    alertManager?.status("Camera view unclear. Use cane or guide.")
                     updateNotification("Camera view unclear")
                 }
             } else {
@@ -296,13 +300,12 @@ class AssistService : LifecycleService() {
             // a frame: a bad quality estimate must not become a missed-obstacle decision.
             previousThumbnail = thumbnail
 
-            if (!framePending.compareAndSet(false, true)) return
-            // Release the ImageProxy before JPEG compress so CameraX can advance to the latest
-            // frame while we finish encoding on this worker (STRATEGY_KEEP_ONLY_LATEST).
-            val prepared = frameEncoder.prepare(image, quality.maxSide)
+            val encoder = frameEncoder
+            if (encoder == null) { image.close(); return }
+            val prepared = encoder.prepare(image, quality.maxSide)
             image.close()
             closed = true
-            val frame = frameEncoder.compressPrepared(prepared, quality.jpegQ)
+            val frame = encoder.compressPrepared(prepared, quality.jpegQ)
             // Fail-closed offline: without licensed TFLite weights, reflex never speaks hazards.
             if (reflexEngine.isArmed()) {
                 reflexEngine.evaluate(frame)
@@ -310,10 +313,11 @@ class AssistService : LifecycleService() {
 
             lastCaptureMs = now
 
-            val sent = client.sendFrame(
+            val poseSnapshot = poseTracker?.snapshot()
+            val sent = currentClient.sendFrame(
                 ++frameId,
                 now,
-                poseTracker.snapshot(),
+                poseSnapshot,
                 calibrationId,
                 frame,
                 mode = if (priority) "priority" else "normal",
@@ -332,7 +336,7 @@ class AssistService : LifecycleService() {
         quality = updated
         capturePolicy.quality = updated
         val target = analysisTargetSide(updated.maxSide)
-        if (target != boundAnalysisMaxSide && !stopping && ::client.isInitialized) {
+        if (target != boundAnalysisMaxSide && !stopping && client != null) {
             // Coalesce: mark the rung before rebind so rapid RTT updates do not stack binds.
             boundAnalysisMaxSide = target
             ContextCompat.getMainExecutor(this).execute {
@@ -361,7 +365,8 @@ class AssistService : LifecycleService() {
 
     private fun captureIntervalMs(): Long {
         val now = SystemClock.elapsedRealtime()
-        return capturePolicy.captureIntervalMs(now, poseTracker.motionState())
+        val motion: MotionState = poseTracker?.motionState() ?: MotionState.STATIONARY
+        return capturePolicy.captureIntervalMs(now, motion)
     }
 
     private fun maybeCheckThermal(now: Long) {
@@ -371,7 +376,7 @@ class AssistService : LifecycleService() {
         if (temperature >= THERMAL_THROTTLE_C && !thermalThrottled) {
             thermalThrottled = true
             capturePolicy.thermalThrottled = true
-            alertManager.status("Akshrava is running slower to cool down")
+            alertManager?.status("Akshrava is running slower to cool down")
         } else if (temperature in 0f..THERMAL_CLEAR_C && thermalThrottled) {
             thermalThrottled = false
             capturePolicy.thermalThrottled = false
@@ -399,7 +404,7 @@ class AssistService : LifecycleService() {
                     batteryLow = true
                     capturePolicy.batteryLow = true
                     if (now - lastBatteryWarningMs > 120_000L) {
-                        alertManager.status("Battery low. Vision alerts may stop soon.")
+                        alertManager?.status("Battery low. Vision alerts may stop soon.")
                         lastBatteryWarningMs = now
                     }
                 }
@@ -426,7 +431,7 @@ class AssistService : LifecycleService() {
         // press did nothing. Stop the whole service cleanly instead, exactly like a camera
         // failure, so the user gets one consistent "press Start again" recovery path.
         captureSuspendedForBattery = true
-        alertManager.status("Battery critical. Vision assistance stopped. Use cane or guide.") {
+        alertManager?.status("Battery critical. Vision assistance stopped. Use cane or guide.") {
             ContextCompat.getMainExecutor(this).execute { stopAssistance() }
         }
     }
@@ -441,11 +446,11 @@ class AssistService : LifecycleService() {
         Watchdog.cancel(this)
         cameraProvider?.unbindAll()
         releaseDummyPreview()
-        if (::client.isInitialized) client.close()
-        if (::poseTracker.isInitialized) poseTracker.stop()
-        if (::frameExecutor.isInitialized) frameExecutor.shutdownNow()
-        wakeLock?.let { if (it.isHeld) it.release() }
-        alertManager.speakThen("Rear camera unavailable. Use cane or guide.") {
+        client?.close(); client = null
+        poseTracker?.stop(); poseTracker = null
+        frameExecutor?.shutdownNow(); frameExecutor = null
+        wakeLock?.let { if (it.isHeld) it.release(); wakeLock = null }
+        alertManager?.speakThen("Rear camera unavailable. Use cane or guide.") {
             ContextCompat.getMainExecutor(this).execute { stopAssistance() }
         }
         // Hard timeout so a stuck TTS callback cannot leave the FGS running forever.
@@ -483,7 +488,7 @@ class AssistService : LifecycleService() {
     }
 
     private fun updateNotification(status: String) {
-        if (::client.isInitialized) getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(status))
+        if (client != null) getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(status))
     }
 
     private fun stopAssistance() {
@@ -500,11 +505,11 @@ class AssistService : LifecycleService() {
         headsetControls = null
         cameraProvider?.unbindAll()
         releaseDummyPreview()
-        if (::client.isInitialized) client.close()
-        if (::alertManager.isInitialized) alertManager.shutdown()
-        if (::poseTracker.isInitialized) poseTracker.stop()
-        if (::frameExecutor.isInitialized) frameExecutor.shutdownNow()
-        wakeLock?.let { if (it.isHeld) it.release() }
+        client?.close(); client = null
+        alertManager?.shutdown(); alertManager = null
+        poseTracker?.stop(); poseTracker = null
+        frameExecutor?.shutdownNow(); frameExecutor = null
+        wakeLock?.let { if (it.isHeld) it.release(); wakeLock = null }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }

@@ -6,6 +6,7 @@ import android.content.Intent
 
 class StopReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        context.stopService(Intent(context, AssistService::class.java))
+        val stopIntent = Intent(context, AssistService::class.java).setAction(AssistService.ACTION_STOP)
+        context.startService(stopIntent)
     }
 }
