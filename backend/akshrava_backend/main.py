@@ -368,7 +368,7 @@ async def session(websocket: WebSocket):
                     if result.get("late_suppressed"):
                         metrics.late_suppressed()
                     await websocket.send_json(result)
-                    # Fail-closed: JWT consent + bucket are not enough until blur exists (docs/README.md (privacy)).
+                    # Fail-closed: JWT consent + bucket are not enough until blur exists (Important Architecture.md, privacy).
                     if (
                         settings.diagnostic_uploads_enabled
                         and state.diagnostic_consent

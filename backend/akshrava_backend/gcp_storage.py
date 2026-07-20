@@ -2,7 +2,7 @@ import asyncio
 import os
 from concurrent.futures import ThreadPoolExecutor
 
-# Diagnostic uploads are a consented, blur-gated workflow (see config validation and docs/README.md (privacy)).
+# Diagnostic uploads are a consented, blur-gated workflow (see config validation and Important Architecture.md, privacy).
 # This class is the transport only; it never decides consent. Bound the pool so a burst of
 # uploads cannot spawn dozens of threads each pinning a full JPEG in memory.
 _MAX_UPLOAD_WORKERS = 8
@@ -56,4 +56,3 @@ class GcpDiagnosticStorage:
     def close(self):
         if self._executor is not None:
             self._executor.shutdown(wait=False)
-

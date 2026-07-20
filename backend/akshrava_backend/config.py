@@ -83,7 +83,7 @@ class Settings:
             remote_tls_client_key_file=os.getenv("REMOTE_TLS_CLIENT_KEY_FILE", "").strip(),
             gcp_diagnostics_bucket=os.getenv("GCP_DIAGNOSTICS_BUCKET", "").strip(),
             metrics_scrape_token=os.getenv("METRICS_SCRAPE_TOKEN", "").strip(),
-            # Stay false until face/plate blur exists (docs/README.md (privacy)). Consent alone must not upload raw JPEG.
+            # Stay false until face/plate blur exists (Important Architecture.md, privacy). Consent alone must not upload raw JPEG.
             diagnostic_uploads_enabled=_env_bool("DIAGNOSTIC_UPLOADS_ENABLED", False),
         )
         if settings.environment not in {"development", "pilot", "production"}:
@@ -159,7 +159,7 @@ class Settings:
             raise ValueError(
                 "METRICS_SCRAPE_TOKEN is required outside development so /metrics is not public"
             )
-        # Diagnostic upload sends the RAW camera JPEG to cloud storage. The docs/README.md
+        # Diagnostic upload sends the RAW camera JPEG to cloud storage. Important Architecture.md
         # privacy contract requires on-device face/plate blur BEFORE any frame leaves the phone, plus
         # manual review. No blur pipeline exists in this repository, so a signed consent claim and
         # a configured bucket are NOT sufficient: enabling raw-frame upload outside development
@@ -168,7 +168,7 @@ class Settings:
         if settings.diagnostic_uploads_enabled and settings.environment != "development":
             raise ValueError(
                 "DIAGNOSTIC_UPLOADS_ENABLED is not permitted outside development: no face/plate "
-                "blur pipeline is implemented and docs/README.md (privacy) requires blur-before-upload. Wire a "
+                "blur pipeline is implemented and Important Architecture.md (privacy) requires blur-before-upload. Wire a "
                 "reviewed blur step before enabling diagnostic uploads in pilot/production."
             )
         return settings

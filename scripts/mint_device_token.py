@@ -28,7 +28,7 @@ def main():
         if not uploads_enabled and not args.force_unsafe_diagnostic_consent:
             sys.exit(
                 "Refusing --diagnostic-consent: face/plate blur is not ready. "
-                "Set DIAGNOSTIC_UPLOADS_ENABLED=true only after docs/README.md (privacy) blur gate, "
+                "Set DIAGNOSTIC_UPLOADS_ENABLED=true only after the Important Architecture.md privacy blur gate, "
                 "or pass --force-unsafe-diagnostic-consent for lab tokens (API still will not upload)."
             )
     algorithm = os.environ.get("JWT_ALGORITHM", "RS256").upper()
