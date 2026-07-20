@@ -155,6 +155,13 @@ check "remote_requires_weights_sha" {
   }
 }
 
+check "cloud_armor_requires_domain" {
+  assert {
+    condition     = !var.enable_cloud_armor || length(var.cloud_armor_domain) > 0
+    error_message = "cloud_armor_domain is required when enable_cloud_armor=true."
+  }
+}
+
 # Checks on variables removed because local file fallback natively validates existence at plan time.
 
 variable "enable_worker_ha" {
@@ -178,6 +185,12 @@ variable "enable_cloud_armor" {
   type        = bool
   default     = false
   description = "When true, front Cloud Run with an External HTTPS LB + Cloud Armor (rate limiting, layer-7 DDoS defense) and restrict Cloud Run ingress to load-balancer-only (see cloud_armor.tf). Requires cloud_armor_domain and DNS pointed at the LB's static IP; the managed certificate needs DNS in place before it will provision. Default false preserves the documented pilot posture (public *.run.app URL, JWT-on-socket as the sole auth boundary)."
+}
+
+variable "enable_worker_saturation_log_metric" {
+  type        = bool
+  default     = false
+  description = "Create a Cloud Monitoring alert on elevated worker_saturated soft-shed rates (requires a log-based metric named akshrava_worker_saturated)."
 }
 
 variable "cloud_armor_domain" {

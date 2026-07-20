@@ -5,6 +5,7 @@ import hmac
 import json
 import time
 
+import pytest
 from fastapi.testclient import TestClient
 
 from akshrava_backend.detector import (
@@ -341,6 +342,7 @@ def test_remote_worker_detector_injects_w3c_trace_headers(monkeypatch):
         async def post(self, url, content=None, headers=None, follow_redirects=False):
             captured_headers.update(headers or {})
             class FakeResp:
+                status_code = 200
                 content = b'{"detections":[]}'
                 def raise_for_status(self):
                     pass
@@ -354,4 +356,22 @@ def test_remote_worker_detector_injects_w3c_trace_headers(monkeypatch):
     assert "X-Akshrava-Timestamp" in captured_headers
     assert "X-Akshrava-Nonce" in captured_headers
     assert "X-Akshrava-Signature" in captured_headers
+    assert "traceparent" in captured_headers, "W3C Trace Context must be injected on remote infer"
+    assert captured_headers["traceparent"].startswith("00-")
+
+
+def test_remote_worker_detect_async_raises_saturated_on_503(monkeypatch):
+    class FakeClient:
+        async def post(self, url, content=None, headers=None, follow_redirects=False):
+            import httpx
+            request = httpx.Request("POST", url)
+            response = httpx.Response(503, request=request, text="queue full")
+            raise httpx.HTTPStatusError("saturated", request=request, response=response)
+
+    from akshrava_backend.detector import WorkerSaturatedError
+
+    detector = RemoteWorkerDetector("https://worker.internal/v1/infer", SECRET, 450)
+    monkeypatch.setattr(detector, "_get_async_client", lambda: asyncio.sleep(0, result=FakeClient()))
+    with pytest.raises(WorkerSaturatedError):
+        asyncio.run(detector.detect_async(JPEG))
 

@@ -1,5 +1,7 @@
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 import logging
+import os
 from typing import Optional
 
 from sqlalchemy import DateTime, Float, Integer, String, delete, event, inspect, select, text
@@ -10,6 +12,21 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from .domain import GeometryProfile
 
 logger = logging.getLogger(__name__)
+
+# Bound the per-process connection pool. On Cloud Run the API autoscales (max_instance_count=10)
+# and each instance would otherwise open SQLAlchemy's default 5 + 10 overflow = 15 connections =
+# up to 150 against a db-custom-1-3840 Cloud SQL instance whose max_connections is ~100 -- a
+# scaling burst exhausts the DB ("remaining connection slots are reserved") and takes the whole
+# fleet down. This service barely touches Postgres on the hot path (revocation is cached, alert
+# writes are backgrounded), so a small pool per instance is correct: 5 + 3 = 8 * 10 = 80 < 100,
+# leaving headroom for the migrate job and admin sessions. pre_ping + recycle handle Cloud SQL
+# silently dropping idle connections, which would otherwise fail the first query after an idle gap.
+_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "5"))
+_MAX_OVERFLOW = int(os.getenv("DB_MAX_OVERFLOW", "3"))
+_POOL_RECYCLE_SECONDS = int(os.getenv("DB_POOL_RECYCLE_SECONDS", "1800"))
+# Cap the in-memory revocation cache so a long-lived process with token rotation (a fresh
+# device_id per re-provisioning) cannot grow it without bound. LRU-evict the oldest entries.
+_REVOCATION_CACHE_MAX = int(os.getenv("REVOCATION_CACHE_MAX", "10000"))
 
 
 class Base(DeclarativeBase):
@@ -66,11 +83,24 @@ class Store:
         bootstrap_schema: bool = True,
         expected_schema_revision: Optional[str] = None,
     ):
-        self.engine = create_async_engine(url, future=True)
+        if url.startswith("sqlite"):
+            # SQLite (dev/test) uses a single-file connection; the QueuePool sizing args do not
+            # apply and pre_ping is unnecessary.
+            self.engine = create_async_engine(url, future=True)
+        else:
+            self.engine = create_async_engine(
+                url,
+                future=True,
+                pool_size=_POOL_SIZE,
+                max_overflow=_MAX_OVERFLOW,
+                pool_pre_ping=True,
+                pool_recycle=_POOL_RECYCLE_SECONDS,
+            )
         self.bootstrap_schema = bootstrap_schema
         self.redis_url = redis_url
         self._redis_client = None
-        self._revocation_cache = {}  # device_id -> (revoked_bool, expiry_timestamp)
+        # OrderedDict for O(1) LRU eviction: device_id -> (revoked_bool, expiry_timestamp).
+        self._revocation_cache = OrderedDict()
         self._cache_ttl = 15.0
         # Short negative TTL: avoid Postgres on every frame while keeping revoke lag ≤ this window.
         self._negative_cache_ttl = 5.0
@@ -198,7 +228,7 @@ class Store:
             await session.commit()
             import time
             # Positive write-through: never delete-to-miss (replicas would re-read a stale False).
-            self._revocation_cache[device_id] = (True, time.monotonic() + self._cache_ttl)
+            self._cache_revocation(device_id, True, time.monotonic() + self._cache_ttl)
             if self.redis_url:
                 try:
                     client = await self._get_redis_client()
@@ -211,6 +241,14 @@ class Store:
                 except Exception:
                     logger.warning("Redis cache write failed during revocation", exc_info=True)
             return True
+
+    def _cache_revocation(self, device_id: str, revoked: bool, expiry: float) -> None:
+        """Write a revocation-cache entry, LRU-evicting the oldest so the dict stays bounded."""
+        cache = self._revocation_cache
+        cache[device_id] = (revoked, expiry)
+        cache.move_to_end(device_id)
+        while len(cache) > _REVOCATION_CACHE_MAX:
+            cache.popitem(last=False)
 
     async def is_device_revoked(self, device_id: str) -> bool:
         if self.redis_url:
@@ -228,13 +266,14 @@ class Store:
         if device_id in self._revocation_cache:
             revoked, expiry = self._revocation_cache[device_id]
             if now < expiry:
+                self._revocation_cache.move_to_end(device_id)  # mark recently used
                 return revoked
         async with self.sessions() as session:
             device = await session.get(Device, device_id)
             revoked = bool(device and device.revoked_at is not None)
         # Positives stick longer; negatives use a short TTL so revoke still propagates quickly.
         ttl = self._cache_ttl if revoked else self._negative_cache_ttl
-        self._revocation_cache[device_id] = (revoked, now + ttl)
+        self._cache_revocation(device_id, revoked, now + ttl)
 
         if self.redis_url:
             try:

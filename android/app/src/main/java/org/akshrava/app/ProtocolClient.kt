@@ -81,6 +81,7 @@ class ProtocolClient(
     }
     private val reconnect: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
     private val inFlight = AtomicBoolean(false)
+    @Volatile private var maxInFlight: Int = 1
     private var socket: WebSocket? = null
     private var pendingReconnect: ScheduledFuture<*>? = null
     private val connectionGeneration = AtomicInteger(0)
@@ -260,12 +261,38 @@ class ProtocolClient(
             "ready" -> {
                 sessionReady = true
                 visionEnabled = payload.optBoolean("vision_enabled", false)
+                val advertised = payload.optInt("max_in_flight", 1).coerceIn(1, 2)
+                maxInFlight = advertised
                 if (visionEnabled) {
                     onState("Vision assistance connected")
                 } else {
                     val message = "Vision model unavailable. Use cane or guide."
                     onState(message)
                     alertManager.status(message)
+                }
+            }
+            "error" -> {
+                when (payload.optString("code")) {
+                    "worker_saturated", "frame_rate_limited" -> {
+                        // Soft shed: keep socket, free in-flight slot, let the next frame retry.
+                        settleFrame()
+                        onState("Server busy; shedding frames")
+                    }
+                    "vision_unavailable" -> {
+                        sessionReady = false
+                        visionEnabled = false
+                        settleFrame()
+                        val message = "Vision assistance unavailable. Use cane or guide."
+                        onState(message)
+                        alertManager.status(message)
+                        // The server will close this socket after the error. Closing proactively
+                        // also protects older deployments that do not, and starts normal backoff.
+                        socket?.close(1011, "vision unavailable")
+                    }
+                    else -> {
+                        settleFrame()
+                        onState("Server protocol error")
+                    }
                 }
             }
             "quality" -> onQuality(Quality.fromServer(
@@ -332,22 +359,6 @@ class ProtocolClient(
                             hazard.optString("haptic", "none")
                         )
                     }
-                }
-                settleFrame()
-            }
-            "error" -> {
-                val code = payload.optString("code")
-                if (code == "vision_unavailable") {
-                    sessionReady = false
-                    visionEnabled = false
-                    val message = "Vision assistance unavailable. Use cane or guide."
-                    onState(message)
-                    alertManager.status(message)
-                    // The server will close this socket after the error. Closing proactively
-                    // also protects older deployments that do not, and starts normal backoff.
-                    socket?.close(1011, "vision unavailable")
-                } else {
-                    onState("Server protocol error")
                 }
                 settleFrame()
             }

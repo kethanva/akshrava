@@ -190,3 +190,38 @@ async def test_revocation_publishes_short_ttl_negative_and_revoke_overwrites():
         assert await store.is_device_revoked("active-device")
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_revocation_cache_is_lru_bounded(tmp_path, monkeypatch):
+    # A long-lived API process must not grow the in-memory revocation cache without bound as
+    # rotated device IDs churn through it. Cap it and LRU-evict the oldest entries.
+    import akshrava_backend.storage as storage_mod
+
+    monkeypatch.setattr(storage_mod, "_REVOCATION_CACHE_MAX", 5)
+    store = Store("sqlite+aiosqlite:///%s" % (tmp_path / "lru.db"))
+    await store.initialize()
+    try:
+        for index in range(20):
+            await store.is_device_revoked("device-%d" % index)
+        assert len(store._revocation_cache) <= 5
+        # The most recently queried ids survive; the oldest were evicted.
+        assert "device-19" in store._revocation_cache
+        assert "device-0" not in store._revocation_cache
+    finally:
+        await store.close()
+
+
+def test_non_sqlite_engine_uses_a_bounded_connection_pool():
+    # Cloud Run autoscaling + SQLAlchemy's default 15-conn pool would exhaust a 1-vCPU Cloud SQL
+    # instance. The Postgres engine must use a small, explicitly bounded pool with pre_ping.
+    store = Store("postgresql+asyncpg://user:pw@localhost:5432/akshrava")
+    pool = store.engine.pool
+    assert pool.size() == storage_mod_pool_size()
+    # pre_ping is on so Cloud SQL dropping idle connections does not fail the next query.
+    assert store.engine.pool._pre_ping is True
+
+
+def storage_mod_pool_size():
+    import akshrava_backend.storage as storage_mod
+    return storage_mod._POOL_SIZE

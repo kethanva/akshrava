@@ -1,0 +1,34 @@
+# Production-hardening profile (Enterprise Readiness Review Top 5).
+# Copy values into terraform.tfvars after quota/DNS review — do not apply blindly.
+#
+# 1) Regional MIG worker (fixes single-zone SPOF)
+# enable_worker_ha       = true
+# worker_ha_target_size  = 2
+#
+# 2) Cloud Armor + external HTTPS LB (DDoS / rate limit)
+# enable_cloud_armor     = true
+# cloud_armor_domain     = "api.akshrava.example.org"
+#
+# 3) Monitoring SLOs
+# enable_worker_saturation_log_metric = true
+#
+# Keep PoC cost toggles documented in poc_cost_optimization_guide.md for overnight pause.
+
+project_id  = "project-704ccb8e-8b12-4da6-a3f"
+region      = "us-central1"
+zone        = "us-central1-a"
+environment = "production"
+detector    = "remote"
+
+api_allow_unauthenticated = true
+manage_pki_in_terraform   = false
+worker_use_gpu            = false
+redis_transit_encryption  = true
+
+enable_worker_ha      = true
+worker_ha_target_size = 2
+
+enable_cloud_armor = true
+cloud_armor_domain = "REPLACE_WITH_MANAGED_DOMAIN"
+
+enable_worker_saturation_log_metric = true

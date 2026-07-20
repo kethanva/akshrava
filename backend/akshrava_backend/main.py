@@ -16,6 +16,7 @@ from .protocol import ProtocolError, quality_for_inference
 from .cloud_fallback import make_cloud_provider
 from .coordination import device_rate_limiter_for
 from .detector import make_detector
+from .logging_util import configure_json_logging
 from .metrics import Metrics
 from .rate_limit import FrameRateLimiter
 from .service import VisionService
@@ -23,9 +24,11 @@ from .session_admission import session_admission_for
 from .storage import Store
 from .gcp_storage import GcpDiagnosticStorage
 from .session_handler import MAX_CONTROL_MESSAGE_BYTES, FrameStreamHandler  # noqa: F401 — re-exported operational limit
+from .tracing import ensure_tracer_provider
 
-logging.basicConfig(level=logging.INFO)
+configure_json_logging()
 logger = logging.getLogger(__name__)
+ensure_tracer_provider()
 
 NORMAL_FRAME_BURST = 2.0
 NORMAL_FRAME_RATE_PER_SECOND = 1.2
@@ -333,11 +336,21 @@ async def session(websocket: WebSocket):
 
                     try:
                         result = await session_application.analyze_frame(state, header, jpeg)
-                    except Exception:
-                        # Do not leave a phone believing vision is active after a model/runtime
-                        # failure.  The client disables speech and reconnects only after this socket
-                        # is closed, preventing a half-paired frame stream from continuing.
-                        logger.exception("vision inference failed for device=%s frame_id=%s", device_id, header.frame_id)
+                    except Exception as exc:
+                        from .detector import WorkerSaturatedError
+
+                        # Soft-shed under worker overload: keep the socket open so the phone
+                        # can retry the next frame instead of believing vision is permanently dead.
+                        if isinstance(exc, WorkerSaturatedError) or "circuit open" in str(exc):
+                            metrics.worker_saturated()
+                            await websocket.send_json({"type": "error", "code": "worker_saturated"})
+                            continue
+                        # Hard failures (model/runtime) still fail closed.
+                        logger.exception(
+                            "vision inference failed for device=%s frame_id=%s",
+                            device_id,
+                            header.frame_id,
+                        )
                         metrics.inference_failed()
                         await websocket.send_json({"type": "error", "code": "vision_unavailable"})
                         await websocket.close(code=1011)

@@ -91,6 +91,10 @@ class RemoteInferenceError(RuntimeError):
     """The trusted GPU worker cannot produce a safely usable result."""
 
 
+class WorkerSaturatedError(RemoteInferenceError):
+    """Worker queue is full (HTTP 503). Soft-shed the frame; do not tear down the WebSocket."""
+
+
 class _RejectRedirectHandler(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         raise RemoteInferenceError("remote worker redirect rejected")
@@ -166,11 +170,10 @@ class RemoteWorkerDetector(Detector):
             "X-Akshrava-Nonce": nonce,
             "X-Akshrava-Signature": signature,
         }
-        try:
-            from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
-            TraceContextTextMapPropagator().inject(headers)
-        except Exception:
-            pass
+        from .tracing import inject_trace_headers, start_inference_span
+
+        with start_inference_span("remote.detect"):
+            inject_trace_headers(headers)
         request = Request(
             self.endpoint,
             data=body,
@@ -218,37 +221,44 @@ class RemoteWorkerDetector(Detector):
             "X-Akshrava-Nonce": nonce,
             "X-Akshrava-Signature": signature,
         }
-        try:
-            from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
-            TraceContextTextMapPropagator().inject(headers)
-        except Exception:
-            pass
-        try:
-            response = await client.post(
-                self.endpoint,
-                content=body,
-                headers=headers,
-                follow_redirects=False,
-            )
-            response.raise_for_status()
-            raw = response.content
-        except Exception as exc:
-            import httpx
-            if isinstance(exc, httpx.HTTPStatusError):
-                if 300 <= exc.response.status_code < 400:
-                    raise RemoteInferenceError("remote worker redirect rejected") from exc
-                raise RemoteInferenceError("remote worker failed status=%d" % exc.response.status_code) from exc
-            raise RemoteInferenceError("remote worker unavailable") from exc
-        if len(raw) > self._MAX_RESPONSE_BYTES:
-            raise RemoteInferenceError("remote worker response too large")
-        try:
-            payload = json.loads(raw)
-            items = payload["detections"]
-            if not isinstance(items, list) or len(items) > self._MAX_DETECTIONS:
-                raise ValueError("invalid detections")
-            return [self._parse_detection(item) for item in items]
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise RemoteInferenceError("invalid remote worker response") from exc
+        from .tracing import inject_trace_headers, start_inference_span
+
+        with start_inference_span("remote.detect_async"):
+            inject_trace_headers(headers)
+            try:
+                response = await client.post(
+                    self.endpoint,
+                    content=body,
+                    headers=headers,
+                    follow_redirects=False,
+                )
+                if response.status_code == 503:
+                    raise WorkerSaturatedError("worker inference queue full")
+                response.raise_for_status()
+                raw = response.content
+            except WorkerSaturatedError:
+                raise
+            except Exception as exc:
+                import httpx
+                if isinstance(exc, httpx.HTTPStatusError):
+                    if 300 <= exc.response.status_code < 400:
+                        raise RemoteInferenceError("remote worker redirect rejected") from exc
+                    if exc.response.status_code == 503:
+                        raise WorkerSaturatedError("worker inference queue full") from exc
+                    raise RemoteInferenceError(
+                        "remote worker failed status=%d" % exc.response.status_code
+                    ) from exc
+                raise RemoteInferenceError("remote worker unavailable") from exc
+            if len(raw) > self._MAX_RESPONSE_BYTES:
+                raise RemoteInferenceError("remote worker response too large")
+            try:
+                payload = json.loads(raw)
+                items = payload["detections"]
+                if not isinstance(items, list) or len(items) > self._MAX_DETECTIONS:
+                    raise ValueError("invalid detections")
+                return [self._parse_detection(item) for item in items]
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise RemoteInferenceError("invalid remote worker response") from exc
 
     def requires_serial_execution(self) -> bool:
         return False

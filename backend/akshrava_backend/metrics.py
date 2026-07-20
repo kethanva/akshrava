@@ -22,6 +22,7 @@ class Metrics:
         self._sessions_active = 0
         self._session_admission_rejected_total = 0
         self._inference_failures_total = 0
+        self._worker_saturated_total = 0
         self._inference_counts: Dict[int, int] = {bucket: 0 for bucket in self._INFERENCE_BUCKETS}
         self._inference_sum_ms = 0
         self._inference_count = 0
@@ -96,6 +97,11 @@ class Metrics:
         with self._lock:
             self._inference_failures_total += 1
 
+    def worker_saturated(self) -> None:
+        """Worker returned 503 / queue-full; frame was soft-shed without closing the session."""
+        with self._lock:
+            self._worker_saturated_total += 1
+
     def render(self) -> str:
         with self._lock:
             lines = [
@@ -120,6 +126,9 @@ class Metrics:
                 "# HELP akshrava_inference_failures_total Inference failures that fail closed.",
                 "# TYPE akshrava_inference_failures_total counter",
                 "akshrava_inference_failures_total %s" % self._inference_failures_total,
+                "# HELP akshrava_worker_saturated_total Frames soft-shed because the worker queue was full.",
+                "# TYPE akshrava_worker_saturated_total counter",
+                "akshrava_worker_saturated_total %s" % self._worker_saturated_total,
                 "# HELP akshrava_inference_duration_milliseconds Vision inference and queue duration.",
                 "# TYPE akshrava_inference_duration_milliseconds histogram",
             ]

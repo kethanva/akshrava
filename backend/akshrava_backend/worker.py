@@ -20,10 +20,11 @@ from fastapi import FastAPI, HTTPException, Request, Response
 
 from .detector import Detector, jpeg_dimensions, make_detector
 from .coordination import nonce_store_for
+from .logging_util import configure_json_logging
 from .metrics import Metrics
 from .model_integrity import verify_model_sha256
 
-logging.basicConfig(level=logging.INFO)
+configure_json_logging()
 logger = logging.getLogger(__name__)
 
 

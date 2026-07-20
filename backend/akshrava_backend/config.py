@@ -13,6 +13,7 @@ class Settings:
     jwt_secret: str
     jwt_algorithm: str
     jwt_public_key_file: str
+    jwt_public_key_previous_file: str
     max_active_sessions: int
     detector: str
     yolo_weights: str
@@ -52,6 +53,7 @@ class Settings:
             jwt_secret=os.getenv("JWT_SECRET", "change-me-before-field-use"),
             jwt_algorithm=os.getenv("JWT_ALGORITHM", "HS256").upper(),
             jwt_public_key_file=os.getenv("JWT_PUBLIC_KEY_FILE", "").strip(),
+            jwt_public_key_previous_file=os.getenv("JWT_PUBLIC_KEY_PREVIOUS_FILE", "").strip(),
             max_active_sessions=int(os.getenv("MAX_ACTIVE_SESSIONS", "200")),
             detector=os.getenv("DETECTOR", "noop"),
             yolo_weights=os.getenv("YOLO_WEIGHTS", "yolo11s.pt"),

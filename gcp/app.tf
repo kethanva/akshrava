@@ -254,6 +254,12 @@ resource "google_cloud_run_v2_service" "api" {
         name  = "JWT_PUBLIC_KEY_FILE"
         value = "/run/secrets/jwt/public.pem"
       }
+      env {
+        # Optional dual-key cutover path used by rotate_jwt_rs256.sh. Empty is fine when
+        # akshrava-jwt-public-previous is absent; auth.py skips a missing previous key.
+        name  = "JWT_PUBLIC_KEY_PREVIOUS_FILE"
+        value = "/run/secrets/jwt/public-previous.pem"
+      }
       # JWT_SECRET is intentionally NOT set here: JWT_ALGORITHM is hardcoded RS256 above, and
       # config.py only reads/validates jwt_secret when the algorithm is HS256. A static
       # placeholder string in production IaC is confusing during security audits and, more
