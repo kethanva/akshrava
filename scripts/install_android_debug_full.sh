@@ -68,7 +68,7 @@ export AKSHRAVA_WSS_URL="$WSS_URL"
 
 # ── Health check ─────────────────────────────────────────────────────────────
 log "==> Checking backend health (advisory only)..."
-HTTP_BASE="${WSS_URL/wss:\/\//https:\/\/}"
+HTTP_BASE="https://${WSS_URL#wss://}"
 HTTP_BASE="${HTTP_BASE%/v1/session}"
 command -v curl >/dev/null || { log "⚠️  curl not found; skipping health check"; HTTP_BASE=""; }
 if [ -n "$HTTP_BASE" ]; then
