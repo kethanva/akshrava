@@ -67,16 +67,31 @@ log "WSS Endpoint: $WSS_URL"
 export AKSHRAVA_WSS_URL="$WSS_URL"
 
 # ── Health check ─────────────────────────────────────────────────────────────
-log "==> Checking backend health..."
+log "==> Checking backend health (advisory only)..."
 HTTP_BASE="${WSS_URL/wss:\/\//https:\/\/}"
 HTTP_BASE="${HTTP_BASE%/v1/session}"
-for endpoint in "livez" "readyz"; do
-  STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$HTTP_BASE/$endpoint" || true)
-  if [ "$STATUS" != "200" ]; then
-    die "Backend $endpoint returned $STATUS (expected 200)"
+command -v curl >/dev/null || { log "⚠️  curl not found; skipping health check"; HTTP_BASE=""; }
+if [ -n "$HTTP_BASE" ]; then
+  HEALTH_OK=true
+  for endpoint in "livez" "readyz"; do
+    RESPONSE=$(curl -s -w "\n%{http_code}" --connect-timeout 5 --max-time 10 "$HTTP_BASE/$endpoint" 2>/dev/null || echo -e "\n000")
+    STATUS=$(echo "$RESPONSE" | tail -1)
+    if [ -z "$STATUS" ] || [ "$STATUS" = "000" ]; then
+      log "⚠️  $endpoint: unreachable (network or DNS issue)"
+      HEALTH_OK=false
+    elif [ "$STATUS" != "200" ]; then
+      log "⚠️  $endpoint: returned $STATUS"
+      HEALTH_OK=false
+    else
+      log "✓ $endpoint: 200"
+    fi
+  done
+  if [ "$HEALTH_OK" = "false" ]; then
+    log "Backend may be unreachable. Continuing anyway (may fail later)..."
+  else
+    log "Backend health: OK"
   fi
-done
-log "Backend health: OK"
+fi
 
 # ── Mint device token ───────────────────────────────────────────────────────
 log "==> Minting RS256 device token..."
