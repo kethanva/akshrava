@@ -58,10 +58,15 @@ class ProtocolClient(
     internal companion object {
         const val MAX_BACKOFF_ATTEMPT = 4          // 2^4 = 16 s, capped to 10 s
         const val MAX_BACKOFF_SECONDS = 10.0
-        const val STALE_ALERT_MS = 500L
+        /**
+         * Cloud remote YOLO RTT is typically 400–900 ms (often >1 s on LTE).
+         * Match the server pilot budget (ALERT_MAX_AGE_MS=2500) so real detections
+         * are spoken instead of silently discarded as "stale".
+         */
+        const val STALE_ALERT_MS = 2500L
         /** Look answers use the full freshness budget even when the hazard is S1. */
-        const val LOOK_FRESHNESS_MS = 500L
-        const val URGENT_FRESHNESS_MS = 250L
+        const val LOOK_FRESHNESS_MS = 2500L
+        const val URGENT_FRESHNESS_MS = 1500L
         /**
          * Must cover CPU remote YOLO (GCP pilot uses up to ~9s inference). A shorter budget
          * cancels a healthy socket mid-infer and destroys end-to-end frame throughput.

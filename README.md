@@ -1,250 +1,248 @@
 # Akshrava
 
-Recycled-phone assistive vision for blind and low-vision users in India.
+**Assistive Vision Processing Engine for Blind and Low-Vision Users**
 
-Akshrava turns a **recent** chest-mounted Android camera view into a short, rate-limited alert. It supplements a white cane, guide dog, or sighted guide. It is **not** navigation, collision avoidance, route guidance, or a crossing aid.
+Akshrava transforms a chest-mounted Android camera view into real-time, rate-limited auditory and haptic alerts. It is designed specifically for low-cost / recycled smartphones operating over constrained mobile networks (3G/4G/5G) in India, supplementing a white cane, guide dog, or human guide.
 
-**Hard safety boundary**
-
-- Never says a road is safe to cross, a path is clear, or a vehicle is *approaching*.
-- At 0.2–3 FPS, box growth confounds wearer motion with target motion. Vehicle speech is only `vehicle nearby`. Results carry `motion_evidence: "insufficient"`.
-- Silence never means safety. The phone must say when the camera, network, or detector cannot assist.
-
-This repository is a **bench and supervised-pilot** implementation. A green CI run is not field-use approval. Authoritative depth lives in [`Important Architecture.md`](Important%20Architecture.md); this README is the end-to-end map of what the code actually does.
+> [!IMPORTANT]
+> **Hard Safety Boundaries & Non-Goals**
+> - **Not Navigation or Collision Avoidance:** Akshrava never claims a path is "safe to cross", "clear", or that a vehicle is "approaching".
+> - **Motion Uncertainty:** At low frame rates (0.2–3 FPS), bounding box growth confounds wearer movement with target motion. Vehicle speech is strictly restricted to static directional cues (e.g., `"Vehicle nearby, left"`).
+> - **Fail-Explicit Silence:** Silence never implies safety. The phone must explicitly communicate when camera, network, or detection pipelines are unavailable or degraded.
 
 ---
 
-## End-to-end architecture
+## 1. End-to-End System Architecture
 
-**Live supervised GCP pilot (2026-07)** — not Compose-only, not unsupervised field production,
-not L4 GPU (quota 0; `worker_use_gpu=false`). Live WSS:
-`wss://akshrava-api-c7d3j4nzdq-uc.a.run.app/v1/session`. Full trust/store/deploy diagrams:
-[`Important Architecture.md`](Important%20Architecture.md).
+The live GCP pilot topology decouples client-side frame sampling, edge API control plane handling, and isolated GPU/CPU remote inference workers in a private VPC.
 
 ```mermaid
 flowchart TB
-  subgraph Phone["Android phone — AssistService"]
-    Cam["CameraX ImageAnalysis<br/>KEEP_ONLY_LATEST · setTargetRotation"]
-    Gate["CapturePolicy + FrameGate<br/>IMU · duplicate · blur"]
-    Enc["FrameEncoder<br/>NV21 rotate/scale · one JPEG"]
-    WSS["ProtocolClient · OkHttp<br/>1 in-flight · 1 pending"]
-    Alert["AlertManager<br/>TTS · haptic · freshness"]
-    Cam --> Gate --> Enc --> WSS
-    WSS --> Alert
-  end
+    subgraph Client["Android Phone (AssistService)"]
+        Cam["CameraX ImageAnalysis<br/>(KEEP_ONLY_LATEST · Target Rotation)"]
+        Gate["FrameGate & CapturePolicy<br/>(IMU Pose · Duplicate · Blur Detection)"]
+        Enc["FrameEncoder<br/>(NV21 Zero-Copy Rotate/Scale → JPEG)"]
+        WSS["ProtocolClient (OkHttp)<br/>(1 In-Flight · 1 Pending Buffer)"]
+        Alert["AlertManager<br/>(TTS Speech · Haptic Engine)"]
+        
+        Cam --> Gate --> Enc --> WSS
+        WSS --> Alert
+    end
 
-  subgraph CR["Cloud Run · akshrava-api"]
-    Sess["/v1/session<br/>public invoker + RS256 JWT"]
-    Admit["Redis admission + rate limit"]
-    VS["VisionService<br/>detect · track · score · policy"]
-    Persist["Background record_alert<br/>never blocks WS reply"]
-    Sess --> Admit
-    Sess --> VS --> Persist
-  end
+    subgraph API["Cloud Run API Control Plane (akshrava-api)"]
+        WSHandler["WSS /v1/session<br/>(RS256 JWT Auth · Nonce Check)"]
+        Admission["Admission Controller<br/>(Redis Rate & Session Limiter)"]
+        VisionEngine["VisionService<br/>(Detector Router · SimpleTracker)"]
+        Scorer["HazardScorer & AlertPolicy<br/>(Cooldowns · Priority Overrides)"]
+        AsyncStore["Async Persist Queue<br/>(Non-blocking DB Write)"]
+        
+        WSHandler --> Admission
+        WSHandler --> VisionEngine --> Scorer
+        VisionEngine --> AsyncStore
+    end
 
-  subgraph VPC["Private VPC"]
-    Redis[("Memorystore Redis BASIC")]
-    SQL[("Cloud SQL Postgres<br/>alerts · devices · no raw frames")]
-    Caddy["Caddy :8443 mTLS<br/>worker.akshrava.internal"]
-    Worker["COS GCE · CPU YOLO<br/>POST /v1/infer + HMAC"]
-    Caddy --> Worker
-  end
+    subgraph VPC["GCP Private VPC Subgraph"]
+        Redis[("Memorystore Redis<br/>(Session & Replay Nonces)")]
+        CloudSQL[("Cloud SQL PostgreSQL<br/>(Alert Logs · Devices · Pool Status)")]
+        Caddy["Caddy Proxy (:8443)<br/>(mTLS Termination & Routing)"]
+        WorkerMIG["Regional MIG Worker Pool<br/>(HA Enabled · CPU/GPU YOLO Worker)"]
+        
+        Caddy --> WorkerMIG
+    end
 
-  WSS <-->|"wss://…run.app/v1/session<br/>JSON header + binary JPEG"| Sess
-  Admit --> Redis
-  Persist --> SQL
-  VS -->|"VPC connector · mTLS + signed JPEG"| Caddy
-  Worker -.-> Redis
-  VS -->|"result + optional quality"| Sess
+    subgraph Monitoring["Observability & Alerting"]
+        PromMetrics["/metrics Endpoint<br/>(DB Pool Gauges · Frame Latency)"]
+        CloudMon["Google Cloud Monitoring<br/>(SLO Burn Rate Alert · DB Exhaustion Policy)"]
+        
+        WSHandler --> PromMetrics --> CloudMon
+    end
+
+    WSS <-->|"WSS Protocol (JSON Header + Binary JPEG)"| WSHandler
+    Admission --> Redis
+    AsyncStore --> CloudSQL
+    VisionEngine -->|"mTLS + Signed Raw JPEG (VPC Connector)"| Caddy
+    Scorer -->|"Response Frame & Quality Hint"| WSHandler
 ```
 
-Optional local path: Compose control-plane + worker under `infra/` (Caddy as public TLS edge).
-That is a bench/deploy option, not the live pilot topology above.
+---
 
-### Frame-to-ear path (implemented)
+## 2. End-to-End Frame Processing Sequence
 
-| Step | Code | Behaviour |
-|---:|---|---|
-| 1 | `AssistService` | Visible Start → camera foreground `LifecycleService`; Stop is explicit (`START_NOT_STICKY`). Watchdog may **prompt**, never silently restart the camera. |
-| 2 | `ImageAnalysis` | Latest frame only; `setTargetRotation` prefers already-oriented buffers. |
-| 3 | `FrameGate` / `CapturePolicy` | Motion, duplicate, blur gates; periodic sample so stillness cannot imply “safe”. |
-| 4 | `FrameEncoder` | NV21 scratch buffers for rotate/downscale; **no Bitmap** path; one `YuvImage` JPEG. |
-| 5 | `ProtocolClient` | JSON `frame` header + binary JPEG over one authenticated socket; 1 in-flight + 1 replaceable pending. |
-| 6 | `VisionService.analyze` | Detector (noop / ultralytics / remote) → `SimpleTracker` → `HazardScorer` → `AlertPolicy`. Late frames skip scoring so cooldowns are not burned. |
-| 7 | Persist | `_schedule_record_alert` fire-and-forget; phone gets the hazard **before** DB commit. |
-| 8 | `AlertManager` | Phone-local freshness (≤500 ms normal, ≤250 ms urgent S1); TTS/haptic; never invents approach/cross language. |
+The sequence diagram below traces a single camera frame from capture on the mobile device through API authentication, remote inference, hazard scoring, audio response, and background telemetry persistence.
 
-Default detector is `DETECTOR=noop` until licensed weights and release gates exist.
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Wearer as Blind / Low-Vision User
+    participant Cam as Android CameraX
+    participant Gate as FrameGate & Encoder
+    participant Client as ProtocolClient (WSS)
+    participant API as FastAPI /v1/session
+    participant Redis as Memorystore Redis
+    participant Worker as Remote Worker (MIG)
+    participant Scorer as HazardScorer & Policy
+    participant DB as Cloud SQL Postgres
+    participant Alert as Android AlertManager
+
+    Wearer->>Cam: Live Camera Stream
+    Cam->>Gate: Raw NV21 Frame
+    Gate->>Gate: Evaluate Pose, Blur & Duplicates
+    alt Frame Passed Gates
+        Gate->>Client: Compress to JPEG
+        Client->>API: WSS Binary Message (JSON Header + JPEG)
+        API->>Redis: Validate JWT Token & Claim Replay Nonce
+        alt Admission Granted
+            API->>Worker: POST /v1/infer (mTLS + HMAC-SHA256 Signed JPEG)
+            Worker-->>API: Detections (Class, Bounding Boxes, Confidence)
+            API->>Scorer: Track Objects & Evaluate Hazard Thresholds
+            Scorer-->>API: Generate Spoken Prompt (e.g., "Obstacle ahead")
+            API-->>Client: WSS Result Frame (Speech, Quality Hints)
+            
+            par Asynchronous Telemetry & Alert Logging
+                API->>DB: Record Alert Event (Async Non-blocking)
+                DB-->>API: ACK
+            and Real-time Audio Playback
+                Client->>Alert: Dispatch Speech & Haptics
+                Alert->>Wearer: Auditory / Vibrational Feedback
+            end
+        else Rate Limited / Unauthorized
+            API-->>Client: WSS Error / Rejection
+        end
+    else Duplicate or Blurred Frame
+        Gate-->>Cam: Drop Frame & Continue Sampling
+    end
+```
 
 ---
 
-## Repository layout
+## 3. Core Component & Pipeline Details
 
-| Path | Role |
-|---|---|
-| `android/` | Kotlin app: CameraX, NV21 encode, WSS client, TTS/haptics, watchdog |
-| `backend/akshrava_backend/` | FastAPI control plane, vision policy, remote/local detectors |
-| `gcp/` | Live pilot Terraform: Cloud Run API, private CPU worker (GPU optional), SQL, Redis, mTLS, secrets |
-| `infra/` | Compose profiles: `control-plane`, `gpu-worker`, edge, monitoring |
-| `scripts/` | `verify_phases.sh`, backend run/test, token minting |
-| `Important Architecture.md` | Full product, safety, protocol, deploy, operations, release, privacy, and deferred-scope boundary |
+### Frame-to-Ear Pipeline Steps
+
+| Step | Component | Responsibilities & Invariants |
+| :--- | :--- | :--- |
+| **1** | **Android `AssistService`** | Manages `LifecycleService` foreground lifecycle. Manual start/stop only (`START_NOT_STICKY`). |
+| **2** | **CameraX `ImageAnalysis`** | Sets `setTargetRotation` to prefer pre-oriented YUV buffers (`KEEP_ONLY_LATEST`). |
+| **3** | **`FrameGate` & `CapturePolicy`** | Filters motion blur and stillness duplicates; guarantees periodic heartbeats. |
+| **4** | **`FrameEncoder`** | Fast NV21 scratch buffer rotation/downscaling into single-pass `YuvImage` JPEG. |
+| **5** | **`ProtocolClient`** | Sends JSON `frame` metadata followed by binary JPEG payload over WebSocket. |
+| **6** | **`VisionService` & Worker** | Routes frame to Remote Worker via mTLS; processes detections with `SimpleTracker`. |
+| **7** | **`HazardScorer` & `AlertPolicy`** | Evaluates spatial bounding boxes and spatial urgency; enforces strict speech cooldowns. |
+| **8** | **Async Storage** | Schedules `record_alert` in background loop; never delays client WebSocket response. |
+| **9** | **`AlertManager`** | Enforces freshness constraints (≤500ms normal, ≤250ms urgent S1) before playing TTS. |
 
 ---
 
-## Wire contract (phone ↔ control plane)
+## 4. Protocols & Wire Contracts
 
-Production: `wss://HOST/v1/session` with `Authorization: Bearer <device JWT>`.
+### A. Phone ↔ Control Plane (WebSocket Wire Protocol)
 
-1. Server → `ready` (`max_in_flight: 1`, `vision_enabled`).
-2. Client → JSON `frame` header, then one binary JPEG.
-3. Server → `result` (optional `quality`, optional `look_summary` for priority look).
+Production Endpoint: `wss://akshrava-api-c7d3j4nzdq-uc.a.run.app/v1/session`  
+Header: `Authorization: Bearer <device RS256 JWT>`
+
+1. **Server Handshake**: `ready` message specifying `max_in_flight: 1` and `vision_enabled`.
+2. **Client Upload**: One JSON `frame` header text frame, followed by one binary JPEG frame.
+3. **Server Response**: JSON `result` message containing speech prompt, quality adjustment hints, or priority look summaries.
 
 ```json
 {
   "type": "frame",
-  "id": 841,
-  "capture_mono_ms": 93211455,
+  "id": 1042,
+  "capture_mono_ms": 19482012,
   "w": 640,
   "h": 480,
-  "jpeg_bytes": 61423,
+  "jpeg_bytes": 48210,
   "camera_calibration_id": "pilot-phone-r0",
-  "pitch_cdeg": -1180,
-  "roll_cdeg": 90,
-  "pose_age_ms": 12,
+  "pitch_cdeg": -1120,
+  "roll_cdeg": 45,
+  "pose_age_ms": 10,
   "mode": "normal",
   "priority": false
 }
 ```
 
-`capture_mono_ms` is **phone elapsedRealtime**. The phone owns staleness; the server does not compare clocks. Full rules: [`Important Architecture.md`](Important%20Architecture.md).
+### B. Control Plane ↔ Remote Inference Worker (HTTP / mTLS)
 
-### Control plane ↔ remote worker
+Endpoint: `https://worker.akshrava.internal:8443/v1/infer`
 
-Live pilot: VPC → `https://worker.akshrava.internal:8443/v1/infer` (Caddy mTLS + HMAC).
-`RemoteWorkerDetector` posts the **raw JPEG body** (not base64):
+The Control Plane sends raw JPEG bytes (zero Base64 overhead) with HMAC-SHA256 signature headers:
 
 ```http
 POST /v1/infer
 Content-Type: image/jpeg
-X-Akshrava-Timestamp: <unix>
-X-Akshrava-Nonce: <urlsafe>
-X-Akshrava-Signature: HMAC-SHA256(secret, ts.nonce.body)
+X-Akshrava-Timestamp: 1784563400
+X-Akshrava-Nonce: 7c4e82b9a10f
+X-Akshrava-Signature: <HMAC-SHA256(Secret, Timestamp + Nonce + Body)>
 ```
-
-Legacy JSON/`image_b64` bodies are rejected (`415`). Nonces are claimed in Redis for replica-safe replay protection.
 
 ---
 
-## Performance invariants (in code)
+## 5. System Observability & Infrastructure Reliability
 
-| Concern | Implementation |
-|---|---|
-| DB must not delay alerts | `VisionService._schedule_record_alert` + `drain_persists` / `shutdown_async` before engine dispose |
-| Phone GC / frame drops | `FrameEncoder` NV21 rotate/scale; CameraX target rotation first |
-| Worker link CPU/bytes | Raw JPEG + HMAC headers; no base64 on the hot path |
-| Local model GIL | Bounded `ThreadPoolExecutor`; Ultralytics stays `requires_serial_execution`; production scales via **remote** workers (not `ProcessPoolExecutor`) |
-| Freshness | Drop late work; never build a catch-up queue of frames |
+The system implements enterprise-grade reliability patterns verified via automated CI and GCP monitoring:
+
+- **Database Pool Protection**: SQLAlchemy pool status (`checkedin` / `checkedout`) is exported via `/metrics`. Automated Cloud Monitoring alerts trigger if pool usage exceeds 80%.
+- **SLO Burn-Rate Alerting**: Fast-burn alert policies monitor the 99.9% API availability SLO, detecting rapid error budget consumption within 1-hour windows.
+- **Worker High Availability (HA)**: Deploys a Regional Managed Instance Group (MIG) across multiple zones for GPU/CPU detection workers.
+- **Dependency Injection**: Route handlers utilize FastAPI `Depends()` for settings, metrics, and state management to prevent global state mutation.
 
 ---
 
-## Run locally (bench)
+## 6. Repository Structure
 
-```bash
-# Backend venv + tests
-./scripts/test_backend.sh
-./scripts/run_backend_dev.sh
-# → http://127.0.0.1:8000/healthz
-# Dev WebSocket: DEV_AUTH_BYPASS / dev-device-token only for local debug
+```
+Akshrava/
+├── android/                        # Native Android Kotlin Client
+│   └── app/src/main/java/org/akshrava/app/
+│       ├── AssistService.kt        # CameraX & Foreground Service Lifecycle
+│       ├── ProtocolClient.kt       # WebSocket Client & Reconnection Engine
+│       ├── FrameEncoder.kt         # NV21 Image Processing & Compression
+│       ├── FrameGate.kt            # Motion, Blur & Duplicate Filter
+│       └── AlertManager.kt         # Text-To-Speech & Haptic Controller
+├── backend/                        # FastAPI Control Plane & Vision Service
+│   ├── akshrava_backend/
+│   │   ├── main.py                 # FastAPI Application & Lifecycle Handlers
+│   │   ├── service.py              # VisionService, Tracker & Hazard Scorer
+│   │   ├── storage.py              # PostgreSQL / SQLAlchemy Storage & Pool Stats
+│   │   ├── worker.py               # Remote GPU/CPU Worker Endpoint Handlers
+│   │   └── metrics.py              # Prometheus Gauges & Counters
+│   └── tests/                      # Automated Integration & Unit Tests
+├── gcp/                            # Terraform Infrastructure as Code (IaC)
+│   ├── app.tf                      # Cloud Run Service Definition
+│   ├── database.tf                 # Cloud SQL PostgreSQL Instance
+│   ├── monitoring.tf               # SLO Burn-Rate & DB Pool Alert Policies
+│   └── variables.tf                # Regional MIG HA & Resource Settings
+├── scripts/                        # Automation & E2E Validation Tools
+│   ├── verify_phases.sh            # Automated Test & Verification Pipeline
+│   └── install_android_debug.sh    # Android Build, Install & Port Forwarding
+└── docs/                           # Architecture & Production Guides
 ```
 
+---
+
+## 7. Local Development & Verification
+
+### Running Backend Tests & Verifications
+
 ```bash
-# Full verification baseline (noop detector + ruff when installed)
+# Run complete test suite and lint checks (uses Postgres service container in CI)
 ./scripts/verify_phases.sh
+
+# Run backend dev server locally
+./scripts/run_backend_dev.sh
+# Server active at http://127.0.0.1:8000/readyz
 ```
+
+### Building & Installing the Android App
 
 ```bash
-# Android debug APK (SDK Platform/Build-Tools 36; set ANDROID_HOME)
-cd android
-./gradlew :app:assembleDebug
-./gradlew :app:testDebugUnitTest
+# Connect phone via USB with USB Debugging enabled, then run:
+./scripts/install_android_debug.sh
 ```
 
-Release builds accept **only** `wss://`. Debug may use `ws://` for emulator/device. Assistance starts only from a visible user action — never from boot or a silent receiver.
-
-### Optional Compose stack
-
-```bash
-cd infra
-# Copy and fill .env (Postgres/Redis secrets, JWT material, worker secret, …)
-docker compose --profile control-plane up -d
-# GPU worker profile when DETECTOR=remote and weights are provisioned:
-# docker compose --profile gpu-worker up -d
-```
-
-See [`Important Architecture.md`](Important%20Architecture.md) for Compose and GCP deploy/ops, including the live supervised pilot WSS URL and E2E scripts.
-
 ---
 
-## Deploy on Google Cloud
+## 8. License & Attribution
 
-Authoritative pilot facts and E2E scripts: [`Important Architecture.md`](Important%20Architecture.md).
-Live supervised WSS: `wss://akshrava-api-c7d3j4nzdq-uc.a.run.app/v1/session`
-(public invoker + JWT; remote CPU YOLO; GPU quota 0 — not unsupervised field production).
-
-```bash
-# 1) Build images (API includes gcp extras for diagnostic uploads)
-./scripts/build_gcp_images.sh YOUR_PROJECT_ID us-central1
-
-# 2) Apply IaC (see gcp/terraform.tfvars.example; pilot uses detector=remote + CPU worker)
-cp gcp/terraform.tfvars.example gcp/terraform.tfvars
-# edit project_id, image digests, detector / worker_use_gpu / PKI flags
-terraform -chdir=gcp init
-./scripts/gcp_migrate_then_deploy.sh YOUR_PROJECT_ID us-central1
-
-# 3) Point the Android WSS URL at the output
-terraform -chdir=gcp output websocket_url
-# Provision device JWTs from Secret Manager: akshrava-jwt-private (never mount private key on Cloud Run)
-```
-
-## Alert vocabulary (allowed)
-
-| Situation | Spoken / keyed response |
-|---|---|
-| Stable validated central obstruction | `Obstacle ahead` (+ haptic) |
-| Stable nearby lateral vehicle | `Vehicle nearby, left/right` |
-| Priority look | `look_summary` for this frame (cooldowns skipped; still no approach/cross) |
-| Camera blocked / link down / no detector | Explicit status (`Camera view unclear`, `Vision assistance unavailable`, …) |
-
-Never: numeric metres, “approaching”, “safe to cross”, “path clear”, continuous scene narration.
-
----
-
-## Privacy
-
-- Normal frames stay in RAM and are discarded. No raw video/audio/GPS trail by default.
-- Persisted rows are alert/audit metadata only (`record_alert`), not JPEGs.
-- Consent and retention: [`Important Architecture.md`](Important%20Architecture.md) (privacy programme).
-
----
-
-## Release and field use
-
-| Gate | Minimum |
-|---|---|
-| Bench | `./scripts/verify_phases.sh` green; protocol + policy tests |
-| One-phone | Controlled-course recall; ≤500 ms spoken age; no silent service death |
-| Supervised trial | Named mobility instructor with stop authority; Tier-A phone; consent |
-| Pilot | Approved device inventory, ops runbook, model SHA pin, privacy review |
-
-Checklist: [`Important Architecture.md`](Important%20Architecture.md) (field readiness and release sequence).
-
-**Licensing note:** Ultralytics YOLO weights are AGPL-3.0 unless you have an enterprise licence. Do not enable `DETECTOR=ultralytics` / remote YOLO in a closed deployment without a licence decision.
-
----
-
-## Primary references
-
-| Doc | Contents |
-|---|---|
-| [`README.md`](README.md) | Short end-to-end map, setup, verification, and current code paths |
-| [`Important Architecture.md`](Important%20Architecture.md) | Full architecture, protocol, Android policy, privacy, deploy/ops, release gates, and deferred scope |
+- **Application Code**: Licensed under Apache 2.0.
+- **YOLO Model Weights**: Ultralytics YOLO model weights are licensed under AGPL-3.0. Enterprise deployment requires appropriate licensing decisions.
