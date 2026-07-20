@@ -99,7 +99,7 @@ def test_metrics_endpoint_exposes_aggregate_operational_metrics():
 
 
 def test_metrics_observe_phone_supplied_frame_age_from_websocket_result():
-    before = int(time.time() * 1000) - 120
+    before = int(time.time() * 1000) - 10
     with TestClient(app) as client:
         with client.websocket_connect("/v1/session?token=dev-device-token") as websocket:
             websocket.receive_json()

@@ -2,6 +2,7 @@ from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 import logging
 import os
+import time
 from typing import Optional, Tuple
 
 from sqlalchemy import DateTime, Float, Integer, String, delete, event, inspect, select, text
@@ -226,7 +227,6 @@ class Store:
                 return False
             device.revoked_at = datetime.now(timezone.utc)
             await session.commit()
-            import time
             # Positive write-through: never delete-to-miss (replicas would re-read a stale False).
             self._cache_revocation(device_id, True, time.monotonic() + self._cache_ttl)
             if self.redis_url:
@@ -261,7 +261,7 @@ class Store:
             except Exception:
                 logger.warning("Redis cache lookup failed for revocation, falling back to local/db", exc_info=True)
 
-        import time
+
         now = time.monotonic()
         if device_id in self._revocation_cache:
             revoked, expiry = self._revocation_cache[device_id]

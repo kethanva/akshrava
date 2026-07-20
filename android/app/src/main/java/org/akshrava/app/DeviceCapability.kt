@@ -18,8 +18,9 @@ object DeviceCapability {
         if (am.isLowRamDevice) return true
         val info = ActivityManager.MemoryInfo()
         am.getMemoryInfo(info)
-        // totalMem is API 16+; treat under ~3 GiB as constrained donated hardware.
-        return info.totalMem in 1 until 3L * 1024L * 1024L * 1024L
+        // totalMem is API 16+; treat under ~2.8 GiB as constrained donated hardware to avoid
+        // incorrectly penalizing true 3GB phones (which report ~2.7-2.8GB due to kernel/GPU reserved RAM).
+        return info.totalMem in 1 until (2.8 * 1024 * 1024 * 1024).toLong()
     }
 
     /** Initial quality before the first server `quality` hint. */

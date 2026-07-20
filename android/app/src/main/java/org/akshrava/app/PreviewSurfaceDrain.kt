@@ -60,6 +60,7 @@ class PreviewSurfaceDrain {
 
     fun release() {
         try {
+            reader?.setOnImageAvailableListener(null, null)
             reader?.close()
         } catch (_: Exception) {
         }

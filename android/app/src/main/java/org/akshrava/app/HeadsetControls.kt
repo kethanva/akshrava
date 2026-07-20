@@ -31,21 +31,31 @@ class HeadsetControls(
         session.setCallback(object : MediaSessionCompat.Callback() {
             override fun onMediaButtonEvent(mediaButtonEvent: Intent?): Boolean {
                 val key = mediaButtonEvent.keyEvent() ?: return false
-                if (key.action != KeyEvent.ACTION_UP) return true
-                if (key.eventTime - key.downTime > 700) {
-                    // A long-press look pre-empts any pending single/double-press debounce from
-                    // an immediately preceding short press.
+                if (key.action == KeyEvent.ACTION_DOWN && key.repeatCount == 0) {
                     handler.removeCallbacksAndMessages(null)
-                    pressCount = 0
-                    pressGeneration += 1
-                    onLook()
+                    val generation = ++pressGeneration
+                    handler.postDelayed({
+                        if (pressGeneration == generation) {
+                            pressCount = 0
+                            onLook()
+                        }
+                    }, 700)
                     return true
                 }
+                
+                if (key.action != KeyEvent.ACTION_UP) return true
+                handler.removeCallbacksAndMessages(null)
+                
+                if (key.eventTime - key.downTime >= 700) {
+                    // A long-press look already pre-empted and fired.
+                    return true
+                }
+                
                 val now = SystemClock.elapsedRealtime()
                 if (now - lastPressMs < 400) pressCount += 1 else pressCount = 1
                 lastPressMs = now
+                
                 if (pressCount >= 2) {
-                    handler.removeCallbacksAndMessages(null)
                     pressCount = 0
                     pressGeneration += 1
                     onMute()

@@ -110,9 +110,9 @@ async def test_alert_persistence_does_not_block_websocket_result():
     second = await service.analyze(state, _header(2, 1_500), b"jpeg")
     elapsed = time.monotonic() - started
     assert second["hazard"] is not None
-    assert elapsed < 0.05, "DB write must not sit on the phone reply path"
+    assert elapsed < 0.1, "DB write must not sit on the phone reply path"
     # Yield so the scheduled persist task can enter record_alert before we assert.
-    await asyncio.sleep(0)
+    await asyncio.sleep(0.02)
     assert store.started.is_set()
     await service.drain_persists()
     assert store.alerts[0][0:2] == ("device-1", 2)

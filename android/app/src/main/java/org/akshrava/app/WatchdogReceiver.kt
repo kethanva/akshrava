@@ -20,13 +20,22 @@ class WatchdogReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent) {
         if (!SessionFlags.isActive(context)) return
-        if (SessionFlags.isStale(context)) promptRestart(context)
+        val pendingResult = goAsync()
+        if (SessionFlags.isStale(context)) {
+            promptRestart(context, pendingResult)
+        } else {
+            pendingResult?.finish()
+        }
         // Keep watching for as long as the session is meant to be active.
         Watchdog.schedule(context)
     }
 
-    private fun promptRestart(context: Context) {
-        val manager = context.getSystemService(NotificationManager::class.java) ?: return
+    private fun promptRestart(context: Context, pendingResult: PendingResult?) {
+        val manager = context.getSystemService(NotificationManager::class.java)
+        if (manager == null) {
+            pendingResult?.finish()
+            return
+        }
         val channel = NotificationChannel(
             CHANNEL_ID, context.getString(R.string.watchdog_channel_name), NotificationManager.IMPORTANCE_HIGH
         ).apply {
@@ -56,16 +65,19 @@ class WatchdogReceiver : BroadcastReceiver() {
         tts = android.speech.tts.TextToSpeech(context) { status ->
             if (status != android.speech.tts.TextToSpeech.SUCCESS) {
                 tts.shutdown()
+                pendingResult?.finish()
                 return@TextToSpeech
             }
             tts.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
                 override fun onStart(utteranceId: String?) = Unit
                 override fun onDone(utteranceId: String?) {
                     tts.shutdown()
+                    pendingResult?.finish()
                 }
                 @Deprecated("Deprecated in Java")
                 override fun onError(utteranceId: String?) {
                     tts.shutdown()
+                    pendingResult?.finish()
                 }
             })
             tts.speak(

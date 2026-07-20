@@ -69,8 +69,12 @@ def start_inference_span(name: str = "akshrava.inference") -> Iterator[None]:
 
         tracer = trace.get_tracer("akshrava")
     except Exception:
+        tracer = None
+        
+    if tracer is None:
         yield
         return
+        
     # Keep the span `with` outside exception handlers so WorkerSaturatedError (and any other
     # inference failure) propagates cleanly — a broad except around yield re-enters the
     # generator and raises "generator didn't stop after throw()".

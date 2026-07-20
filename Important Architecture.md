@@ -84,7 +84,7 @@ flowchart LR
   end
 ```
 
-The architecture is intentionally a freshness pipeline, not a video system. Raw frames are processed in memory, never queued to catch up, and are not retained in normal operation. A consented diagnostic sample is a separate privacy-controlled workflow (GCS bucket when enabled). The repository [`README.md`](README.md) is the short end-to-end map of these code paths; Compose under `infra/` is an alternate local/single-host deploy, not the live pilot edge.
+The architecture is intentionally a freshness pipeline, not a video system. Raw frames are processed in memory, never queued to catch up, and are not retained in normal operation. A consented diagnostic sample is a separate privacy-controlled workflow (GCS bucket when enabled). The repository [README.md](README.md) is the short end-to-end map of these code paths; Compose under [infra/](infra/) is an alternate local/single-host deploy, not the live pilot edge.
 
 ### Frame-to-ear lifecycle
 

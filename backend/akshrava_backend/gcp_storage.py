@@ -1,5 +1,6 @@
 import asyncio
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 # Diagnostic uploads are a consented, blur-gated workflow (see config validation and Important Architecture.md, privacy).
@@ -20,9 +21,14 @@ class GcpDiagnosticStorage:
         self.client = None
         self.bucket = None
         self._executor = None
+        self._init_lock = threading.Lock()
 
     def _init_client(self):
-        if self.client is None:
+        if self.client is not None:
+            return
+        with self._init_lock:
+            if self.client is not None:
+                return
             if not self.bucket_name:
                 raise ValueError("GCP_DIAGNOSTICS_BUCKET must be set to use GCP Storage.")
             try:
@@ -51,7 +57,7 @@ class GcpDiagnosticStorage:
 
     def _upload_blocking(self, file_name: str, jpeg_bytes: bytes):
         blob = self.bucket.blob(file_name)
-        blob.upload_from_string(jpeg_bytes, content_type="image/jpeg")
+        blob.upload_from_string(jpeg_bytes, content_type="image/jpeg", timeout=30)
 
     def close(self):
         if self._executor is not None:

@@ -1,5 +1,6 @@
 """Transport-agnostic token-bucket policy for one phone session."""
 
+import threading
 import time
 
 
@@ -12,12 +13,14 @@ class FrameRateLimiter:
         self.clock = clock
         self.tokens = burst
         self.last = clock()
+        self._lock = threading.Lock()
 
     def allow(self) -> bool:
-        now = self.clock()
-        self.tokens = min(self.burst, self.tokens + (now - self.last) * self.rate_per_second)
-        self.last = now
-        if self.tokens < 1.0:
-            return False
-        self.tokens -= 1.0
-        return True
+        with self._lock:
+            now = self.clock()
+            self.tokens = min(self.burst, self.tokens + (now - self.last) * self.rate_per_second)
+            self.last = now
+            if self.tokens < 1.0:
+                return False
+            self.tokens -= 1.0
+            return True

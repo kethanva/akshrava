@@ -88,7 +88,9 @@ class FrameEncoder {
         return jpegScratch.toByteArray()
     }
 
-    @Synchronized
+    // NOT thread-safe: toNv21 writes directly to nv21Scratch. Only call from the
+    // single-thread frameExecutor (AssistService). @Synchronized was removed to avoid
+    // giving callers a false impression of concurrent safety.
     private fun toNv21(image: ImageProxy): ByteArray {
         val width = image.width
         val height = image.height

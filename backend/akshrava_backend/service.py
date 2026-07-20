@@ -279,6 +279,7 @@ class VisionService:
             self._timeout_streak.pop(key, None)
 
     def _circuit_allows(self, device_id: str) -> None:
+        """Raise RuntimeError if this device's circuit breaker is currently open."""
         until = self._circuit_open_until.get(device_id, 0.0)
         if time.monotonic() < until:
             raise RuntimeError("inference circuit open after repeated timeouts")

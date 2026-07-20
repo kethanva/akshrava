@@ -101,16 +101,24 @@ class CloudFallbackDetector(Detector):
             return [], True
         detections = []
         width = height = 0
-        for item in result.labels:
-            label = _SAFE_LABELS.get(item.label.lower())
-            if label and item.box is not None and item.confidence >= self.min_confidence:
-                box = item.box
-                if item.normalized:
-                    if not width:
-                        with Image.open(io.BytesIO(jpeg)) as image:
-                            width, height = image.size
-                    box = (box[0] * width, box[1] * height, box[2] * width, box[3] * height)
-                detections.append(Detection(label=label, confidence=item.confidence, box=box))
+        try:
+            for item in result.labels:
+                label = _SAFE_LABELS.get(item.label.lower())
+                if label and item.box is not None and item.confidence >= self.min_confidence:
+                    box = item.box
+                    if item.normalized:
+                        if not width:
+                            with Image.open(io.BytesIO(jpeg)) as image:
+                                width, height = image.size
+                        box = (box[0] * width, box[1] * height, box[2] * width, box[3] * height)
+                    detections.append(Detection(label=label, confidence=item.confidence, box=box))
+        except Exception:
+            with self._log_lock:
+                now = time.monotonic()
+                if now - self._last_logged_failure_at >= self._LOG_INTERVAL_S:
+                    self._last_logged_failure_at = now
+                    logger.warning("cloud fallback provider %s failed (image parse)", self.provider.name, exc_info=True)
+            return [], True
         return detections, False
 
     async def detect_async(self, jpeg: bytes) -> List[Detection]:
@@ -128,7 +136,7 @@ class CloudFallbackDetector(Detector):
         import asyncio
         loop = asyncio.get_running_loop()
         try:
-            result = await loop.run_in_executor(None, self.provider.analyze, jpeg)
+            result = await asyncio.wait_for(loop.run_in_executor(None, self.provider.analyze, jpeg), timeout=7.0)
         except Exception:
             with self._log_lock:
                 now = time.monotonic()
@@ -138,16 +146,26 @@ class CloudFallbackDetector(Detector):
             return [], True
         detections = []
         width = height = 0
-        for item in result.labels:
-            label = _SAFE_LABELS.get(item.label.lower())
-            if label and item.box is not None and item.confidence >= self.min_confidence:
-                box = item.box
-                if item.normalized:
-                    if not width:
-                        with Image.open(io.BytesIO(jpeg)) as image:
-                            width, height = image.size
-                    box = (box[0] * width, box[1] * height, box[2] * width, box[3] * height)
-                detections.append(Detection(label=label, confidence=item.confidence, box=box))
+        try:
+            for item in result.labels:
+                label = _SAFE_LABELS.get(item.label.lower())
+                if label and item.box is not None and item.confidence >= self.min_confidence:
+                    box = item.box
+                    if item.normalized:
+                        if not width:
+                            def get_size(j):
+                                with Image.open(io.BytesIO(j)) as img:
+                                    return img.size
+                            width, height = await loop.run_in_executor(None, get_size, jpeg)
+                        box = (box[0] * width, box[1] * height, box[2] * width, box[3] * height)
+                    detections.append(Detection(label=label, confidence=item.confidence, box=box))
+        except Exception:
+            with self._log_lock:
+                now = time.monotonic()
+                if now - self._last_logged_failure_at >= self._LOG_INTERVAL_S:
+                    self._last_logged_failure_at = now
+                    logger.warning("cloud fallback provider %s failed (image parse)", self.provider.name, exc_info=True)
+            return [], True
         return detections, False
 
     def requires_serial_execution(self) -> bool:
@@ -171,9 +189,14 @@ class AwsRekognitionProvider(CloudImageProvider):
     def __init__(self, region: str):
         try:
             import boto3
+            from botocore.config import Config
         except ImportError as exc:
             raise CloudProviderError("install backend[aws] for AWS cloud fallback") from exc
-        self.client = boto3.client("rekognition", region_name=region)
+        self.client = boto3.client(
+            "rekognition", 
+            region_name=region, 
+            config=Config(connect_timeout=3, read_timeout=5, retries={"max_attempts": 1})
+        )
 
     def analyze(self, jpeg: bytes) -> CloudResult:
         response = self.client.detect_labels(
@@ -205,7 +228,7 @@ class GcpVisionProvider(CloudImageProvider):
 
     def analyze(self, jpeg: bytes) -> CloudResult:
         image = self.vision.Image(content=jpeg)
-        objects = self.client.object_localization(image=image).localized_object_annotations
+        objects = self.client.object_localization(image=image, timeout=5.0).localized_object_annotations
         parsed = []
         for item in objects:
             vertices = item.bounding_poly.normalized_vertices
@@ -229,7 +252,12 @@ class AzureImageAnalysisProvider(CloudImageProvider):
         except ImportError as exc:
             raise CloudProviderError("install backend[azure] for Azure cloud fallback") from exc
         self.features = VisualFeatures
-        self.client = ImageAnalysisClient(endpoint=endpoint, credential=AzureKeyCredential(key))
+        self.client = ImageAnalysisClient(
+            endpoint=endpoint, 
+            credential=AzureKeyCredential(key),
+            connection_timeout=3,
+            read_timeout=5,
+        )
 
     def analyze(self, jpeg: bytes) -> CloudResult:
         result = self.client.analyze(

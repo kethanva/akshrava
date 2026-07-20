@@ -59,9 +59,11 @@ class ProtocolClient(
         const val MAX_BACKOFF_ATTEMPT = 4          // 2^4 = 16 s, capped to 10 s
         const val MAX_BACKOFF_SECONDS = 10.0
         /**
-         * Cloud remote YOLO RTT is typically 400–900 ms (often >1 s on LTE).
-         * Match the server pilot budget (ALERT_MAX_AGE_MS=2500) so real detections
-         * are spoken instead of silently discarded as "stale".
+         * End-to-end phone freshness budget: age = elapsedRealtime() - capture_mono_ms.
+         * The server also rejects late frames, but its ALERT_MAX_AGE_MS (default 500ms) only
+         * covers server-side inference latency. This client budget covers the full round trip
+         * (network + inference + network return). CPU YOLO on GCP can take several seconds,
+         * so a generous client window avoids discarding real detections on slow links.
          */
         const val STALE_ALERT_MS = 2500L
         /** Look answers use the full freshness budget even when the hazard is S1. */
@@ -249,6 +251,9 @@ class ProtocolClient(
         sessionReady = false
         visionEnabled = false
         cloudFallbackWarningAnnounced = false
+        // #region agent log
+        Log.i("AkshravaDebug", "ws_open endpoint=$endpoint")
+        // #endregion
         if (outageAnnounced) {
             outageAnnounced = false
             alertManager.status("Connection restored")
@@ -266,6 +271,9 @@ class ProtocolClient(
             "ready" -> {
                 sessionReady = true
                 visionEnabled = payload.optBoolean("vision_enabled", false)
+                // #region agent log
+                Log.i("AkshravaDebug", "ws_ready vision_enabled=$visionEnabled session_ready=$sessionReady")
+                // #endregion
                 val advertised = payload.optInt("max_in_flight", 1).coerceIn(1, 2)
                 maxInFlight = advertised
                 if (visionEnabled) {
@@ -407,6 +415,9 @@ class ProtocolClient(
     private fun handleDrop() {
         settleFrame()
         cancelSettleTimeout()
+        // #region agent log
+        Log.i("AkshravaDebug", "ws_drop sessionReady=$sessionReady visionEnabled=$visionEnabled")
+        // #endregion
         sessionReady = false
         visionEnabled = false
         if (closedByUser) return

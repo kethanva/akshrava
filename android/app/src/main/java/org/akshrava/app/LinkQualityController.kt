@@ -39,12 +39,14 @@ class LinkQualityController {
 
     fun ewmaRttMs(): Double = ewmaRttMs
 
+    @Synchronized
     fun onServerQuality(quality: Quality): Quality {
         serverQuality = quality
         return republish()
     }
 
     /** Successful frame settle round-trip; recovers stress when the link is healthy. */
+    @Synchronized
     fun onRoundTrip(rttMs: Long): Quality {
         if (rttMs < 0L) return effective
         ewmaRttMs = if (ewmaRttMs <= 0.0) {
@@ -60,6 +62,7 @@ class LinkQualityController {
     }
 
     /** In-flight frame never settled in time — shed bytes before the next attempt. */
+    @Synchronized
     fun onSettleTimeout(): Quality {
         stress = (stress + 1).coerceAtMost(MAX_STRESS)
         return republish()

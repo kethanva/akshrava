@@ -123,11 +123,11 @@ async def _batch_loop(app: FastAPI):
             if len(detections) != len(batch):
                 raise RuntimeError("detector batch response length mismatch")
             for (_, item_future), item_detections in zip(batch, detections):
-                if not item_future.cancelled():
+                if not item_future.done():
                     item_future.set_result(item_detections)
         except Exception as exc:
             for _, item_future in batch:
-                if not item_future.cancelled():
+                if not item_future.done():
                     item_future.set_exception(exc)
 
 

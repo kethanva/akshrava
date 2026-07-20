@@ -39,6 +39,7 @@ class Metrics:
         with self._lock:
             self._frames_total += 1
             self._alerts_total += int(has_alert)
+            inference_ms = max(0, int(inference_ms))
             self._inference_sum_ms += inference_ms
             self._inference_count += 1
             for bucket in self._INFERENCE_BUCKETS:

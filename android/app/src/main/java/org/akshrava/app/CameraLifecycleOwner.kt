@@ -1,5 +1,7 @@
 package org.akshrava.app
 
+import android.os.Handler
+import android.os.Looper
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
@@ -11,6 +13,7 @@ import androidx.lifecycle.LifecycleRegistry
  */
 class CameraLifecycleOwner : LifecycleOwner {
     private val registry = LifecycleRegistry(this)
+    private val handler = Handler(Looper.getMainLooper())
 
     init {
         registry.currentState = Lifecycle.State.INITIALIZED
@@ -20,13 +23,17 @@ class CameraLifecycleOwner : LifecycleOwner {
         get() = registry
 
     fun resume() {
-        registry.currentState = Lifecycle.State.CREATED
-        registry.currentState = Lifecycle.State.STARTED
-        registry.currentState = Lifecycle.State.RESUMED
+        handler.post {
+            registry.currentState = Lifecycle.State.CREATED
+            registry.currentState = Lifecycle.State.STARTED
+            registry.currentState = Lifecycle.State.RESUMED
+        }
     }
 
     fun destroy() {
-        if (registry.currentState == Lifecycle.State.INITIALIZED) return
-        registry.currentState = Lifecycle.State.DESTROYED
+        handler.post {
+            if (registry.currentState == Lifecycle.State.INITIALIZED) return@post
+            registry.currentState = Lifecycle.State.DESTROYED
+        }
     }
 }

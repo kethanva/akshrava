@@ -15,10 +15,9 @@ from typing import Any, Dict
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         payload: Dict[str, Any] = {
-            # Cloud Logging reads "time" as the entry timestamp and "severity" as the level.
-            # These were both keyed "severity" -- the time value was silently dropped and every
-            # structured log line lost its own timestamp.
-            "time": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            # Use the record's own event timestamp, not wall-clock time at formatting.
+            # Delayed or batched handlers would otherwise corrupt trace chronology.
+            "time": datetime.fromtimestamp(record.created, timezone.utc).isoformat().replace("+00:00", "Z"),
             "severity": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),

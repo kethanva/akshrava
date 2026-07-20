@@ -104,6 +104,9 @@ class AssistService : LifecycleService() {
         if (!stopping && client != null) return
         stopping = false
         val config = AppConfigStore.load(this)
+        // #region agent log
+        Log.i("AkshravaDebug", "svc_start endpoint=${config.endpoint} calib=${config.calibrationId} lang=${config.language} hasToken=${config.deviceToken.isNotBlank()}")
+        // #endregion
         if (!endpointAllowed(config.endpoint)) {
             stopSelf()
             return
@@ -225,6 +228,9 @@ class AssistService : LifecycleService() {
                 analysis.setAnalyzer(exec) { image -> analyzeImage(image) }
                 provider.unbindAll()
                 provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+                // #region agent log
+                Log.i("AkshravaDebug", "camera_bound ok rotation=$rotation analysisSide=$analysisSide")
+                // #endregion
                 Log.i("AkshravaVision", "camera bound preview+analysis rotation=$rotation")
             } catch (ex: Exception) {
                 Log.e("AkshravaVision", "camera bind failed", ex)
@@ -255,6 +261,11 @@ class AssistService : LifecycleService() {
             maybeHeartbeat(now)
 
             if (batteryCritical || captureSuspendedForBattery || captureSuspendedForFailure) {
+                // #region agent log
+                if (framesAnalyzed <= 5L || framesAnalyzed % 30L == 0L) {
+                    Log.i("AkshravaDebug", "frame_drop suspended battCrit=$batteryCritical suspBatt=$captureSuspendedForBattery suspFail=$captureSuspendedForFailure n=$framesAnalyzed")
+                }
+                // #endregion
                 return
             }
             // Bench mode (vision_enabled=false) or a dead vendor means nothing sent right now
@@ -262,11 +273,23 @@ class AssistService : LifecycleService() {
             // entirely rather than doing that work and then having sendFrame() discard it --
             // this is heat and battery burned on the donated phones that can least afford it.
             val currentClient = client
-            if (currentClient == null || !currentClient.canStream()) return
+            if (currentClient == null || !currentClient.canStream()) {
+                // #region agent log
+                if (framesAnalyzed <= 5L || framesAnalyzed % 30L == 0L) {
+                    Log.i("AkshravaDebug", "frame_drop canStream=false clientNull=${currentClient == null} n=$framesAnalyzed")
+                }
+                // #endregion
+                return
+            }
 
             // One encode/upload at a time. CameraX KEEP_ONLY_LATEST already sheds older
             // buffers; this flag also stops us from racing the WebSocket in-flight slot.
-            if (!framePending.compareAndSet(false, true)) return
+            if (!framePending.compareAndSet(false, true)) {
+                // #region agent log
+                if (framesAnalyzed <= 5L) Log.i("AkshravaDebug", "frame_drop framePending stuck n=$framesAnalyzed")
+                // #endregion
+                return
+            }
             val priority = lookRequested.getAndSet(false)
             // Headset long-press look or a fresh turn asks for one immediate frame.
             val turning = poseTracker?.consumeTurn() ?: false
@@ -276,6 +299,12 @@ class AssistService : LifecycleService() {
             }
 
             val thumbnail = FrameGate.luma(image)
+            // #region agent log
+            if (framesAnalyzed <= 5L) {
+                val avgLuma = if (thumbnail.isNotEmpty()) thumbnail.sum() / thumbnail.size else 0
+                Log.i("AkshravaDebug", "frame_luma n=$framesAnalyzed avgLuma=$avgLuma nearBlack=${FrameGate.isNearBlack(thumbnail)}")
+            }
+            // #endregion
             if (FrameGate.isNearBlack(thumbnail)) {
                 framePending.set(false)
                 if (now - lastDarkAnnounceMs > 8_000L) {
@@ -340,8 +369,16 @@ class AssistService : LifecycleService() {
                 mode = if (priority) "priority" else "normal",
                 priority = priority
             )
+            // #region agent log
+            if (frameId <= 5L || frameId % 10L == 0L) {
+                Log.i("AkshravaDebug", "frame_sent id=$frameId sent=$sent size=${frame.jpeg.size}")
+            }
+            // #endregion
             if (!sent) framePending.set(false)
-        } catch (_: Exception) {
+        } catch (ex: Exception) {
+            // Log before recovering — silent failures in the analysis loop are dangerous
+            // on a safety-critical system and produce no diagnostic output otherwise.
+            Log.e("AkshravaVision", "analyzeImage error (frames=$framesAnalyzed)", ex)
             framePending.set(false)
             updateNotification("Camera processing error")
         } finally {
@@ -389,7 +426,10 @@ class AssistService : LifecycleService() {
     private fun maybeCheckThermal(now: Long) {
         if (now - lastThermalCheckMs < THERMAL_CHECK_INTERVAL_MS) return
         lastThermalCheckMs = now
-        val temperature = batteryTemperatureC()
+        // Query the sticky battery broadcast once and share the result for both thermal and
+        // battery-level checks, avoiding two binder calls per thermal interval.
+        val batteryStatus = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val temperature = batteryTemperatureC(batteryStatus)
         if (temperature >= THERMAL_THROTTLE_C && !thermalThrottled) {
             thermalThrottled = true
             capturePolicy.thermalThrottled = true
@@ -400,9 +440,8 @@ class AssistService : LifecycleService() {
         }
         
         // Check battery level
-        val status = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-        val level = status?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
-        val scale = status?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+        val level = batteryStatus?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = batteryStatus?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
         if (level > 0 && scale > 0) {
             val batteryPct = level * 100 / scale
             if (batteryPct < 10) {
@@ -433,9 +472,8 @@ class AssistService : LifecycleService() {
         }
     }
 
-    private fun batteryTemperatureC(): Float {
-        val status = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-        val tenths = status?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1) ?: -1
+    private fun batteryTemperatureC(batteryStatus: android.content.Intent?): Float {
+        val tenths = batteryStatus?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1) ?: -1
         return if (tenths > 0) tenths / 10f else -1f
     }
 

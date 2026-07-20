@@ -30,9 +30,10 @@ def _ssl_kwargs_for_url(url: str) -> Dict[str, Any]:
             "ssl_ca_data": ca_pem,
             "ssl_check_hostname": False,
         }
-    # Prefer REDIS_CA_CERT_FILE from Secret Manager; insecure fallback keeps pilot up.
+    # No explicit CA: let redis-py use the system trust store rather than disabling
+    # verification. A missing CA outside development is a deployment error, not
+    # something to silently work around (fail-closed over fail-open).
     return {
-        "ssl_cert_reqs": "none",
         "ssl_check_hostname": False,
     }
 

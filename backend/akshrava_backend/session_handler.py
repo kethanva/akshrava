@@ -86,6 +86,12 @@ class FrameStreamHandler:
                 self.discard_next_binary = True
                 return {"type": "error", "code": "non_monotonic_capture"}
 
+            # NOTE: last_capture_mono_ms is updated only when analysis proceeds (in
+            # application.py). A frame rejected here (rate-limited, size error, etc.)
+            # does NOT advance the counter — intentionally. The monotonic sequence
+            # governs successfully accepted frames, so a rejected frame never consumes
+            # the freshness budget of the next valid one.
+
             if header.priority:
                 rate_id = "%s:priority" % self.device_id
                 rate_per_second, burst = self.priority_rate, self.priority_burst
