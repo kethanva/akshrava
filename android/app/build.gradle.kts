@@ -40,10 +40,11 @@ android {
     buildTypes {
         debug {
             // Supervised GCP pilot WSS — volunteer screen remains editable.
+            val wssUrl = System.getenv("AKSHRAVA_WSS_URL") ?: "wss://<your-cloud-run-endpoint>/v1/session"
             buildConfigField(
                 "String",
                 "DEFAULT_WSS_ENDPOINT",
-                "\"wss://akshrava-api-c7d3j4nzdq-uc.a.run.app/v1/session\""
+                "\"$wssUrl\""
             )
         }
         release {
@@ -55,10 +56,11 @@ android {
             // Release phones must have a real, secure endpoint by default. Provisioning may
             // still override this value, but example.invalid made every unconfigured release
             // build silently fail before it could reach the backend.
+            val wssUrl = System.getenv("AKSHRAVA_WSS_URL") ?: "wss://<your-cloud-run-endpoint>/v1/session"
             buildConfigField(
                 "String",
                 "DEFAULT_WSS_ENDPOINT",
-                "\"wss://akshrava-api-c7d3j4nzdq-uc.a.run.app/v1/session\""
+                "\"$wssUrl\""
             )
         }
     }

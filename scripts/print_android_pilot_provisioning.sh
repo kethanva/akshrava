@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEVICE_ID="${1:-android-pilot-$(date +%s)}"
 DAYS="${2:-1}"
-WSS_URL="${AKSHRAVA_WSS_URL:-wss://akshrava-api-c7d3j4nzdq-uc.a.run.app/v1/session}"
+WSS_URL="${AKSHRAVA_WSS_URL:-wss://<your-cloud-run-endpoint>/v1/session}"
 CALIBRATION_ID="${AKSHRAVA_CALIBRATION_ID:-e2e-r0}"
 
 : "${GOOGLE_APPLICATION_CREDENTIALS:?Set GOOGLE_APPLICATION_CREDENTIALS to the deploy SA JSON}"

@@ -17,6 +17,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [ -f "$REPO_ROOT/.env" ]; then set -a; source "$REPO_ROOT/.env"; set +a; fi
 ANDROID_DIR="$REPO_ROOT/android"
 APK_PATH="$ANDROID_DIR/app/build/outputs/apk/debug/app-debug.apk"
 
@@ -222,7 +223,7 @@ echo "   ✅  Akshrava is installed and launched!"
 echo "=============================================="
 echo ""
 echo "Next steps — enter in the app:"
-echo "  WSS endpoint:  wss://akshrava-api-c7d3j4nzdq-uc.a.run.app/v1/session"
+echo "  WSS endpoint:  wss://<your-cloud-run-endpoint>/v1/session"
 echo "  Device token:  Run: GOOGLE_APPLICATION_CREDENTIALS=<your-creds.json> ./scripts/print_android_pilot_provisioning.sh"
 echo "  Calibration:   e.g. 'volunteer-test-1'"
 echo ""

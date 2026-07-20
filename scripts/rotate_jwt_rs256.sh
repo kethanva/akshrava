@@ -12,7 +12,9 @@
 #   ./scripts/rotate_jwt_rs256.sh [project_id]
 set -euo pipefail
 
-PROJECT_ID="${1:-project-704ccb8e-8b12-4da6-a3f}"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [ -f "$ROOT/.env" ]; then set -a; source "$ROOT/.env"; set +a; fi
+PROJECT_ID="${1:-${AKSHRAVA_PROJECT_ID:-<your-gcp-project-id>}}"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 

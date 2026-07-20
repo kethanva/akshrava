@@ -6,7 +6,7 @@
 #   enable_cloud_armor = false
 # Flip only after reviewing `terraform plan` and confirming GPU/CPU quota + DNS for the LB cert.
 
-project_id  = "project-704ccb8e-8b12-4da6-a3f"
+project_id  = "<your-gcp-project-id>"
 region      = "us-central1"
 zone        = "us-central1-a"
 environment = "production"

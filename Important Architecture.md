@@ -25,7 +25,7 @@ Silence never means safety. The app must state `Camera view unclear`, `Limited a
 ## 2. End-to-end system
 
 **Live supervised GCP pilot (2026-07):** Android `ProtocolClient` → Cloud Run
-`wss://akshrava-api-c7d3j4nzdq-uc.a.run.app/v1/session` (public invoker + RS256 JWT) → Redis
+`wss://<cloud-run-endpoint>/v1/session` (public invoker + RS256 JWT) → Redis
 admission → VPC connector → private DNS `worker.akshrava.internal:8443` (Caddy mTLS) → **CPU**
 YOLO worker (`worker_use_gpu=false`; GPU quota 0). Cloud SQL, Memorystore Redis (BASIC), Secret
 Manager, Artifact Registry, diagnostics GCS, COS iptables `:8443`, and IAP SSH firewall are in
@@ -156,8 +156,7 @@ Reconnect uses exponential backoff with jitter and re-authentication, never a re
 
 ## 4. Wire contract and trust boundary
 
-The production endpoint is `wss://HOST/v1/session`. The live supervised pilot uses
-`wss://akshrava-api-c7d3j4nzdq-uc.a.run.app/v1/session` with a public Cloud Run invoker and
+The production endpoint is `wss://HOST/v1/session`. The phone WebSocket endpoint sits behind the Cloud Run load balancer at `wss://<cloud-run-endpoint>/v1/session` with a public Cloud Run invoker and
 app-level RS256 JWT (not a private-invoker-only edge). A short-lived device JWT is sent in the
 WebSocket upgrade request and is bound to device/session claims. Development may use `ws://` and
 `dev-device-token` only in debug/local workflows; release builds accept WSS only.

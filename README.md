@@ -57,7 +57,7 @@ flowchart TB
 
 The live supervised-pilot path is:
 
-`Android ProtocolClient` → Cloud Run `wss://akshrava-api-c7d3j4nzdq-uc.a.run.app/v1/session` → Redis admission → Serverless VPC connector → `worker.akshrava.internal:8443` → Caddy mTLS → remote CPU YOLO worker.
+`Android ProtocolClient` → Cloud Run `wss://<cloud-run-endpoint>/v1/session` → Redis admission → Serverless VPC connector → `worker.akshrava.internal:8443` → Caddy mTLS → remote CPU YOLO worker.
 
 The current worker setting is `worker_use_gpu=false`; GPU quota is not assumed. Cloud SQL, Memorystore Redis, Secret Manager, Artifact Registry, diagnostics GCS, private networking, COS firewall rules, IAP SSH, Cloud Monitoring, and alert policies are defined under [`gcp/`](gcp/). The root `infra/` directory is the local/single-host Compose alternative, not the live pilot edge.
 
@@ -79,7 +79,7 @@ sequenceDiagram
   Phone->>Phone: pose, blur, duplicate and cadence gates
   Phone->>Phone: NV21 rotate/scale and JPEG encode
   Phone->>API: JSON frame header, then binary JPEG over WSS
-  API->>Redis: authenticate/admit/rate-limit; claim replay keys
+  API->>Redis: authenticate/admit/rate-limit and claim replay keys
   API->>Worker: raw image/jpeg + HMAC timestamp/nonce over mTLS
   Worker-->>API: detection boxes and labels
   API->>Policy: associate tracks; conservative score and compose

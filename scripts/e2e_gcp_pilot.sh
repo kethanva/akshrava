@@ -4,13 +4,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+if [ -f "$ROOT/.env" ]; then set -a; source "$ROOT/.env"; set +a; fi
 DEVICE_ID="${1:-e2e-pilot-$(date +%s)}"
 BASE_URL="${AKSHRAVA_BASE_URL:-https://akshrava-api-c7d3j4nzdq-uc.a.run.app}"
 WSS_URL="${AKSHRAVA_WSS_URL:-${BASE_URL/https/wss}/v1/session}"
 
 export PATH="${HOME}/google-cloud-sdk/bin:${PATH}"
 : "${GOOGLE_APPLICATION_CREDENTIALS:?Set GOOGLE_APPLICATION_CREDENTIALS to the deploy SA JSON}"
-: "${CLOUDSDK_CORE_PROJECT:=project-704ccb8e-8b12-4da6-a3f}"
+: "${CLOUDSDK_CORE_PROJECT:=${AKSHRAVA_PROJECT_ID:-<your-gcp-project-id>}}"
 export CLOUDSDK_CORE_PROJECT CLOUDSDK_CORE_DISABLE_PROMPTS=1
 export CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE="${GOOGLE_APPLICATION_CREDENTIALS}"
 
