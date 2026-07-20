@@ -98,12 +98,31 @@ class ProtocolClient(
         fun streamEnabled(sessionReady: Boolean, visionEnabled: Boolean): Boolean =
             sessionReady && visionEnabled
 
+        /**
+         * Soft server rejects: free the in-flight slot and keep the socket. These are framing /
+         * admission / overload conditions, not a dead vision vendor.
+         */
+        fun isSoftServerError(code: String): Boolean = when (code) {
+            "worker_saturated",
+            "frame_rate_limited",
+            "non_monotonic_capture",
+            "invalid_image_size",
+            "invalid_jpeg",
+            "jpeg_dimension_mismatch",
+            "unsupported_frame_size",
+            "unknown_message" -> true
+            else -> false
+        }
+
         /** Sanitized class for operator logs; neither endpoint nor server body is retained. */
         fun transportFailureClass(httpStatus: Int?): String = when (httpStatus) {
             401, 403 -> "authentication"
             null -> "transport"
             else -> "http"
         }
+
+        /** App-level ping keeps the Redis admission lease warm when capture is briefly quiet. */
+        const val APP_PING_INTERVAL_MS = 60_000L
     }
     private val reconnect: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
     private val inFlight = AtomicBoolean(false)
@@ -119,6 +138,7 @@ class ProtocolClient(
     @Volatile private var cloudFallbackWarningAnnounced = false
     @Volatile private var pendingLookTimeout: ScheduledFuture<*>? = null
     @Volatile private var pendingSettleTimeout: ScheduledFuture<*>? = null
+    @Volatile private var pendingAppPing: ScheduledFuture<*>? = null
     @Volatile private var pendingLook = false
     @Volatile private var frameSentAtMonoMs = 0L
     @Volatile private var consecutiveSettleTimeouts = 0
@@ -302,20 +322,24 @@ class ProtocolClient(
                 )
                 if (visionEnabled) {
                     onState("Vision assistance connected")
+                    scheduleAppPing()
                 } else {
+                    cancelAppPing()
                     val message = "Vision model unavailable. Use cane or guide."
                     onState(message)
                     alertManager.status(message)
                 }
             }
             "error" -> {
-                when (payload.optString("code")) {
-                    "worker_saturated", "frame_rate_limited" -> {
+                val code = payload.optString("code")
+                when {
+                    isSoftServerError(code) -> {
                         // Soft shed: keep socket, free in-flight slot, let the next frame retry.
+                        Log.i("AkshravaDebug", "ws_soft_error code=$code")
                         settleFrame()
                         onState("Server busy; shedding frames")
                     }
-                    "vision_unavailable" -> {
+                    code == "vision_unavailable" -> {
                         sessionReady = false
                         visionEnabled = false
                         settleFrame()
@@ -327,11 +351,13 @@ class ProtocolClient(
                         socket?.close(1011, "vision unavailable")
                     }
                     else -> {
+                        Log.w("AkshravaDebug", "ws_hard_error code=$code")
                         settleFrame()
                         onState("Server protocol error")
                     }
                 }
             }
+            "pong" -> Unit
             "quality" -> onQuality(Quality.fromServer(
                 payload.optInt("max_side", 640),
                 payload.optInt("jpeg_q", 55),
@@ -441,6 +467,7 @@ class ProtocolClient(
     private fun handlePermanentFailure(message: String) {
         settleFrame()
         cancelSettleTimeout()
+        cancelAppPing()
         sessionReady = false
         visionEnabled = false
         closedByUser = true
@@ -453,6 +480,7 @@ class ProtocolClient(
     private fun handleDrop() {
         settleFrame()
         cancelSettleTimeout()
+        cancelAppPing()
         // #region agent log
         Log.i("AkshravaDebug", "ws_drop sessionReady=$sessionReady visionEnabled=$visionEnabled")
         // #endregion
@@ -468,6 +496,25 @@ class ProtocolClient(
             alertManager.status(message)
         }
         scheduleReconnect()
+    }
+
+    private fun scheduleAppPing() {
+        cancelAppPing()
+        pendingAppPing = runCatching {
+            reconnect.scheduleWithFixedDelay({
+                if (closedByUser || !canStream()) return@scheduleWithFixedDelay
+                val ws = socket ?: return@scheduleWithFixedDelay
+                // OkHttp protocol pings do not reach FastAPI; this JSON ping renews admission.
+                if (!ws.send(JSONObject().put("type", "ping").toString())) {
+                    Log.i("AkshravaDebug", "ws_app_ping_failed")
+                }
+            }, APP_PING_INTERVAL_MS, APP_PING_INTERVAL_MS, TimeUnit.MILLISECONDS)
+        }.getOrNull()
+    }
+
+    private fun cancelAppPing() {
+        pendingAppPing?.cancel(false)
+        pendingAppPing = null
     }
 
     private fun scheduleReconnect() {
@@ -492,6 +539,7 @@ class ProtocolClient(
         pendingReconnect?.cancel(false)
         pendingReconnect = null
         cancelSettleTimeout()
+        cancelAppPing()
         sessionReady = false
         visionEnabled = false
         socket?.close(1000, "user stopped")

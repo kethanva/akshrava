@@ -55,4 +55,14 @@ class ProtocolClientTest {
         assertEquals("http", ProtocolClient.transportFailureClass(503))
         assertEquals("transport", ProtocolClient.transportFailureClass(null))
     }
+
+    @Test
+    fun softServerErrorsKeepTheSocketAndFreeTheInFlightSlot() {
+        assertTrue(ProtocolClient.isSoftServerError("worker_saturated"))
+        assertTrue(ProtocolClient.isSoftServerError("frame_rate_limited"))
+        assertTrue(ProtocolClient.isSoftServerError("jpeg_dimension_mismatch"))
+        assertTrue(ProtocolClient.isSoftServerError("non_monotonic_capture"))
+        assertFalse(ProtocolClient.isSoftServerError("vision_unavailable"))
+        assertFalse(ProtocolClient.isSoftServerError("protocol_violation"))
+    }
 }

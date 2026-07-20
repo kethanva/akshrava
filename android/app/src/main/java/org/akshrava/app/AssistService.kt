@@ -49,6 +49,9 @@ class AssistService : LifecycleService() {
         private const val WAKE_LOCK_TIMEOUT_MS = 60 * 60_000L
         /** Hard upper bound on FGS teardown even if TTS never completes. */
         private const val STOP_HARD_TIMEOUT_MS = 3_000L
+        /** Rebind CameraX when analysis callbacks go silent while the session is meant to be live. */
+        private const val CAMERA_STALL_REBIND_MS = 15_000L
+        private const val CAMERA_STALL_CHECK_MS = 5_000L
     }
 
     private var frameExecutor: ExecutorService? = null
@@ -77,10 +80,11 @@ class AssistService : LifecycleService() {
     private var lastBatteryWarningMs = 0L
     private var lastCameraUnclearMs = 0L
     private var lastHeartbeatMs = 0L
+    private var lastAnalyzeAtMs = 0L
     private var consecutiveBlurredFrames = 0
     private var previousThumbnail: IntArray? = null
     private val capturePolicy = CapturePolicy()
-    private val linkQuality = LinkQualityController()
+    private var linkQuality = LinkQualityController()
     @Volatile private var thermalThrottled = false
     @Volatile private var batteryLow = false
     @Volatile private var batteryCritical = false
@@ -90,6 +94,25 @@ class AssistService : LifecycleService() {
     @Volatile private var stopping = false
     /** Last analysis target side; rebind when server/link quality crosses a resolution rung. */
     @Volatile private var boundAnalysisMaxSide = 640
+    /** Quality rung requested while a frame was in flight; applied on settle. */
+    @Volatile private var deferredAnalysisSide: Int? = null
+
+    private val cameraStallCheck = object : Runnable {
+        override fun run() {
+            if (stopping || client == null) return
+            val now = SystemClock.elapsedRealtime()
+            val last = lastAnalyzeAtMs
+            if (last > 0L && now - last > CAMERA_STALL_REBIND_MS) {
+                Log.w("AkshravaDebug", "camera_stall rebind after=${now - last}ms")
+                lastAnalyzeAtMs = now
+                framePending.set(false)
+                deferredAnalysisSide = null
+                alertManager?.status("Camera stalled. Recovering.")
+                bindCamera()
+            }
+            mainHandler.postDelayed(this, CAMERA_STALL_CHECK_MS)
+        }
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -100,7 +123,13 @@ class AssistService : LifecycleService() {
     }
 
     private fun startAssistance() {
-        if (!stopping && client != null) return
+        if (stopping) return
+        // Pressing Start while a half-dead session is still up used to no-op (client != null),
+        // forcing Stop→Start. Rebuild in place so Start itself is the recovery action.
+        if (client != null) {
+            Log.i("AkshravaDebug", "svc_restart rebuilding live session")
+            teardownSessionResources(keepForeground = true)
+        }
         stopping = false
         val config = AppConfigStore.load(this)
         // #region agent log
@@ -123,15 +152,28 @@ class AssistService : LifecycleService() {
         }
         val httpClient = OkHttpClient.Builder().pingInterval(20, java.util.concurrent.TimeUnit.SECONDS).build().also { http = it }
         // Donated / low-RAM phones start on a cheaper ladder before the first server quality hint.
+        linkQuality = LinkQualityController()
         quality = DeviceCapability.initialQuality(this)
         capturePolicy.quality = quality
+        capturePolicy.thermalThrottled = thermalThrottled
+        capturePolicy.batteryLow = batteryLow
         boundAnalysisMaxSide = analysisTargetSide(quality.maxSide)
+        deferredAnalysisSide = null
+        framePending.set(false)
+        framesAnalyzed = 0L
+        frameId = 0L
+        lastAnalyzeAtMs = 0L
+        lastCaptureMs = 0L
+        previousThumbnail = null
+        consecutiveBlurredFrames = 0
+        captureSuspendedForBattery = false
+        captureSuspendedForFailure = false
         val pc = ProtocolClient(
             endpoint = config.endpoint,
             token = config.deviceToken,
             alertManager = am,
             onState = { status -> updateNotification(status) },
-            onFrameSettled = { framePending.set(false) },
+            onFrameSettled = { onFrameSlotSettled() },
             onQuality = { updated -> applyEffectiveQuality(linkQuality.onServerQuality(updated)) },
             onHighAlert = {
                 capturePolicy.markHighAlert(SystemClock.elapsedRealtime())
@@ -163,7 +205,46 @@ class AssistService : LifecycleService() {
         bindCamera()
         SessionFlags.setActive(this, true)
         Watchdog.schedule(this)
-        am.status("Assistance started")
+        mainHandler.removeCallbacks(cameraStallCheck)
+        mainHandler.postDelayed(cameraStallCheck, CAMERA_STALL_CHECK_MS)
+        val keepScreenHint = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+            !android.provider.Settings.canDrawOverlays(this)
+        // Without overlay keep-alive, OEM ROMs often kill CameraX after the display sleeps.
+        am.status(
+            if (keepScreenHint) {
+                "Assistance started. Keep the screen on so the camera can see."
+            } else {
+                "Assistance started"
+            }
+        )
+    }
+
+    /**
+     * Drop camera / socket / TTS resources without ending the foreground service.
+     * Used when Start is pressed again to recover a stuck live session.
+     */
+    private fun teardownSessionResources(keepForeground: Boolean) {
+        mainHandler.removeCallbacks(cameraStallCheck)
+        bindGeneration.incrementAndGet()
+        headsetControls?.stop()
+        headsetControls = null
+        screenKeepAlive?.stop(); screenKeepAlive = null
+        cameraProvider?.unbindAll()
+        previewDrain?.release(); previewDrain = null
+        cameraLifecycleOwner?.destroy(); cameraLifecycleOwner = null
+        client?.close(); client = null
+        alertManager?.shutdown(); alertManager = null
+        poseTracker?.stop(); poseTracker = null
+        frameExecutor?.shutdownNow(); frameExecutor = null
+        frameEncoder = null
+        wakeLock?.let { if (it.isHeld) it.release(); wakeLock = null }
+        http = null
+        framePending.set(false)
+        deferredAnalysisSide = null
+        if (!keepForeground) {
+            SessionFlags.setActive(this, false)
+            Watchdog.cancel(this)
+        }
     }
 
     private fun endpointAllowed(endpoint: String): Boolean {
@@ -259,10 +340,11 @@ class AssistService : LifecycleService() {
         var closed = false
         try {
             framesAnalyzed += 1
+            val now = SystemClock.elapsedRealtime()
+            lastAnalyzeAtMs = now
             if (framesAnalyzed == 1L || framesAnalyzed % 30L == 0L) {
                 Log.i("AkshravaVision", "analyze frames=$framesAnalyzed ${image.width}x${image.height}")
             }
-            val now = SystemClock.elapsedRealtime()
             maybeCheckThermal(now)
             // Heartbeat means "the camera pipeline is alive", not "a frame was uploaded". It
             // must fire before any of the gates below (battery suspend, pending-frame,
@@ -397,16 +479,37 @@ class AssistService : LifecycleService() {
         }
     }
 
+    private fun onFrameSlotSettled() {
+        framePending.set(false)
+        val deferred = deferredAnalysisSide ?: return
+        if (stopping || client == null) return
+        if (deferred != boundAnalysisMaxSide) {
+            scheduleCameraRebind(deferred)
+        } else {
+            deferredAnalysisSide = null
+        }
+    }
+
     private fun applyEffectiveQuality(updated: Quality) {
         quality = updated
         capturePolicy.quality = updated
         val target = analysisTargetSide(updated.maxSide)
-        if (target != boundAnalysisMaxSide && !stopping && client != null) {
-            // Coalesce: mark the rung before rebind so rapid RTT updates do not stack binds.
-            boundAnalysisMaxSide = target
-            ContextCompat.getMainExecutor(this).execute {
-                if (!stopping) bindCamera()
-            }
+        if (target == boundAnalysisMaxSide || stopping || client == null) return
+        // Rebinding CameraX mid-upload races the one-in-flight slot and can desync the
+        // header/JPEG pair on the server (protocol_violation / soft rejects). Wait for settle.
+        if (framePending.get()) {
+            deferredAnalysisSide = target
+            Log.i("AkshravaDebug", "camera_rebind_deferred target=$target")
+            return
+        }
+        scheduleCameraRebind(target)
+    }
+
+    private fun scheduleCameraRebind(target: Int) {
+        boundAnalysisMaxSide = target
+        deferredAnalysisSide = null
+        ContextCompat.getMainExecutor(this).execute {
+            if (!stopping) bindCamera()
         }
     }
 
@@ -564,21 +667,10 @@ class AssistService : LifecycleService() {
         // so make teardown explicitly idempotent rather than recursively re-entering it.
         if (stopping) return
         stopping = true
-        bindGeneration.incrementAndGet()
         mainHandler.removeCallbacksAndMessages(null)
         SessionFlags.setActive(this, false)
         Watchdog.cancel(this)
-        headsetControls?.stop()
-        headsetControls = null
-        screenKeepAlive?.stop(); screenKeepAlive = null
-        cameraProvider?.unbindAll()
-        previewDrain?.release(); previewDrain = null
-        cameraLifecycleOwner?.destroy(); cameraLifecycleOwner = null
-        client?.close(); client = null
-        alertManager?.shutdown(); alertManager = null
-        poseTracker?.stop(); poseTracker = null
-        frameExecutor?.shutdownNow(); frameExecutor = null
-        wakeLock?.let { if (it.isHeld) it.release(); wakeLock = null }
+        teardownSessionResources(keepForeground = false)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }

@@ -23,6 +23,7 @@ class PreviewSurfaceDrain {
     private var handler: Handler? = null
     private var reader: ImageReader? = null
     private val drained = AtomicInteger(0)
+    private val generation = AtomicInteger(0)
 
     fun attach(preview: Preview) {
         preview.setSurfaceProvider { request -> provide(request) }
@@ -30,6 +31,7 @@ class PreviewSurfaceDrain {
 
     private fun provide(request: SurfaceRequest) {
         release()
+        val gen = generation.incrementAndGet()
         val size = request.resolution
         val worker = HandlerThread("akshrava-preview-drain").also { it.start() }
         thread = worker
@@ -51,14 +53,18 @@ class PreviewSurfaceDrain {
         val surface: Surface = imageReader.surface
         request.provideSurface(surface, { it.run() }) { result ->
             Log.i("AkshravaVision", "preview surface result=${result.resultCode}")
-            // CameraX owns teardown signalling; release our reader when the request ends.
-            if (result.resultCode != SurfaceRequest.Result.RESULT_SURFACE_USED_SUCCESSFULLY) {
+            // Only tear down if this callback still owns the active drain. A superseded
+            // SurfaceRequest from a quality rebind must not release the replacement reader.
+            if (gen == generation.get() &&
+                result.resultCode != SurfaceRequest.Result.RESULT_SURFACE_USED_SUCCESSFULLY
+            ) {
                 release()
             }
         }
     }
 
     fun release() {
+        generation.incrementAndGet()
         try {
             reader?.setOnImageAvailableListener(null, null)
             reader?.close()
