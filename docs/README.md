@@ -153,6 +153,15 @@ The universal APK has `minSdk=26` and `targetSdk=36`. Android 8/8.1 remains buil
 Tier-A field devices are Android 10+, 64-bit ARM, and at least 4 GB RAM. Android version alone
 does not qualify a donated phone.
 
+**“Ten generations older” phones:** if that means ~Android 5–6 (API 21–23), they **cannot install**
+this APK. The floor is intentional (NotificationChannel, camera FGS policy). Within the supported
+range, low-RAM / &lt;3 GB devices and API 26–29 use `DeviceCapability` to start on a cheaper
+capture ladder (mid stress quality, 480 analysis cap) so the 3G/4G quality path does not open at
+640/Q55 on weak hardware. Emulator proof for the floor is API 26 (`AKSHRAVA_AVD=akshrava_api26_arm64`
+with `./scripts/e2e_android_gcp.sh`); that does not replace OEM camera/thermal field gates.
+`AlertManager` initializes TTS only after locks used by `onInit` exist — older engines call
+`onInit` synchronously from the constructor.
+
 ### Compatibility and release matrix
 
 The release workflow validates API 28–36 (Android 9 through 16, including 12L). It installs and

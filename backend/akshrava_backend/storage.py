@@ -86,8 +86,9 @@ class Store:
 
     async def _get_redis_client(self):
         if self._redis_client is None and self.redis_url:
-            from redis.asyncio import Redis
-            self._redis_client = Redis.from_url(self.redis_url)
+            from .redis_util import async_redis_from_url
+
+            self._redis_client = async_redis_from_url(self.redis_url)
         return self._redis_client
 
     async def close(self):

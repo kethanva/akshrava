@@ -156,3 +156,32 @@ check "remote_requires_weights_sha" {
 }
 
 # Checks on variables removed because local file fallback natively validates existence at plan time.
+
+variable "enable_worker_ha" {
+  type        = bool
+  default     = false
+  description = "When true, replace the single-VM GPU/CPU worker with a regional Managed Instance Group behind an internal L4 LB with auto-healing (see worker_ha.tf). Default false preserves the documented single-VM pilot posture; review a terraform plan before enabling against a live project."
+}
+
+variable "worker_ha_target_size" {
+  type        = number
+  default     = 2
+  description = "Worker MIG replica count when enable_worker_ha=true. 2 survives a single VM/host failure; cross-zone resilience requires available GPU/CPU quota in a second zone."
+
+  validation {
+    condition     = var.worker_ha_target_size >= 1 && var.worker_ha_target_size <= 8
+    error_message = "worker_ha_target_size must be between 1 and 8."
+  }
+}
+
+variable "enable_cloud_armor" {
+  type        = bool
+  default     = false
+  description = "When true, front Cloud Run with an External HTTPS LB + Cloud Armor (rate limiting, layer-7 DDoS defense) and restrict Cloud Run ingress to load-balancer-only (see cloud_armor.tf). Requires cloud_armor_domain and DNS pointed at the LB's static IP; the managed certificate needs DNS in place before it will provision. Default false preserves the documented pilot posture (public *.run.app URL, JWT-on-socket as the sole auth boundary)."
+}
+
+variable "cloud_armor_domain" {
+  type        = string
+  default     = ""
+  description = "Domain for the External HTTPS LB's managed SSL certificate. Required when enable_cloud_armor=true; point its DNS A record at the akshrava_api_lb_ip output before applying, or the managed certificate will stay PROVISIONING indefinitely."
+}

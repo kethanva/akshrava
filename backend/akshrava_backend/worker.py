@@ -9,6 +9,7 @@ defence in depth, not a replacement for network isolation.
 import asyncio
 import hashlib
 import hmac
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
@@ -21,6 +22,23 @@ from .detector import Detector, jpeg_dimensions, make_detector
 from .coordination import nonce_store_for
 from .metrics import Metrics
 from .model_integrity import verify_model_sha256
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+def _trace_id(request: Request) -> str:
+    """Extract the W3C traceparent's trace-id for cross-tier log correlation.
+
+    RemoteWorkerDetector.detect_async injects a `traceparent` header (00-<trace-id>-<span-id>-01)
+    when opentelemetry is installed. The worker never received or logged it, so a slow frame on
+    the phone could not be correlated to this process's own inference step in Cloud Logging.
+    Only the trace-id segment is logged -- never the device token, image, or any path back to
+    the phone, matching this service's no-PII logging contract.
+    """
+    header = request.headers.get("traceparent", "")
+    parts = header.split("-")
+    return parts[1] if len(parts) == 4 and len(parts[1]) == 32 else ""
 
 
 @dataclass(frozen=True)
@@ -221,18 +239,25 @@ def create_worker_app(
 
     @app.post("/v1/infer")
     async def infer(request: Request):
+        trace_id = _trace_id(request)
         body = await request.body()
         settings_value = app.state.worker_settings
         if len(body) > settings_value.max_image_bytes:
             raise HTTPException(status_code=413, detail="worker request too large")
-        nonce = _authenticated_body(request, body, settings_value)
+        try:
+            nonce = _authenticated_body(request, body, settings_value)
+        except HTTPException as exc:
+            logger.warning("worker auth rejected trace=%s status=%d detail=%s", trace_id, exc.status_code, exc.detail)
+            raise
         try:
             first_use = await app.state.nonce_store.claim(nonce, settings_value.request_max_age_seconds)
         except Exception as exc:
             # A failed coordinator is a security failure, never a reason to accept a potentially
             # replayed request on another replica.
+            logger.error("worker nonce store unavailable trace=%s", trace_id, exc_info=True)
             raise HTTPException(status_code=503, detail="worker replay protection unavailable") from exc
         if not first_use:
+            logger.warning("worker rejected replayed request trace=%s", trace_id)
             raise HTTPException(status_code=409, detail="replayed worker request")
         try:
             content_type = request.headers.get("content-type", "").split(";", 1)[0].lower()
@@ -265,8 +290,16 @@ def create_worker_app(
             detections = await asyncio.wait_for(future, timeout=settings_value.infer_timeout_seconds)
         except asyncio.TimeoutError as exc:
             future.cancel()
+            logger.warning(
+                "worker inference deadline exceeded trace=%s timeout_s=%.1f",
+                trace_id, settings_value.infer_timeout_seconds,
+            )
             raise HTTPException(status_code=504, detail="worker inference deadline exceeded") from exc
+        except Exception:
+            logger.exception("worker inference failed trace=%s", trace_id)
+            raise
         inference_ms = int((time.monotonic() - started) * 1000)
+        logger.info("worker inference completed trace=%s inference_ms=%d detections=%d", trace_id, inference_ms, len(detections))
         app.state.metrics.observe_result(inference_ms, bool(detections))
         return {
             "detections": [

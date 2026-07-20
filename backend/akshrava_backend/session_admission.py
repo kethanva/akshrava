@@ -120,9 +120,11 @@ return 1
 
     async def _client_for_use(self):
         if self._client is None:
-            from redis.asyncio import Redis
+            from .redis_util import async_redis_from_url
 
-            self._client = Redis.from_url(self.url, decode_responses=True, socket_connect_timeout=1, socket_timeout=1)
+            self._client = async_redis_from_url(
+                self.url, decode_responses=True, socket_connect_timeout=1, socket_timeout=1
+            )
         return self._client
 
     async def try_open(self, session_id: str) -> bool:

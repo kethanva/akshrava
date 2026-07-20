@@ -75,5 +75,11 @@ resource "google_dns_record_set" "worker" {
   type         = "A"
   ttl          = 30
   managed_zone = google_dns_managed_zone.internal.name
-  rrdatas      = [google_compute_instance.worker[0].network_interface[0].network_ip]
+  # HA mode (worker_ha.tf) replaces the single VM with a regional MIG behind an internal LB;
+  # point the same internal DNS name at whichever backend is actually deployed.
+  rrdatas = [
+    local.worker_ha_enabled
+    ? google_compute_forwarding_rule.worker_ilb[0].ip_address
+    : google_compute_instance.worker[0].network_interface[0].network_ip
+  ]
 }

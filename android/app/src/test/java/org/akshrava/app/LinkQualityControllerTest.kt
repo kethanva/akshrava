@@ -61,4 +61,13 @@ class LinkQualityControllerTest {
         assertEquals(40, c.jpegQ)
         assertEquals(0.5, c.fps, 0.001)
     }
+
+    @Test
+    fun constrainedDeviceInitialMatchesMidStressLadder() {
+        // DeviceCapability.initialQuality on low-RAM phones uses this step.
+        val mid = LinkQualityController.STRESS_STEPS[1]
+        assertEquals(384, mid.maxSide)
+        assertEquals(35, mid.jpegQ)
+        assertEquals(0.55, mid.fps, 0.001)
+    }
 }

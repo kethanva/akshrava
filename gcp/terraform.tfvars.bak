@@ -1,0 +1,25 @@
+project_id  = "project-704ccb8e-8b12-4da6-a3f"
+region      = "us-central1"
+zone        = "us-central1-a"
+environment = "pilot"
+detector    = "remote"
+
+# Temporary public WSS for phone pilot (no separate edge SA yet).
+api_allow_unauthenticated = true # required for phone WSS reachability; app JWT is the auth boundary
+
+# PKI is externalized under gcp/pki/ (gitignored); private keys must not re-enter TF state.
+manage_pki_in_terraform = false
+
+# L4/T4 quota is 0 in this project — CPU remote worker for supervised E2E vision path.
+worker_use_gpu = false
+
+redis_transit_encryption = true
+
+yolo_weights_sha256 = "85a76fe86dd8afe384648546b56a7a78580c7cb7b404fc595f97969322d502d5"
+
+api_image    = "us-central1-docker.pkg.dev/project-704ccb8e-8b12-4da6-a3f/akshrava/akshrava-api@sha256:14ad2984c6b43bf02f815fca3eae54fa051842e0f05ef6ef8508d2c8e24d1d74"
+worker_image = "us-central1-docker.pkg.dev/project-704ccb8e-8b12-4da6-a3f/akshrava/akshrava-worker@sha256:897d755ff9af2a4264b320349179ebab7b72423d41b9689630ba459954588c11"
+
+# Handled via tls.tf auto-load fallback.
+
+# External PKI PEMs are loaded by tls.tf from ./pki/ when manage_pki_in_terraform=false.

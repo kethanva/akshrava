@@ -210,6 +210,33 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  alertmanager:
+    image: prom/alertmanager:v0.28.0
+    profiles: ["monitoring"]
+    environment:
+      # Point at a Slack/PagerDuty/Opsgenie incoming webhook (or internal relay). Without it,
+      # alerts still fire in Prometheus but no operator is paged when a device goes silent (§3.4).
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:?set ALERT_WEBHOOK_URL in .env to page operators}
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.tmpl.yml:ro
+      - alertmanager-data:/alertmanager
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        sed "s|ALERT_WEBHOOK_URL_PLACEHOLDER|$${ALERT_WEBHOOK_URL}|g" \
+          /etc/alertmanager/alertmanager.tmpl.yml > /tmp/alertmanager.yml
+        exec /bin/alertmanager \
+          --config.file=/tmp/alertmanager.yml \
+          --storage.path=/alertmanager
+    ports:
+      - "127.0.0.1:9093:9093"
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   grafana:
     image: grafana/grafana:13.0.3
     profiles: ["monitoring"]
@@ -231,6 +258,7 @@ services:
         max-file: "3"
 
 volumes:
+  alertmanager-data:
   postgres-data:
   caddy-data:
   caddy-config:

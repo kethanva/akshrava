@@ -35,12 +35,19 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
         const val URGENT_PROTECT_MS = 350L
     }
 
+    private data class PendingStatus(val text: String, val onComplete: (() -> Unit)?)
+
     private val api = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
-    private var tts: TextToSpeech? = TextToSpeech(context, this)
-    private val vibrator = context.getSystemService(Vibrator::class.java)
     private val language = Locale.forLanguageTag(languageTag)
     private val isHindi = language.language == "hi"
+    // Must be initialized before TextToSpeech: older APIs (and some emulators) invoke
+    // onInit synchronously from the TTS constructor.
+    private val completionLock = Any()
+    private val completionCallbacks = mutableMapOf<String, () -> Unit>()
+    private var pendingStatus: PendingStatus? = null
+    private var statusSequence = 0L
+    @Volatile private var ready = false
     private val lastSpoken = mutableMapOf<String, Long>()
     private val recentUtterances = ArrayDeque<Long>()
     private var lastUtteranceMs = 0L
@@ -49,13 +56,8 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
     @Volatile private var lastAlertText: String? = null
     @Volatile private var lastAlertAtMs = 0L
     private var lastUrgentSpokenAtMs = 0L
-    private data class PendingStatus(val text: String, val onComplete: (() -> Unit)?)
-
-    private val completionLock = Any()
-    private val completionCallbacks = mutableMapOf<String, () -> Unit>()
-    private var pendingStatus: PendingStatus? = null
-    private var statusSequence = 0L
-    @Volatile private var ready = false
+    private val vibrator = context.getSystemService(Vibrator::class.java)
+    private var tts: TextToSpeech? = TextToSpeech(context, this)
 
     override fun onInit(status: Int) {
         api.execute {

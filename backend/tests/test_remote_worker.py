@@ -332,3 +332,26 @@ def test_static_endpoint_registry_filters_disabled_entries_and_keeps_stable_orde
     second = registry.ordered_for_device("pilot-phone-1")
     assert [endpoint.id for endpoint in first] == [endpoint.id for endpoint in second]
     assert "one" not in [endpoint.id for endpoint in first]
+
+
+def test_remote_worker_detector_injects_w3c_trace_headers(monkeypatch):
+    captured_headers = {}
+
+    class FakeClient:
+        async def post(self, url, content=None, headers=None, follow_redirects=False):
+            captured_headers.update(headers or {})
+            class FakeResp:
+                content = b'{"detections":[]}'
+                def raise_for_status(self):
+                    pass
+            return FakeResp()
+
+    detector = RemoteWorkerDetector("https://worker.internal/v1/infer", SECRET, 450)
+    monkeypatch.setattr(detector, "_get_async_client", lambda: asyncio.sleep(0, result=FakeClient()))
+
+    res = asyncio.run(detector.detect_async(JPEG))
+    assert res == []
+    assert "X-Akshrava-Timestamp" in captured_headers
+    assert "X-Akshrava-Nonce" in captured_headers
+    assert "X-Akshrava-Signature" in captured_headers
+

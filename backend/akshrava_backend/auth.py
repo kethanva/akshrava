@@ -15,13 +15,29 @@ class DeviceClaims(NamedTuple):
     diagnostic_consent: bool
 
 
+# (path, mtime_ns) -> PEM text. Reading the RS256 public key from disk on every single token
+# verification is wasteful under load; cache it keyed on mtime so a rotated key is still picked
+# up without a restart the moment the file changes, but a hot path does no repeated file I/O.
+_KEY_CACHE: dict = {}
+
+
 def _verification_key(settings: Settings) -> str:
     if settings.jwt_algorithm == "HS256":
         return settings.jwt_secret
+    path = Path(settings.jwt_public_key_file)
     try:
-        return Path(settings.jwt_public_key_file).read_text(encoding="utf-8")
+        mtime_ns = path.stat().st_mtime_ns
     except OSError as exc:
         raise AuthError("device verification key unavailable") from exc
+    cached = _KEY_CACHE.get(path)
+    if cached is not None and cached[0] == mtime_ns:
+        return cached[1]
+    try:
+        pem = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise AuthError("device verification key unavailable") from exc
+    _KEY_CACHE[path] = (mtime_ns, pem)
+    return pem
 
 
 def device_claims_from_token(token: Optional[str], settings: Settings) -> DeviceClaims:

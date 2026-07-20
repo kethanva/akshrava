@@ -402,13 +402,24 @@ re-provisioning, and do not "unrevoke" a lost device.
 
 ## 6. Operational signals
 
-Prometheus must alert on control-plane availability, worker availability, late-suppressed results,
-session-admission saturation, and aggregate capture-to-API frame age. These metrics are
-intentionally aggregate: no device, route, or carrier labels are exported from `/metrics`.
-Outside development, `/metrics` requires `METRICS_SCRAPE_TOKEN`. Compose injects the token into
-the API and Prometheus (`authorization.credentials_file`). Caddy and Cloud Run must not expose an
-unauthenticated scrape path publicly. Carrier/device p95 is a field-log analysis task after
-explicit consent, not a public metrics label.
+Prometheus alerts on control-plane availability, worker availability, late-suppressed results,
+session-admission saturation, and aggregate capture-to-API frame age (`prometheus-alerts.yml`).
+Alerts route to **Alertmanager** (`alertmanager` service, monitoring profile), which pages the
+receiver configured by `ALERT_WEBHOOK_URL` — critical alerts (control-plane/worker down) at a
+1 h repeat, warnings grouped at 4 h. A device that goes silent mid-session is an operator action
+item (§3.4): rendering the alert in Prometheus is not enough, a human must be paged, so
+`ALERT_WEBHOOK_URL` is a **required** variable whenever the monitoring profile is deployed.
+
+These metrics are intentionally aggregate: no device, route, or carrier labels are exported from
+`/metrics`. Outside development, `/metrics` requires `METRICS_SCRAPE_TOKEN`. Compose injects the
+token into the API and Prometheus (`authorization.credentials_file`). Caddy and Cloud Run must not
+expose an unauthenticated scrape path publicly. Carrier/device p95 is a field-log analysis task
+after explicit consent, not a public metrics label.
+
+**Security gate before any participant trial:** the pilot's `api_allow_unauthenticated=true` makes
+JWT-on-the-socket the sole auth boundary. Before a participant trial, either front the API with an
+authenticated edge (private invoker + `api_invoker_members`) or explicitly sign off, in the release
+log, that public-invoker + device-JWT is the accepted posture for that trial.
 
 ---
 

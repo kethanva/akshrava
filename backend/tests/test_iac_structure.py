@@ -27,7 +27,12 @@ def test_iac_app_structure():
     assert 'resource "google_cloud_run_v2_service" "api"' in tf_content, "Cloud Run API service is missing"
     assert re.search(r'name\s*=\s*"DATABASE_URL"', tf_content), "DATABASE_URL is missing from Cloud Run"
     assert re.search(r'name\s*=\s*"GCP_DIAGNOSTICS_BUCKET"', tf_content), "GCP_DIAGNOSTICS_BUCKET is missing from Cloud Run"
-    assert re.search(r'name\s*=\s*"JWT_SECRET"', tf_content), "JWT_SECRET is missing from Cloud Run"
+    assert re.search(r'name\s*=\s*"JWT_ALGORITHM"', tf_content), "JWT_ALGORITHM is missing from Cloud Run"
+    # JWT_SECRET must NOT be set: this deployment hardcodes JWT_ALGORITHM=RS256, and config.py
+    # only reads/validates jwt_secret under HS256. A static placeholder secret in production IaC
+    # is a live symmetric credential for a value the app never consults -- it must be absent, not
+    # merely unused.
+    assert not re.search(r'name\s*=\s*"JWT_SECRET"', tf_content), "JWT_SECRET must not be set when JWT_ALGORITHM=RS256"
     assert re.search(r'name\s*=\s*"REMOTE_WORKER_SECRET"', tf_content), "REMOTE_WORKER_SECRET is missing from Cloud Run"
     assert re.search(r'name\s*=\s*"REMOTE_INFERENCE_URL"', tf_content), "REMOTE_INFERENCE_URL is missing from Cloud Run"
     assert re.search(r'name\s*=\s*"METRICS_SCRAPE_TOKEN"', tf_content), "METRICS_SCRAPE_TOKEN is missing from Cloud Run"

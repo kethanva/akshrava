@@ -172,6 +172,10 @@ class VisionService:
             "server_inference_ms": inference_ms,
             "server_received_epoch_ms": int(time.time() * 1000),
             "hazard": None,
+            # Keep bounded detector telemetry in the protocol so a connected phone can be
+            # distinguished from a healthy detector that simply saw no supported class.
+            "detection_count": len(detections),
+            "detection_labels": sorted({item.label for item in detections})[:20],
             "priority": is_priority,
             "look_summary": None,
             "late_suppressed": late_suppressed,

@@ -39,7 +39,7 @@ android {
 
     buildTypes {
         debug {
-            // Supervised GCP pilot WSS — volunteer screen still editable; release keeps invalid default.
+            // Supervised GCP pilot WSS — volunteer screen remains editable.
             buildConfigField(
                 "String",
                 "DEFAULT_WSS_ENDPOINT",
@@ -52,7 +52,14 @@ android {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             if (releaseSigningConfigured) signingConfig = signingConfigs.getByName("release")
-            buildConfigField("String", "DEFAULT_WSS_ENDPOINT", "\"wss://example.invalid/v1/session\"")
+            // Release phones must have a real, secure endpoint by default. Provisioning may
+            // still override this value, but example.invalid made every unconfigured release
+            // build silently fail before it could reach the backend.
+            buildConfigField(
+                "String",
+                "DEFAULT_WSS_ENDPOINT",
+                "\"wss://akshrava-api-c7d3j4nzdq-uc.a.run.app/v1/session\""
+            )
         }
     }
 

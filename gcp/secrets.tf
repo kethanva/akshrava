@@ -113,6 +113,21 @@ resource "google_secret_manager_secret_version" "nonce_redis_url" {
   secret_data = local.nonce_redis_url
 }
 
+# Memorystore SERVER_AUTHENTICATION CA (only when redis_transit_encryption=true).
+resource "google_secret_manager_secret" "redis_ca" {
+  count     = var.redis_transit_encryption ? 1 : 0
+  secret_id = "akshrava-redis-ca"
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "redis_ca" {
+  count       = var.redis_transit_encryption ? 1 : 0
+  secret      = google_secret_manager_secret.redis_ca[0].id
+  secret_data = google_redis_instance.cache.server_ca_certs[0].cert
+}
+
 resource "google_secret_manager_secret" "worker_tls_ca" {
   secret_id = "akshrava-worker-tls-ca"
   replication {

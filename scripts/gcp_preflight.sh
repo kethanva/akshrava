@@ -50,19 +50,24 @@ if not allow_public and not has_invoker:
 
 manage_pki = vals.get("manage_pki_in_terraform", "false").lower() in {"true", "1"}
 if not manage_pki:
-    required = [
-        "jwt_public_key_pem",
-        "jwt_private_key_pem",
-        "worker_ca_cert_pem",
-        "worker_server_cert_pem",
-        "worker_server_key_pem",
-        "worker_client_cert_pem",
-        "worker_client_key_pem",
-    ]
-    missing = [k for k in required if k not in vals or vals[k] in {"", '""', "''"}]
+    pem_files = {
+        "jwt_public_key_pem": "jwt-public.pem",
+        "jwt_private_key_pem": "jwt-private.pem",
+        "worker_ca_cert_pem": "worker-ca.pem",
+        "worker_server_cert_pem": "worker-server-cert.pem",
+        "worker_server_key_pem": "worker-server-key.pem",
+        "worker_client_cert_pem": "worker-client-cert.pem",
+        "worker_client_key_pem": "worker-client-key.pem",
+    }
+    missing = []
+    for k, filename in pem_files.items():
+        has_var = k in vals and vals[k] not in {"", '""', "''"}
+        has_file = Path("pki", filename).is_file()
+        if not has_var and not has_file:
+            missing.append(k)
     if missing:
         print(
-            "manage_pki_in_terraform=false requires PEM vars: %s" % ", ".join(missing),
+            "manage_pki_in_terraform=false requires PEM vars in tfvars or files in gcp/pki/: %s" % ", ".join(missing),
             file=sys.stderr,
         )
         sys.exit(1)

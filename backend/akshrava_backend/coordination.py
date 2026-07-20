@@ -58,9 +58,11 @@ class RedisNonceStore(NonceStore):
 
     async def _client_for_use(self):
         if self._client is None:
-            from redis.asyncio import Redis
+            from .redis_util import async_redis_from_url
 
-            self._client = Redis.from_url(self.url, decode_responses=True, socket_connect_timeout=1, socket_timeout=1)
+            self._client = async_redis_from_url(
+                self.url, decode_responses=True, socket_connect_timeout=1, socket_timeout=1
+            )
         return self._client
 
     async def claim(self, nonce: str, ttl_seconds: int) -> bool:
@@ -144,9 +146,11 @@ return allowed and 1 or 0
 
     async def _client_for_use(self):
         if self._client is None:
-            from redis.asyncio import Redis
+            from .redis_util import async_redis_from_url
 
-            self._client = Redis.from_url(self.url, decode_responses=True, socket_connect_timeout=1, socket_timeout=1)
+            self._client = async_redis_from_url(
+                self.url, decode_responses=True, socket_connect_timeout=1, socket_timeout=1
+            )
         return self._client
 
     async def allow(self, device_id: str, rate_per_second: float, burst: float) -> bool:

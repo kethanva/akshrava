@@ -1,0 +1,23 @@
+# Alertmanager routing template. The webhook URL is injected at container start from
+# ALERT_WEBHOOK_URL (see docker-compose alertmanager service) so no secret lands in source
+# control. Point it at your Slack/PagerDuty/Opsgenie incoming webhook, or an internal relay.
+# Critical alerts (control plane / GPU worker down) page immediately; warnings (late results,
+# admission saturation, silent frame ingress) group and repeat less aggressively.
+route:
+  receiver: akshrava-default
+  group_by: ['alertname']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers:
+        - severity = "critical"
+      receiver: akshrava-default
+      group_wait: 10s
+      repeat_interval: 1h
+
+receivers:
+  - name: akshrava-default
+    webhook_configs:
+      - url: 'ALERT_WEBHOOK_URL_PLACEHOLDER'
+        send_resolved: true

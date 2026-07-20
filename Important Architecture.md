@@ -95,6 +95,49 @@ The architecture is intentionally a freshness pipeline, not a video system. Raw 
 5. The backend authenticates, validates size/timing, rate-limits, runs the configured detector (`noop` / local Ultralytics / remote HMAC worker), associates tracks per session, applies conservative hazard policy, and returns compact JSON plus optional quality guidance. Alert rows are scheduled with `_schedule_record_alert` so PostgreSQL latency cannot delay the phone reply; `shutdown_async` drains those tasks before the DB engine is disposed.
 6. The phone rejects stale or mismatched results, deduplicates them, arbitrates speech/haptics, and plays short offline English/Hindi prompts through a single-ear headset where possible.
 
+### Alert return path — detection to spoken word
+
+Once a detector produces boxes, the alert is *composed on the server as a template ID plus slots*, not as a finished sentence, and *rendered to speech on the phone from offline templates*. The server never streams audio; it returns a compact JSON `result`. The phone is the sole owner of freshness, dedupe, mute and the one speaking lane.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Det as Detector (noop/Ultralytics/remote)
+    participant Trk as SimpleTracker (per session)
+    participant Sc as HazardScorer (pure)
+    participant Pol as AlertPolicy (cooldown/rate)
+    participant Cmp as composer.hazard_payload
+    participant WS as WebSocket result JSON
+    participant PC as ProtocolClient.handleMessage
+    participant AM as AlertManager (single lane)
+    participant Out as TTS + haptics
+
+    Det->>Trk: boxes [label, conf, xyxy]
+    Trk->>Sc: associated tracks (hits, box)
+    Sc->>Pol: candidate Hazard or None (no state mutation)
+    Note over Sc: range_valid=false unless a verified<br/>calibration_profile + pose gates pass
+    Pol->>Cmp: admitted Hazard (5s per-key cooldown, 6/min device cap)
+    Cmp->>WS: {message_key, bearing, level, severity, haptic,<br/>range_valid, spoken_preview, motion_evidence:"insufficient"}
+    Note over WS: late_suppressed frames send NO hazard;<br/>a priority look sends look_summary instead
+    WS-->>PC: result (echoes capture_mono_ms)
+    PC->>PC: age = elapsedRealtime - capture_mono_ms<br/>reject if > 500ms (250ms urgent / 500ms look)
+    alt priority look
+        PC->>AM: speakComposed(look_summary)
+    else hazard present and fresh
+        PC->>AM: announce(message_key, bearing, urgent, haptic)
+    end
+    AM->>AM: per-object 5s cooldown · 1/2s gap ·<br/>3-in-10s → "busy road" collapse
+    AM->>Out: vibrate(haptic) ALWAYS (even muted)
+    AM->>AM: mute gate (speech only) ·<br/>protect first 350ms of an urgent phrase
+    AM->>Out: TTS speak (QUEUE_FLUSH urgent / QUEUE_ADD caution)
+```
+
+**Why the split.** The composer emits `message_key + bearing` (e.g. `vehicle_nearby` / `right`) plus a `spoken_preview` string. The phone re-renders from its own offline template table (`AlertManager.template`), so speech works with the network dead, a Hindi phone always gets Hindi, and an unknown future `message_key` degrades to a safe `Assistance is limited` rather than mis-speaking. `spoken_preview`/`look_summary` are used verbatim only for the on-demand look, which is composed for that single frame.
+
+**Freshness and honesty gates on the return leg.** The phone computes age with its own `elapsedRealtime()` clock against the echoed `capture_mono_ms` (never a server clock) and drops any result older than 500 ms (250 ms for an urgent nearby obstruction). A `late_suppressed` frame carries no hazard at all — the server skips scoring rather than speak an old detection — and a look answered past budget says *"could not check just now"*, never *"no hazard"*.
+
+**The single speaking lane (`AlertManager`).** Every caller — cloud alert, on-demand look, mode/status message, headset repeat — is serialised onto one worker thread so cooldown maps and the TTS queue stay consistent. Rules enforced there: a 5 s per-object cooldown; one utterance per 2 s; three alerts in ten seconds collapse to a single *"busy road, careful"*; an S1 urgent phrase flushes a caution mid-word but its own first 350 ms is protected from a following urgent; **haptics always fire, even while muted**, because the buzz is the channel a muted user still relies on. Mute auto-expires after 15 minutes so it can never be left silently dead, and single-press repeat replays the last alert if it is under 30 s old.
+
 ## 3. Timing, freshness, and backpressure
 
 | Stage | Target budget | Invariant when the budget is missed |
@@ -226,7 +269,7 @@ privilege/MFA to operator consoles (IAP SSH for the worker VM). Make a tested Po
 backup/restore routine part of releases. Activate models only from an approved read-only directory;
 the service must not download weights during a live session.
 
-Measure aggregate, non-identifying frame accept/reject/drop counts, queue depth, decode/infer/track latency, frame age, alert rate, reconnects, fallback/state activation, device thermal/battery reports, detector/model version and error states. Prometheus/Grafana support operations; neither logs raw frames by default.
+Measure aggregate, non-identifying frame accept/reject/drop counts, queue depth, decode/infer/track latency, frame age, alert rate, reconnects, fallback/state activation, device thermal/battery reports, detector/model version and error states. Prometheus/Grafana support operations and neither logs raw frames by default; Prometheus rules route through **Alertmanager** (`ALERT_WEBHOOK_URL`) so a device going silent mid-session, a downed control plane/worker, or chronically late results actually pages an operator rather than only rendering on a dashboard.
 
 Privacy is minimisation by architecture:
 

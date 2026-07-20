@@ -51,6 +51,16 @@ WORKER_SECRET="$(access_secret akshrava-worker-secret)"
 NONCE_REDIS_URL="$(access_secret akshrava-nonce-redis-url)"
 METRICS_TOKEN="$(access_secret akshrava-metrics-scrape-token)"
 
+REDIS_CA_ENV=()
+REDIS_CA_MOUNT=()
+if [[ "$NONCE_REDIS_URL" == rediss://* ]]; then
+  access_secret akshrava-redis-ca >"$CERT_DIR/redis-ca.pem"
+  # Worker runs as non-root appuser; CA must be world-readable inside the mount.
+  chmod 644 "$CERT_DIR/redis-ca.pem"
+  REDIS_CA_ENV=(-e REDIS_CA_CERT_FILE=/run/secrets/redis-ca/ca.pem)
+  REDIS_CA_MOUNT=(-v "$CERT_DIR/redis-ca.pem:/run/secrets/redis-ca/ca.pem:ro")
+fi
+
 cat >"$CERT_DIR/Caddyfile" <<'EOF'
 worker.akshrava.internal:8443 {
   tls /etc/caddy/certs/server.pem /etc/caddy/certs/server.key {
@@ -98,6 +108,8 @@ if [[ "$WORKER_USE_GPU" == "true" ]]; then
     -e REQUIRE_GPU="$REQUIRE_GPU" \
     -e YOLO_WEIGHTS=/models/yolo11s.pt \
     -e YOLO_WEIGHTS_SHA256="${yolo_weights_sha256}" \
+    "$${REDIS_CA_ENV[@]}" \
+    "$${REDIS_CA_MOUNT[@]}" \
     "${worker_image}"
 else
   docker run -d --restart=always --name akshrava-worker \
@@ -111,6 +123,8 @@ else
     -e YOLO_WEIGHTS_SHA256="${yolo_weights_sha256}" \
     -e YOLO_CONFIG_DIR=/tmp/Ultralytics \
     -e MPLCONFIGDIR=/tmp/matplotlib \
+    "$${REDIS_CA_ENV[@]}" \
+    "$${REDIS_CA_MOUNT[@]}" \
     "${worker_image}"
 fi
 

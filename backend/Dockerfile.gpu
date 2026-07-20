@@ -10,7 +10,7 @@ WORKDIR /app
 
 COPY pyproject.toml ./
 COPY akshrava_backend ./akshrava_backend
-RUN pip install --upgrade "pip<25" && pip install "gunicorn>=23,<24" ".[yolo]" && \
+RUN pip install --upgrade "pip<25" && pip install "gunicorn>=23,<24" ".[yolo,gcp]" && \
     groupadd --system appgroup && useradd --system --gid appgroup --create-home appuser && \
     chown -R appuser:appgroup /app
 

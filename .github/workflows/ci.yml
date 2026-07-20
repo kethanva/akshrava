@@ -46,6 +46,7 @@ jobs:
           DOMAIN=example.org
           GRAFANA_PASSWORD=test-grafana-password-with-at-least-32-chars
           REDIS_PASSWORD=test-redis-password-with-at-least-32-chars
+          ALERT_WEBHOOK_URL=https://hooks.example.com/ci
           docker compose -f infra/docker-compose.yml --profile control-plane --profile edge --profile monitoring config --quiet
       - run: >
           POSTGRES_PASSWORD=test-password-with-at-least-32-characters

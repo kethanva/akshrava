@@ -1,5 +1,7 @@
 resource "google_compute_instance" "worker" {
-  count        = local.deploy_remote_worker ? 1 : 0
+  # Mutually exclusive with the worker_ha.tf MIG path: enabling enable_worker_ha replaces this
+  # single VM rather than running alongside it.
+  count        = (local.deploy_remote_worker && !local.worker_ha_enabled) ? 1 : 0
   name         = "akshrava-gpu-worker"
   machine_type = var.worker_machine_type != "" ? var.worker_machine_type : (var.worker_use_gpu ? "g2-standard-4" : "n2-standard-8")
   zone         = var.zone
@@ -126,7 +128,10 @@ resource "google_cloud_run_v2_job" "migrate" {
 resource "google_cloud_run_v2_service" "api" {
   name     = "akshrava-api"
   location = var.region
-  ingress  = "INGRESS_TRAFFIC_ALL"
+  # When Cloud Armor fronts the service (cloud_armor.tf), block direct hits to the *.run.app URL
+  # entirely so the load balancer + security policy is the only path a phone (or an attacker) can
+  # reach the container through.
+  ingress = local.cloud_armor_enabled ? "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER" : "INGRESS_TRAFFIC_ALL"
 
   template {
     service_account = google_service_account.api_sa.email
@@ -181,6 +186,19 @@ resource "google_cloud_run_v2_service" "api" {
         }
       }
     }
+    dynamic "volumes" {
+      for_each = var.redis_transit_encryption ? [1] : []
+      content {
+        name = "redis-ca"
+        secret {
+          secret = google_secret_manager_secret.redis_ca[0].secret_id
+          items {
+            path    = "ca.pem"
+            version = "latest"
+          }
+        }
+      }
+    }
 
     containers {
       image = local.api_image
@@ -212,6 +230,13 @@ resource "google_cloud_run_v2_service" "api" {
         name       = "worker-mtls-client-key"
         mount_path = "/run/secrets/worker-mtls-key"
       }
+      dynamic "volume_mounts" {
+        for_each = var.redis_transit_encryption ? [1] : []
+        content {
+          name       = "redis-ca"
+          mount_path = "/run/secrets/redis-ca"
+        }
+      }
 
       env {
         name  = "AKSHRAVA_ENV"
@@ -229,10 +254,11 @@ resource "google_cloud_run_v2_service" "api" {
         name  = "JWT_PUBLIC_KEY_FILE"
         value = "/run/secrets/jwt/public.pem"
       }
-      env {
-        name  = "JWT_SECRET"
-        value = "unused-with-rs256-placeholder-at-least-32-chars"
-      }
+      # JWT_SECRET is intentionally NOT set here: JWT_ALGORITHM is hardcoded RS256 above, and
+      # config.py only reads/validates jwt_secret when the algorithm is HS256. A static
+      # placeholder string in production IaC is confusing during security audits and, more
+      # importantly, is a live symmetric secret sitting in state/logs for a value the app never
+      # needs -- remove it rather than keep a "disabled" fallback around to explain.
       env {
         name  = "REMOTE_INFERENCE_URL"
         value = local.deploy_remote_worker ? local.remote_inference_url : ""
@@ -248,6 +274,13 @@ resource "google_cloud_run_v2_service" "api" {
       env {
         name  = "REMOTE_TLS_CLIENT_KEY_FILE"
         value = "/run/secrets/worker-mtls-key/client.key"
+      }
+      dynamic "env" {
+        for_each = var.redis_transit_encryption ? [1] : []
+        content {
+          name  = "REDIS_CA_CERT_FILE"
+          value = "/run/secrets/redis-ca/ca.pem"
+        }
       }
       env {
         name  = "GCP_DIAGNOSTICS_BUCKET"
@@ -267,7 +300,7 @@ resource "google_cloud_run_v2_service" "api" {
       }
       env {
         name  = "ALERT_MAX_AGE_MS"
-        value = "500"
+        value = var.worker_use_gpu || var.detector != "remote" ? "500" : "2500"
       }
       env {
         name  = "MIN_FRAME_INTERVAL_MS"

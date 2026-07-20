@@ -111,6 +111,10 @@ class AssistService : LifecycleService() {
             it.acquire(WAKE_LOCK_TIMEOUT_MS)
         }
         http = OkHttpClient.Builder().pingInterval(20, java.util.concurrent.TimeUnit.SECONDS).build()
+        // Donated / low-RAM phones start on a cheaper ladder before the first server quality hint.
+        quality = DeviceCapability.initialQuality(this)
+        capturePolicy.quality = quality
+        boundAnalysisMaxSide = analysisTargetSide(quality.maxSide)
         client = ProtocolClient(
             endpoint = config.endpoint,
             token = config.deviceToken,
@@ -296,12 +300,15 @@ class AssistService : LifecycleService() {
     }
 
     /** CameraX analysis ladder aligned with protocol max_side rungs (not every JPEG q step). */
-    private fun analysisTargetSide(maxSide: Int): Int = when {
-        maxSide <= 320 -> 320
-        maxSide <= 384 -> 384
-        maxSide <= 480 -> 480
-        maxSide <= 512 -> 512
-        else -> 640
+    private fun analysisTargetSide(maxSide: Int): Int {
+        val uncapped = when {
+            maxSide <= 320 -> 320
+            maxSide <= 384 -> 384
+            maxSide <= 480 -> 480
+            maxSide <= 512 -> 512
+            else -> 640
+        }
+        return minOf(uncapped, DeviceCapability.analysisSideCap(this))
     }
 
     private fun maybeHeartbeat(now: Long) {
@@ -424,9 +431,8 @@ class AssistService : LifecycleService() {
     }
 
     private fun startForegroundCompat(notification: Notification) {
-        // FOREGROUND_SERVICE_TYPE_CAMERA and the manifest camera type were introduced in API 30
-        // (R), not 29 (Q). Passing it on Q throws (invalid foreground service type) -- and Tier-A
-        // devices are floored at Android 10 (Q), so this must gate on R, not Q.
+        // FOREGROUND_SERVICE_TYPE_CAMERA requires API 30+. On API 26–29 (supported donated
+        // cohort below R) start a plain FGS; camera permission still gates capture.
         val serviceType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
         } else 0

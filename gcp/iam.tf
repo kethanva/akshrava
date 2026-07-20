@@ -11,7 +11,7 @@ resource "google_service_account" "worker_sa" {
 
 locals {
   # Static keys so for_each is known at plan time (secret_id strings are fixed in config).
-  api_secret_ids = toset([
+  api_secret_ids = toset(concat([
     "akshrava-jwt-public",
     "akshrava-worker-secret",
     "akshrava-database-url",
@@ -21,15 +21,15 @@ locals {
     "akshrava-worker-tls-client-cert",
     "akshrava-worker-tls-client-key",
     "akshrava-metrics-scrape-token",
-  ])
-  worker_secret_ids = toset([
+  ], var.redis_transit_encryption ? ["akshrava-redis-ca"] : []))
+  worker_secret_ids = toset(concat([
     "akshrava-worker-secret",
     "akshrava-nonce-redis-url",
     "akshrava-worker-tls-ca",
     "akshrava-worker-tls-server-cert",
     "akshrava-worker-tls-server-key",
     "akshrava-metrics-scrape-token",
-  ])
+  ], var.redis_transit_encryption ? ["akshrava-redis-ca"] : []))
 }
 
 resource "google_secret_manager_secret_iam_member" "api_secret_accessor" {
@@ -37,13 +37,16 @@ resource "google_secret_manager_secret_iam_member" "api_secret_accessor" {
   secret_id = each.value
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.api_sa.email}"
+  # Secret Manager can 404 briefly after create; pin IAM after redis_ca exists.
+  depends_on = [google_secret_manager_secret.redis_ca]
 }
 
 resource "google_secret_manager_secret_iam_member" "worker_secret_accessor" {
-  for_each  = local.worker_secret_ids
-  secret_id = each.value
-  role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:${google_service_account.worker_sa.email}"
+  for_each   = local.worker_secret_ids
+  secret_id  = each.value
+  role       = "roles/secretmanager.secretAccessor"
+  member     = "serviceAccount:${google_service_account.worker_sa.email}"
+  depends_on = [google_secret_manager_secret.redis_ca]
 }
 
 resource "google_storage_bucket_iam_member" "api_storage_creator" {

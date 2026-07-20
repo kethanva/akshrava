@@ -37,3 +37,8 @@ output "build_and_push_hint" {
   description = "Build images before the first successful Cloud Run / worker boot."
   value       = " ./scripts/build_gcp_images.sh ${var.project_id} ${var.region}"
 }
+
+output "akshrava_api_lb_ip" {
+  description = "Static IP for the optional Cloud Armor External HTTPS LB (enable_cloud_armor=true). Point cloud_armor_domain's DNS A record here before applying."
+  value       = local.cloud_armor_enabled ? google_compute_global_address.api_lb[0].address : null
+}

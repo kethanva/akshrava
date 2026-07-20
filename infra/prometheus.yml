@@ -5,6 +5,14 @@ global:
 rule_files:
   - /etc/prometheus/alerts.yml
 
+# Alerts (control-plane down, GPU worker down, silent-device / late-results, admission saturation)
+# must reach a human, not just render in the Prometheus UI. §3.4 makes a device that goes silent
+# mid-session an operator action item. The Alertmanager routes them to the configured receiver.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
 scrape_configs:
   - job_name: 'akshrava-api'
     metrics_path: '/metrics'

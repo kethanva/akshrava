@@ -160,16 +160,22 @@ class RemoteWorkerDetector(Detector):
             timestamp.encode("ascii") + b"." + nonce.encode("ascii") + b"." + body,
             hashlib.sha256,
         ).hexdigest()
+        headers = {
+            "Content-Type": "image/jpeg",
+            "X-Akshrava-Timestamp": timestamp,
+            "X-Akshrava-Nonce": nonce,
+            "X-Akshrava-Signature": signature,
+        }
+        try:
+            from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+            TraceContextTextMapPropagator().inject(headers)
+        except Exception:
+            pass
         request = Request(
             self.endpoint,
             data=body,
             method="POST",
-            headers={
-                "Content-Type": "image/jpeg",
-                "X-Akshrava-Timestamp": timestamp,
-                "X-Akshrava-Nonce": nonce,
-                "X-Akshrava-Signature": signature,
-            },
+            headers=headers,
         )
         handlers = [_RejectRedirectHandler()]
         if self._ssl_context is not None:
@@ -206,16 +212,22 @@ class RemoteWorkerDetector(Detector):
             timestamp.encode("ascii") + b"." + nonce.encode("ascii") + b"." + body,
             hashlib.sha256,
         ).hexdigest()
+        headers = {
+            "Content-Type": "image/jpeg",
+            "X-Akshrava-Timestamp": timestamp,
+            "X-Akshrava-Nonce": nonce,
+            "X-Akshrava-Signature": signature,
+        }
+        try:
+            from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+            TraceContextTextMapPropagator().inject(headers)
+        except Exception:
+            pass
         try:
             response = await client.post(
                 self.endpoint,
                 content=body,
-                headers={
-                    "Content-Type": "image/jpeg",
-                    "X-Akshrava-Timestamp": timestamp,
-                    "X-Akshrava-Nonce": nonce,
-                    "X-Akshrava-Signature": signature,
-                },
+                headers=headers,
                 follow_redirects=False,
             )
             response.raise_for_status()

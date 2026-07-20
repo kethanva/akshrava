@@ -274,6 +274,11 @@ class ProtocolClient(
                 payload.optDouble("fps", 1.0)
             ))
             "result" -> {
+                Log.i(
+                    "AkshravaVision",
+                    "frame=${payload.optLong("frame_id", -1)} detections=${payload.optInt("detection_count", -1)} " +
+                        "labels=${payload.optJSONArray("detection_labels") ?: "unknown"} hazard=${payload.has("hazard") && !payload.isNull("hazard")}"
+                )
                 payload.optString("trace_id", "").takeIf { it.isNotBlank() }?.let {
                     // No device ID, endpoint, image, or location is logged; this is only a
                     // cross-tier frame correlation key for diagnosing glass-to-ear latency.
