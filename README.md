@@ -7,7 +7,7 @@
 >
 > Akshrava is **not** navigation, collision avoidance, route guidance, a crossing-decision aid, continuous scene description, facial recognition, or a guarantee of detection. It never says that a path is clear, a road is safe to cross, or a vehicle is approaching. Silence never means safety: when the camera, network, model, or service is unavailable, the app explicitly reports a limited/unavailable state.
 
-The detailed safety, evidence, operating, and release boundary is in [Important Architecture.md](<Important Architecture.md>); this README is the end-to-end implementation map.
+The detailed safety, evidence, operating, and release boundary is in [Important Architecture.md](Important%20Architecture.md); this README is the end-to-end implementation map.
 
 ## Architecture at a glance
 
@@ -33,8 +33,7 @@ flowchart TB
     Persist["Background alert persistence\nnever blocks WSS reply"]
     Metrics["/metrics · tracing · structured logs"]
     Session --> Admission --> Service --> Persist
-    Service --> Session
-    Session --> Metrics
+    Service --> Metrics
   end
 
   subgraph Private["GCP private VPC"]
@@ -50,7 +49,7 @@ flowchart TB
   Admission --> Redis
   Persist --> SQL
   Service --> Connector
-  Worker --> Redis
+  Worker -.-> Redis
 ```
 
 ### Current deployment truth
@@ -59,7 +58,7 @@ The live supervised-pilot path is:
 
 `Android ProtocolClient` → Cloud Run `wss://<cloud-run-endpoint>/v1/session` → Redis admission → Serverless VPC connector → `worker.akshrava.internal:8443` → Caddy mTLS → remote CPU YOLO worker.
 
-The current worker setting is `worker_use_gpu=false`; GPU quota is not assumed. Cloud SQL, Memorystore Redis, Secret Manager, Artifact Registry, diagnostics GCS, private networking, COS firewall rules, IAP SSH, Cloud Monitoring, and alert policies are defined under [`gcp/`](gcp/). The root `infra/` directory is the local/single-host Compose alternative, not the live pilot edge.
+The current worker setting is `worker_use_gpu=false`; GPU quota is not assumed. Cloud SQL, Memorystore Redis, Secret Manager, Artifact Registry, diagnostics GCS, private networking, COS firewall rules, IAP SSH, Cloud Monitoring, and alert policies are defined under [gcp/](gcp/). The root [infra/](infra/) directory is the local/single-host Compose alternative, not the live pilot edge.
 
 ## End-to-end frame lifecycle
 
@@ -79,8 +78,9 @@ sequenceDiagram
   Phone->>Phone: pose, blur, duplicate and cadence gates
   Phone->>Phone: NV21 rotate/scale and JPEG encode
   Phone->>API: JSON frame header, then binary JPEG over WSS
-  API->>Redis: authenticate/admit/rate-limit and claim replay keys
+  API->>Redis: authenticate session & check rate limits
   API->>Worker: raw image/jpeg + HMAC timestamp/nonce over mTLS
+  Worker->>Redis: claim HMAC replay nonce
   Worker-->>API: detection boxes and labels
   API->>Policy: associate tracks; conservative score and compose
   Policy-->>API: compact result / quality hint / no hazard
@@ -99,6 +99,25 @@ The system is a **freshness pipeline**, never a video recorder or catch-up queue
 - `capture_mono_ms` is the phone's elapsed-realtime clock. The server echoes it; the phone rejects results older than 500 ms (250 ms for configured urgent nearby-obstruction output).
 - The backend accepts bounded input, rate-limits before work, and performs alert persistence outside the WebSocket response path.
 - Raw images are processed in memory and discarded. Normal operation never stores video or JPEG frames.
+
+### Runtime states and fail-closed behavior
+
+```mermaid
+stateDiagram-v2
+  [*] --> STOPPED
+  STOPPED --> INITIALIZING: visible Start + camera permission
+  INITIALIZING --> ACTIVE: ready + authenticated WSS
+  INITIALIZING --> STOPPED: invalid config / permission / provisioning
+  ACTIVE --> DEGRADED: stale results / network loss / thermal pressure
+  DEGRADED --> ACTIVE: fresh result and healthy link
+  DEGRADED --> STOPPED: retry budget exhausted or user Stop
+  ACTIVE --> STOPPED: user Stop / critical battery / camera failure
+```
+
+Every transition has an explicit user-facing status. A disconnected socket, expired JWT,
+blocked camera, unavailable detector, invalid calibration, stale result, overheated battery, or
+critical battery state suppresses hazard speech and announces the corresponding limitation. The
+watchdog can prompt the user to start again, but must not silently restart camera capture.
 
 ## Client architecture: Android 8 through Android 15+
 
@@ -156,6 +175,16 @@ The server sends `ready` with `max_in_flight: 1` and `vision_enabled`. The clien
 
 The control plane validates token expiry/audience/device binding, frame order/timing, image limits, supported dimensions, rate limits, and the header/JPEG pairing before decode. Debug-only local workflows may use `ws://` and a development token; those values are not valid production provisioning.
 
+### Configuration ownership
+
+The Android build supplies an endpoint placeholder by default; a pilot build must set
+`AKSHRAVA_WSS_URL` at build time or provision the endpoint through the accessible settings screen.
+The live pilot hostname is `akshrava-api-c7d3j4nzdq-uc.a.run.app` when that deployment is active.
+Device JWTs are short-lived and device-bound; they are minted by an authorized operator, stored in
+Android Keystore-backed storage, and revoked server-side when a device is lost or reissued.
+Backend secrets, worker certificates, Redis URLs, database URLs, model paths, and diagnostic
+settings are server configuration/Secret Manager concerns and must never be embedded in the APK.
+
 ### Control plane to private worker
 
 `RemoteWorkerDetector` sends raw `image/jpeg` bytes—not base64—to the private worker:
@@ -183,6 +212,27 @@ The VPC connector reaches Caddy at `worker.akshrava.internal:8443`. mTLS authent
 
 `DETECTOR=noop` is a deliberate transport/policy test mode, not vision. The live pilot uses `DETECTOR=remote` with a pinned YOLO weight on the private CPU worker. Local Ultralytics inference serializes through a lock; remote worker micro-batching is bounded and exists only in the private inference process.
 
+### Persistence and schema ownership
+
+PostgreSQL stores only operational metadata: `devices` (binding, calibration, revocation),
+`calibration_profiles` (focal length, mount height, verification state), and `alert_events`
+(device/frame, class, bearing, confidence, severity, message key, track and timestamp). Redis
+holds short-lived admission/session counters, revocation lookups, and atomically claimed HMAC
+nonces. SQLAlchemy uses bounded Cloud SQL pools and health checks; Alembic migration revision
+`20260719_01` is applied by the deployment job before the API rollout. SQLite is for local tests
+only. Schema initialization is not raced by production API replicas.
+
+### Failure and recovery contracts
+
+| Failure | Backend behavior | Phone behavior |
+|---|---|---|
+| JWT expired/revoked or nonce replayed | Reject session/frame; emit structured security metric | Stop sending and request re-provisioning/status |
+| Redis unavailable | Fail admission closed; do not accept uncoordinated replay/rate state | Announce assistance unavailable |
+| Worker timeout/5xx or model-integrity failure | Return no hazard and bounded quality/status signal; never fabricate detections | Keep haptics/speech fail-closed and retry with backoff |
+| PostgreSQL slow/unavailable | Keep response path independent; bounded background writes may be dropped with metric | Continue only while the live result path is healthy |
+| Late, duplicate, malformed, or out-of-order frame/result | Consume paired JPEG, reject or suppress, preserve stream alignment | Drop stale result; never speak it later |
+| Camera, thermal, battery, or OEM service failure | No server-side safety claim | Speak state, release resources, and require explicit restart |
+
 ### Conservative perception policy
 
 The tracker makes repeated detections stable enough for suppression/confirmation; it does **not** infer motion. At low frame rate, box growth can be caused by wearer motion, camera swing, and autofocus. Every result keeps `motion_evidence: "insufficient"` for this operating envelope.
@@ -206,9 +256,9 @@ flowchart LR
   CR -. "optional consented diagnostics" .-> GCS["Diagnostics GCS bucket"]
 ```
 
-Terraform in [`gcp/`](gcp/) covers Cloud Run and migration job, VPC/subnets/private DNS/serverless connector, Cloud SQL, Redis, a private worker (with optional regional MIG HA), TLS wiring, Secret Manager, IAM, Artifact Registry, Cloud Armor, Monitoring, diagnostics GCS, and outputs. PKI material is managed outside Terraform state (`manage_pki_in_terraform=false`) under `gcp/pki/`; treat it as sensitive operational material and rotate it through the documented procedure.
+Terraform in [gcp/](gcp/) covers Cloud Run and migration job, VPC/subnets/private DNS/serverless connector, Cloud SQL, Redis, a private worker (with optional regional MIG HA), TLS wiring, Secret Manager, IAM, Artifact Registry, Cloud Armor, Monitoring, diagnostics GCS, and outputs. PKI material is managed outside Terraform state (`manage_pki_in_terraform=false`) under `gcp/pki/`; treat it as sensitive operational material and rotate it through the documented procedure.
 
-[`infra/docker-compose.yml`](infra/docker-compose.yml) provides a local/single-host stack with API, worker, PostgreSQL, Redis, Caddy, Prometheus, Grafana, and Alertmanager. It does not replace GCP's public edge, IAM, private VPC, or managed availability controls.
+[infra/docker-compose.yml](infra/docker-compose.yml) provides a local/single-host stack with API, worker, PostgreSQL, Redis, Caddy, Prometheus, Grafana, and Alertmanager. It does not replace GCP's public edge, IAM, private VPC, or managed availability controls.
 
 ## Security, privacy, and observability
 
@@ -286,10 +336,48 @@ Useful operational scripts:
 | `scripts/e2e_gcp_pilot.sh`, `scripts/e2e_android_gcp.sh`, `scripts/e2e_android_protocol_gcp.sh` | Exercise live WSS/remote-vision paths; they are engineering checks, not mobility approval. |
 | `scripts/upsert_calibration_profile.py` | Record mount geometry and explicitly mark a profile verified after course sign-off. |
 
-CI is defined in [`.github/workflows/ci.yml`](.github/workflows/ci.yml), Android compatibility coverage in [`.github/workflows/android-compatibility.yml`](.github/workflows/android-compatibility.yml), and the release pipeline in [`.github/workflows/release.yml`](.github/workflows/release.yml).
+CI is defined in [.github/workflows/ci.yml](.github/workflows/ci.yml), Android compatibility coverage in [.github/workflows/android-compatibility.yml](.github/workflows/android-compatibility.yml), and the release pipeline in [.github/workflows/release.yml](.github/workflows/release.yml).
 
-Passing a build, E2E script, or release workflow is **not** permission for unsupervised use. Before any supervised participant session, satisfy the controlled-course, device/carrier survival, accessibility, consent, incident-response, instructor sign-off, and rollback gates in [Important Architecture.md](<Important Architecture.md>). The test pyramid is policy/unit tests → synthetic replay → controlled static obstacles → guided sessions; moving-vehicle and collision claims are outside the current release scope.
+The compatibility workflow runs API 28–36 emulator smoke tests (Android 9 through the current
+API level), plus JVM tests and debug APK assembly. `minSdk 26` remains the install floor for
+Android 8; API 26/27 are legacy compatibility targets and require device-specific camera,
+foreground-service, TTS, and locked-screen validation before field use. CI proves build and
+protocol compatibility, not detector recall or mobility safety on a particular donated phone.
+
+### Release sequence
+
+1. Run backend policy/unit tests, Phase-0 replay, lint/dependency checks, Android unit tests, APK assembly, Compose validation, and `gcp_preflight.sh`.
+2. Apply Terraform and run the `akshrava-migrate` Cloud Run Job for the expected Alembic revision.
+3. Build/push API and worker images; install only an approved SHA-verified model on the private worker.
+4. Mint a short-lived device token, provision one approved device, and run the live WSS/remote E2E scripts.
+5. Build the signed release APK/wheel, verify the tag matches backend and Android versions, and publish the release manifest.
+6. Perform human safety, consent, controlled-course, device-survival, rollback, and mobility-instructor gates before participant use.
+
+The release pipeline deliberately does not publish model weights. A green CI or E2E result is an
+engineering release signal, never permission for unsupervised operation. Roll back the API and
+worker image together when a protocol, model, schema, or alert-policy regression is found; do not
+roll forward a database migration without a tested backup/restore plan.
+
+### Device acceptance and calibration
+
+Each field device is registered by model/build, ABI/RAM, camera, battery health, carrier, TTS
+language test, endpoint/JWT state, model/runtime version, and calibration ID. A Tier-A device is
+Android 10+, 64-bit ARM, at least 4 GB RAM, with a stable rear camera/LTE/offline TTS and passing
+30-minute heat/battery, locked-screen service, WSS freshness, and accessible Start/Stop/Mute tests.
+Android 8/9 devices may be used for developer compatibility only. A profile is not marked verified
+until the mount, pose, focal geometry, and controlled-course evidence pass; unverified profiles
+keep `range_valid=false`.
+
+Passing a build, E2E script, or release workflow is **not** permission for unsupervised use. Before any supervised participant session, satisfy the controlled-course, device/carrier survival, accessibility, consent, incident-response, instructor sign-off, and rollback gates in [Important Architecture.md](Important%20Architecture.md). The test pyramid is policy/unit tests → synthetic replay → controlled static obstacles → guided sessions; moving-vehicle and collision claims are outside the current release scope.
 
 ## License and model governance
 
 Application code is Apache-2.0. YOLO/Ultralytics weights can carry AGPL-3.0 or commercial licensing obligations. Do not activate a model until its weight, dataset, labels, export/runtime, SHA-256, intended deployment licence, target-device measurements, and controlled-course evaluation are approved together.
+
+## Scope guard
+
+The following are intentionally not enabled by this architecture: GPS hazard memory, safe-route or
+crossing advice, optical-flow/looming or time-to-collision claims, continuous OCR, facial
+recognition, iOS support, broad language rollout, unreviewed local fallback models, and large-scale
+unsupervised operations. [NOT_NOW.md](NOT_NOW.md) and [Important Architecture.md](Important%20Architecture.md)
+remain the governing deferred-scope and evidence boundary.
