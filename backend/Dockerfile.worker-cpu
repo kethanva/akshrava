@@ -31,8 +31,7 @@ ARG YOLO_WEIGHTS_SHA256
 RUN test -n "$YOLO_WEIGHTS_SHA256" || (echo "YOLO_WEIGHTS_SHA256 build-arg required" >&2; exit 1) && \
     echo "${YOLO_WEIGHTS_SHA256}  /models/yolo11s.pt" | sha256sum -c - && \
     pip install --upgrade "pip<25" && \
-    pip install "gunicorn>=23,<24" "opencv-python-headless>=4.8,<5" ".[yolo]" && \
-    pip uninstall -y opencv-python || true && \
+    pip install "gunicorn>=23,<24" ".[yolo]" && \
     addgroup --system appgroup && adduser --system --group appuser && \
     chown -R appuser:appgroup /app /models
 
