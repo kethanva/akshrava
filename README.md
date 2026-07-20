@@ -65,14 +65,14 @@ The current worker setting is `worker_use_gpu=false`; GPU quota is not assumed. 
 ```mermaid
 sequenceDiagram
   autonumber
-  participant Cam as CameraX
-  participant Phone as AssistService / ProtocolClient
-  participant API as Cloud Run FastAPI
-  participant Redis as Memorystore Redis
-  participant Worker as Private remote worker
-  participant Policy as Tracker / hazard policy
-  participant DB as Cloud SQL
-  participant Audio as AlertManager
+  participant Cam as "CameraX"
+  participant Phone as "AssistService / ProtocolClient"
+  participant API as "Cloud Run FastAPI"
+  participant Redis as "Memorystore Redis"
+  participant Worker as "Private remote worker"
+  participant Policy as "Tracker / hazard policy"
+  participant DB as "Cloud SQL"
+  participant Audio as "AlertManager"
 
   Cam->>Phone: latest YUV frame
   Phone->>Phone: pose, blur, duplicate and cadence gates
@@ -84,10 +84,10 @@ sequenceDiagram
   Worker-->>API: detection boxes and labels
   API->>Policy: associate tracks; conservative score and compose
   Policy-->>API: compact result / quality hint / no hazard
-  par response path
+  par Response path
     API-->>Phone: JSON result echoing capture_mono_ms
     Phone->>Audio: reject stale/mismatched; speak template + haptic
-  and persistence path
+  and Persistence path
     API->>DB: background alert/audit record
   end
 ```
@@ -239,6 +239,27 @@ The tracker makes repeated detections stable enough for suppression/confirmation
 
 Range remains invalid unless a verified `calibration_profiles` record and pose/agreement gates pass. Invalid, stale, or uncertain geometry never becomes a spoken distance. The policy permits urgent language only for a validated nearby central obstruction; vehicle language is awareness-only and directional. An uncertain frame, stale result, blocked camera, unavailable detector, or missing valid fallback produces no hazard claim and, where appropriate, an explicit state message.
 
+```mermaid
+flowchart TD
+  Frame["Authenticated, rate-admitted JPEG"] --> Infer["Detector → boxes"]
+  Infer --> Late{"Inference within\nalert-age budget?"}
+  Late -->|"No"| Suppress["late_suppressed\nno hazard speech"]
+  Late -->|"Yes"| Track["Per-session SimpleTracker\nassociate + stability"]
+  Track --> Candidate{"Stable candidate\nand allowed class?"}
+  Candidate -->|"No"| Observe["Keep tracking / return no hazard"]
+  Candidate -->|"Yes"| Geometry{"Verified calibration\n+ fresh pose + agreement?"}
+  Geometry -->|"Yes"| Range["range_valid = true\ncentral nearby obstruction may be S1"]
+  Geometry -->|"No"| Caution["range_valid = false\nnever speak distance or urgency"]
+  Range --> Policy["AlertPolicy\ncooldown + per-device budget"]
+  Caution --> Policy
+  Policy --> Priority{"Priority look?"}
+  Priority -->|"Yes"| Look["Return one fresh look_summary\nno crossing/motion claim"]
+  Priority -->|"No"| Admit{"Budget/cooldown admits?"}
+  Admit -->|"No"| Observe
+  Admit -->|"Yes"| Compose["message_key + bearing + haptic\nmotion_evidence: insufficient"]
+  Compose --> Phone["Phone checks frame ID + age\nthen template TTS/haptic"]
+```
+
 ## GCP and local infrastructure
 
 ```mermaid
@@ -276,6 +297,29 @@ Terraform in [gcp/](gcp/) covers Cloud Run and migration job, VPC/subnets/privat
 - Use a rotating random device identifier, not IMEI. Keep alert/audit/consent records purpose-limited and access-controlled in PostgreSQL.
 - Consented diagnostics are separate from normal inference: blur faces/plates before upload, retain only under the approved workflow, and support revocation/deletion.
 - Keep raw frames out of application logs, metrics, dashboards, and public tools. Encrypt data in transit and at rest.
+
+```mermaid
+flowchart LR
+  subgraph Ephemeral["Ephemeral inference path — default"]
+    Cam["Camera JPEG in RAM"] --> WSS["TLS WSS"] --> API["Cloud Run memory"]
+    API --> Worker["Private mTLS/HMAC worker memory"]
+    Worker --> Drop["Discard image after inference"]
+  end
+
+  subgraph Metadata["Allowed operational metadata"]
+    API --> Redis2[("Redis\nshort-lived admission/nonces")]
+    API --> SQL2[("Cloud SQL\ndevice, calibration, alert/audit metadata")]
+    API --> Metrics2["Metrics/logs\nno raw image payload"]
+  end
+
+  subgraph Diagnostic["Separate diagnostic path — disabled by default"]
+    Consent{"Explicit consent +\nreviewed on-device blur gate?"}
+    Consent -->|"No"| Block["Do not upload"]
+    Consent -->|"Yes"| GCS["Restricted GCS diagnostics bucket\nretention/deletion workflow"]
+  end
+
+  API -. "only if all gates pass" .-> Consent
+```
 
 ### Observability and response
 
@@ -357,6 +401,22 @@ The release pipeline deliberately does not publish model weights. A green CI or 
 engineering release signal, never permission for unsupervised operation. Roll back the API and
 worker image together when a protocol, model, schema, or alert-policy regression is found; do not
 roll forward a database migration without a tested backup/restore plan.
+
+```mermaid
+flowchart LR
+  Change["Code / configuration / model change"] --> CI["CI\nbackend · Android · Compose · Terraform"]
+  CI --> Tests{"Engineering checks\nall green?"}
+  Tests -->|"No"| Fix["Fix or rollback change"] --> Change
+  Tests -->|"Yes"| Migration["Terraform plan/apply\nAlembic migration job"]
+  Migration --> Artifact["Build signed APK + wheel\npush pinned API/worker images"]
+  Artifact --> Verify["One approved device\nprovision + live WSS E2E"]
+  Verify --> Technical{"Technical release\nverification passes?"}
+  Technical -->|"No"| Fix
+  Technical -->|"Yes"| Human["Human release gates\nmodel evidence · device survival ·\nconsent · instructor sign-off"]
+  Human --> Field{"Supervised use\nauthorized?"}
+  Field -->|"No"| Hold["Hold release / improve evidence"]
+  Field -->|"Yes"| Pilot["Controlled supervised pilot\nmonitor + rollback ready"]
+```
 
 ### Device acceptance and calibration
 
