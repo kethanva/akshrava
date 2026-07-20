@@ -22,7 +22,7 @@ from .service import VisionService
 from .session_admission import session_admission_for
 from .storage import Store
 from .gcp_storage import GcpDiagnosticStorage
-from .session_handler import FrameStreamHandler
+from .session_handler import MAX_CONTROL_MESSAGE_BYTES, FrameStreamHandler  # noqa: F401 — re-exported operational limit
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -37,7 +37,6 @@ NORMAL_FRAME_RATE_PER_SECOND = 1.2
 # key suffix gives it a separate bucket so a look burst never eats the ambient frame budget.
 PRIORITY_FRAME_RATE_PER_SECOND = 0.5
 PRIORITY_FRAME_BURST = 2.0
-MAX_CONTROL_MESSAGE_BYTES = 4096
 
 settings = Settings.from_env()
 store = Store(
@@ -119,9 +118,16 @@ async def lifespan(app):
 app = FastAPI(title="Akshrava backend", version="0.1.0", lifespan=lifespan)
 
 
+@app.get("/livez")
+async def livez():
+    """Process liveness for probes. Prefer /livez over /healthz on *.run.app (GFE reserves /healthz)."""
+    return {"ok": True, "detector": settings.detector}
+
+
 @app.get("/healthz")
 async def healthz():
-    return {"ok": True, "detector": settings.detector}
+    # Kept for Compose/local probes. On Cloud Run *.run.app, GFE may intercept /healthz — use /livez.
+    return await livez()
 
 
 @app.get("/readyz")
@@ -129,12 +135,13 @@ async def readyz():
     """Readiness is separate from liveness so a dead database removes this API from service."""
     try:
         await asyncio.wait_for(store.ping(), timeout=settings.ready_timeout_ms / 1000.0)
-        if settings.environment == "production":
+        # Pilot and production both depend on Redis for admission + rate limits when REDIS_URL is set.
+        if settings.environment != "development" or settings.redis_url:
             await asyncio.wait_for(device_rate_limiter.health(), timeout=settings.ready_timeout_ms / 1000.0)
             await asyncio.wait_for(session_admission.health(), timeout=settings.ready_timeout_ms / 1000.0)
     except Exception:
-        logger.exception("database readiness check failed")
-        raise HTTPException(status_code=503, detail="database unavailable")
+        logger.exception("readiness check failed")
+        raise HTTPException(status_code=503, detail="dependencies unavailable")
     return {"ok": True, "detector": settings.detector}
 
 
@@ -173,6 +180,21 @@ async def _retention_loop(stop: asyncio.Event):
             await asyncio.wait_for(stop.wait(), timeout=6 * 60 * 60)
         except asyncio.TimeoutError:
             continue
+
+
+async def _renew_or_readmit(session_id: str) -> bool:
+    """Keep a live socket admitted across a lapsed lease.
+
+    The Redis admission lease is short (~3 min) and is only refreshed by app-level traffic.
+    A perfectly healthy but *quiet* session -- a stationary user at 0.2 FPS whose frames are
+    all duplicate-dropped on the phone -- legitimately sends nothing for longer than the lease,
+    so renew() failing must not be treated as an eviction: the connection is alive and the user
+    is mid-walk. Re-admit through try_open() (idempotent for an id already present) and only
+    close when fleet capacity is genuinely exhausted.
+    """
+    if await session_admission.renew(session_id):
+        return True
+    return await session_admission.try_open(session_id)
 
 
 def _http_device_id(authorization: Optional[str]) -> str:
@@ -288,7 +310,7 @@ async def session(websocket: WebSocket):
                         await websocket.close(code=resp["code"])
                         return
                     # Keep admission lease alive on ping / control traffic.
-                    if not await session_admission.renew(session_id):
+                    if not await _renew_or_readmit(session_id):
                         await websocket.close(code=1013)
                         return
                     await websocket.send_json(resp)
@@ -302,7 +324,7 @@ async def session(websocket: WebSocket):
                 elif resp.get("_action") == "continue":
                     continue
                 elif resp.get("_action") == "analyze":
-                    if not await session_admission.renew(session_id):
+                    if not await _renew_or_readmit(session_id):
                         await websocket.close(code=1013)
                         return
                     header = resp["header"]

@@ -400,3 +400,75 @@ def test_websocket_protocol_violation_bytes_first():
 
 
 
+
+
+def test_quiet_session_survives_a_lapsed_admission_lease(monkeypatch):
+    # Regression test: the admission lease is short and only refreshed by app-level traffic.
+    # A healthy but quiet session (stationary user, all frames duplicate-dropped on the phone)
+    # legitimately sends nothing for longer than the lease. renew() failing used to close the
+    # socket 1013 mid-walk; it must instead re-admit via try_open() and only close when fleet
+    # capacity is genuinely exhausted.
+    class LapsedLeaseAdmission:
+        def __init__(self):
+            self.renew_calls = 0
+            self.reopen_calls = 0
+
+        async def try_open(self, session_id):
+            self.reopen_calls += 1
+            return True
+
+        async def renew(self, session_id):
+            self.renew_calls += 1
+            return False  # lease always lapsed
+
+        async def close(self, session_id):
+            return None
+
+        async def health(self):
+            return None
+
+        async def shutdown(self):
+            return None
+
+    admission = LapsedLeaseAdmission()
+    monkeypatch.setattr(main, "session_admission", admission)
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/session?token=dev-device-token") as websocket:
+            assert websocket.receive_json()["type"] == "ready"
+            websocket.send_json({"type": "ping"})
+            # Socket must stay open: lapsed lease was re-admitted, pong still arrives.
+            assert websocket.receive_json() == {"type": "pong"}
+    assert admission.renew_calls >= 1
+    assert admission.reopen_calls >= 2  # initial open + at least one re-admit
+
+
+def test_capacity_exhaustion_after_lease_lapse_still_closes(monkeypatch):
+    class FullFleetAdmission:
+        def __init__(self):
+            self.opened_once = False
+
+        async def try_open(self, session_id):
+            if not self.opened_once:
+                self.opened_once = True
+                return True
+            return False  # fleet is genuinely full on re-admit
+
+        async def renew(self, session_id):
+            return False
+
+        async def close(self, session_id):
+            return None
+
+        async def health(self):
+            return None
+
+        async def shutdown(self):
+            return None
+
+    monkeypatch.setattr(main, "session_admission", FullFleetAdmission())
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/session?token=dev-device-token") as websocket:
+            assert websocket.receive_json()["type"] == "ready"
+            websocket.send_json({"type": "ping"})
+            with pytest.raises(WebSocketDisconnect):
+                websocket.receive_json()

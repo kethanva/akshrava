@@ -55,6 +55,18 @@ variable "yolo_weights_sha256" {
   description = "Pinned SHA-256 of YOLO weights on the worker. Required when detector=remote."
 }
 
+variable "worker_use_gpu" {
+  type        = bool
+  default     = true
+  description = "When true, provision an L4 GPU worker (requires NVIDIA_L4 quota). When false, use a CPU VM for supervised remote-detector bench (REQUIRE_GPU=false)."
+}
+
+variable "worker_machine_type" {
+  type        = string
+  default     = ""
+  description = "Override worker machine type. Empty selects g2-standard-4 (GPU) or n2-standard-8 (CPU) from worker_use_gpu."
+}
+
 variable "database_schema_revision" {
   type        = string
   default     = "20260719_01"

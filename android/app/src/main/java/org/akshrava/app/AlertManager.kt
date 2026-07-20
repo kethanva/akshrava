@@ -30,6 +30,9 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
         const val BUSY_COUNT = 3
         const val SUMMARY_COOLDOWN_MS = 5_000L
         const val REPEATABLE_WINDOW_MS = 30_000L
+        // An urgent phrase's comprehension-critical head must land: a second urgent alert may
+        // queue behind it but must not cut it off within its first 350 ms (architecture §5).
+        const val URGENT_PROTECT_MS = 350L
     }
 
     private val api = Executors.newSingleThreadExecutor()
@@ -45,6 +48,7 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
     @Volatile private var mutedUntilMs = 0L
     @Volatile private var lastAlertText: String? = null
     @Volatile private var lastAlertAtMs = 0L
+    private var lastUrgentSpokenAtMs = 0L
     private data class PendingStatus(val text: String, val onComplete: (() -> Unit)?)
 
     private val completionLock = Any()
@@ -111,8 +115,12 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
         // buzz needs no words and is exactly the channel a muted user still relies on (§6.4).
         vibrate(haptic)
         if (now < mutedUntilMs) return
-        // S1 cuts the current utterance mid-word; interruption itself signals urgency.
-        speak(text, flush = urgent, id = cooldownKey)
+        // S1 cuts a CAUTION utterance mid-word; interruption itself signals urgency. But an
+        // urgent phrase's own first 350 ms is protected: a second urgent alert queues behind it
+        // instead of flushing, so the head of the first warning is always comprehensible.
+        val protectingUrgentHead = urgent && now - lastUrgentSpokenAtMs < URGENT_PROTECT_MS
+        if (urgent) lastUrgentSpokenAtMs = now
+        speak(text, flush = urgent && !protectingUrgentHead, id = cooldownKey)
     }
 
     /** Double-press headset mute. Auto-unmutes after [durationMs] so it can never be left silently dead. */

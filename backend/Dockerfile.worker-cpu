@@ -1,0 +1,30 @@
+# CPU remote worker for supervised GCP bench when NVIDIA_L4/T4 quota is unavailable.
+# Build with: docker build --build-arg YOLO_WEIGHTS_SHA256=<sha> -f Dockerfile.worker-cpu .
+# Requires yolo11s.pt in the build context (download + sha256sum before build).
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+COPY pyproject.toml ./
+COPY akshrava_backend ./akshrava_backend
+COPY yolo11s.pt /models/yolo11s.pt
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+ARG YOLO_WEIGHTS_SHA256
+RUN test -n "$YOLO_WEIGHTS_SHA256" || (echo "YOLO_WEIGHTS_SHA256 build-arg required" >&2; exit 1) && \
+    echo "${YOLO_WEIGHTS_SHA256}  /models/yolo11s.pt" | sha256sum -c - && \
+    pip install --upgrade "pip<25" && \
+    pip install "gunicorn>=23,<24" ".[yolo]" && \
+    addgroup --system appgroup && adduser --system --group appuser && \
+    chown -R appuser:appgroup /app /models
+
+USER appuser
+EXPOSE 8000
+
+CMD ["gunicorn", "akshrava_backend.worker:app", "--workers", "1", "--worker-class", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--timeout", "60", "--graceful-timeout", "30", "--access-logfile", "-", "--error-logfile", "-"]

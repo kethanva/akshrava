@@ -13,4 +13,10 @@ chmod 600 "$TMP/jwt-private.pem"
 
 export JWT_ALGORITHM=RS256
 export JWT_PRIVATE_KEY_FILE="$TMP/jwt-private.pem"
-python3 "$ROOT/scripts/mint_device_token.py" "$DEVICE_ID" --days "$DAYS"
+# Prefer the backend venv (PyJWT) when present; fall back to PATH python3.
+if [[ -x "$ROOT/backend/.venv/bin/python" ]]; then
+  PY="$ROOT/backend/.venv/bin/python"
+else
+  PY="python3"
+fi
+"$PY" "$ROOT/scripts/mint_device_token.py" "$DEVICE_ID" --days "$DAYS"

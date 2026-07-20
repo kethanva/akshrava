@@ -1,9 +1,18 @@
+import asyncio
 import os
+from concurrent.futures import ThreadPoolExecutor
+
+# Diagnostic uploads are a consented, blur-gated workflow (see config validation and PRIVACY.md).
+# This class is the transport only; it never decides consent. Bound the pool so a burst of
+# uploads cannot spawn dozens of threads each pinning a full JPEG in memory.
+_MAX_UPLOAD_WORKERS = 8
+
 
 class GcpDiagnosticStorage:
-    """Uploads opted-in diagnostic camera frames to Google Cloud Storage.
+    """Uploads consented, blur-gated diagnostic camera frames to Google Cloud Storage.
 
-    Complies with the 30-day auto-deletion rules via the bucket's lifecycle policy.
+    The bucket is authenticated-access only; this returns a ``gs://`` URI, never a public URL.
+    Objects are auto-deleted by the bucket's 30-day lifecycle policy.
     """
 
     def __init__(self, bucket_name: str = ""):
@@ -22,17 +31,16 @@ class GcpDiagnosticStorage:
                 raise ImportError("gcp dependency group not installed; run pip install '.[gcp]'") from exc
             self.client = storage.Client()
             self.bucket = self.client.bucket(self.bucket_name)
-            from concurrent.futures import ThreadPoolExecutor
-            self._executor = ThreadPoolExecutor(max_workers=50, thread_name_prefix="akshrava-gcs-upload")
+            self._executor = ThreadPoolExecutor(
+                max_workers=_MAX_UPLOAD_WORKERS, thread_name_prefix="akshrava-gcs-upload"
+            )
 
     async def upload_frame(self, file_name: str, jpeg_bytes: bytes) -> str:
-        """Uploads a raw JPEG image to the GCS bucket.
+        """Upload one JPEG to the diagnostics bucket and return its ``gs://`` URI.
 
-        Returns the public URL (or GS URI if authenticated-only access is preferred).
+        GCS uploads block, so they run in a bounded executor off the event loop.
         """
         self._init_client()
-        # GCS uploads are blocking, so run in the isolated executor to avoid event loop lag
-        import asyncio
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(self._executor, self._upload_blocking, file_name, jpeg_bytes)
         return f"gs://{self.bucket_name}/{file_name}"

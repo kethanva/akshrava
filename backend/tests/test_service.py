@@ -243,16 +243,15 @@ async def test_priority_look_bypasses_cooldown_and_returns_look_summary():
 
 @pytest.mark.asyncio
 async def test_late_suppressed_priority_look_says_unchecked_not_clear():
-    # Regression test: a look answered while the server is behind its freshness budget used to
-    # say "No clear hazard in this view" -- a confident false claim, since the frame was never
-    # scored at all (late_suppressed skips scoring). A user who explicitly asked "what's ahead"
-    # must be told the check didn't happen, not reassured that it came back empty.
+    # Regression test: a look answered while the server is behind its freshness budget must not
+    # reassure the user that the view was empty — the frame was never scored (late_suppressed).
     service = VisionService(SlowFixedPersonDetector(delay_s=0.02), RecordingStore(), alert_max_age_ms=1)
     state = SessionState(device_id="device-1")
     look = await service.analyze(state, _header(1, 1_000, priority=True, mode="priority"), b"jpeg")
     assert look["late_suppressed"] is True
     assert look["hazard"] is None
     assert "clear" not in look["look_summary"].lower()
+    assert "could not" in look["look_summary"].lower() or "try again" in look["look_summary"].lower()
 
 
 @pytest.mark.asyncio

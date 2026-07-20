@@ -10,35 +10,37 @@ resource "google_service_account" "worker_sa" {
 }
 
 locals {
-  api_secret_ids = [
-    google_secret_manager_secret.jwt_public.secret_id,
-    google_secret_manager_secret.worker_shared.secret_id,
-    google_secret_manager_secret.database_url.secret_id,
-    google_secret_manager_secret.database_url_sync.secret_id,
-    google_secret_manager_secret.redis_url.secret_id,
-    google_secret_manager_secret.worker_tls_ca.secret_id,
-    google_secret_manager_secret.worker_tls_client_cert.secret_id,
-    google_secret_manager_secret.worker_tls_client_key.secret_id,
-    google_secret_manager_secret.metrics_scrape_token.secret_id,
-  ]
-  worker_secret_ids = [
-    google_secret_manager_secret.worker_shared.secret_id,
-    google_secret_manager_secret.nonce_redis_url.secret_id,
-    google_secret_manager_secret.worker_tls_ca.secret_id,
-    google_secret_manager_secret.worker_tls_server_cert.secret_id,
-    google_secret_manager_secret.worker_tls_server_key.secret_id,
-  ]
+  # Static keys so for_each is known at plan time (secret_id strings are fixed in config).
+  api_secret_ids = toset([
+    "akshrava-jwt-public",
+    "akshrava-worker-secret",
+    "akshrava-database-url",
+    "akshrava-database-url-sync",
+    "akshrava-redis-url",
+    "akshrava-worker-tls-ca",
+    "akshrava-worker-tls-client-cert",
+    "akshrava-worker-tls-client-key",
+    "akshrava-metrics-scrape-token",
+  ])
+  worker_secret_ids = toset([
+    "akshrava-worker-secret",
+    "akshrava-nonce-redis-url",
+    "akshrava-worker-tls-ca",
+    "akshrava-worker-tls-server-cert",
+    "akshrava-worker-tls-server-key",
+    "akshrava-metrics-scrape-token",
+  ])
 }
 
 resource "google_secret_manager_secret_iam_member" "api_secret_accessor" {
-  for_each  = toset(local.api_secret_ids)
+  for_each  = local.api_secret_ids
   secret_id = each.value
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.api_sa.email}"
 }
 
 resource "google_secret_manager_secret_iam_member" "worker_secret_accessor" {
-  for_each  = toset(local.worker_secret_ids)
+  for_each  = local.worker_secret_ids
   secret_id = each.value
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.worker_sa.email}"

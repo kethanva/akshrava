@@ -1,7 +1,7 @@
 resource "google_compute_instance" "worker" {
   count        = local.deploy_remote_worker ? 1 : 0
   name         = "akshrava-gpu-worker"
-  machine_type = "g2-standard-4"
+  machine_type = var.worker_machine_type != "" ? var.worker_machine_type : (var.worker_use_gpu ? "g2-standard-4" : "n2-standard-8")
   zone         = var.zone
   tags         = ["akshrava-worker"]
 
@@ -13,9 +13,12 @@ resource "google_compute_instance" "worker" {
     }
   }
 
-  guest_accelerator {
-    type  = "nvidia-l4"
-    count = 1
+  dynamic "guest_accelerator" {
+    for_each = var.worker_use_gpu ? [1] : []
+    content {
+      type  = "nvidia-l4"
+      count = 1
+    }
   }
 
   network_interface {
@@ -35,11 +38,12 @@ resource "google_compute_instance" "worker" {
       worker_image        = local.worker_image
       environment         = var.environment
       yolo_weights_sha256 = var.yolo_weights_sha256
+      worker_use_gpu      = var.worker_use_gpu
     })
   }
 
   scheduling {
-    on_host_maintenance = "TERMINATE"
+    on_host_maintenance = var.worker_use_gpu ? "TERMINATE" : "MIGRATE"
     automatic_restart   = true
   }
 
@@ -51,6 +55,7 @@ resource "google_compute_instance" "worker" {
     google_secret_manager_secret_version.worker_tls_ca,
     google_secret_manager_secret_version.worker_tls_server_cert,
     google_secret_manager_secret_version.worker_tls_server_key,
+    google_secret_manager_secret_version.metrics_scrape_token,
     google_artifact_registry_repository.containers,
   ]
 }

@@ -1,0 +1,30 @@
+# Cloud Build for the Akshrava API image (noop detector + GCP client libs).
+substitutions:
+  _REGION: us-central1
+  _REPO: akshrava
+  _IMAGE: akshrava-api
+  _INSTALL_YOLO: "false"
+  _INSTALL_CLOUD_PROVIDER: gcp
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --build-arg
+      - INSTALL_YOLO=${_INSTALL_YOLO}
+      - --build-arg
+      - INSTALL_CLOUD_PROVIDER=${_INSTALL_CLOUD_PROVIDER}
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:latest
+      - -f
+      - Dockerfile
+      - .
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:latest
+
+options:
+  machineType: E2_HIGHCPU_8
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: 1200s

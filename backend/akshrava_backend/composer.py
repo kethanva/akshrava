@@ -9,7 +9,8 @@ TEMPLATES_EN = {
     "obstacle_ahead": "Obstacle ahead",
     "vehicle_nearby": "Vehicle nearby, {bearing}",
     "busy_road": "Busy road, careful",
-    "look_clear": "No clear hazard in this view",
+    # Never imply the path is safe/clear — silence never means safety (architecture §1).
+    "look_clear": "No alert in this recent view. Continue using cane or guide",
     "look_unavailable": "Could not check just now, try again",
 }
 
@@ -17,7 +18,7 @@ TEMPLATES_HI = {
     "obstacle_ahead": "आगे रुकावट",
     "vehicle_nearby": "वाहन {bearing_hi}",
     "busy_road": "व्यस्त सड़क, सावधान",
-    "look_clear": "इस दृश्य में कोई स्पष्ट खतरा नहीं",
+    "look_clear": "इस हाल के दृश्य में कोई अलर्ट नहीं. बेंत या गाइड का उपयोग जारी रखें",
     "look_unavailable": "अभी जांच नहीं हो सकी, फिर कोशिश करें",
 }
 

@@ -25,6 +25,7 @@ YOLO_WEIGHTS=/models/approved.pt
 YOLO_WEIGHTS_SHA256=__APPROVED_SHA__
 CLOUD_FALLBACK_PROVIDER=none
 REMOTE_WORKER_SECRET=preflight_remote_worker_secret_012345
+METRICS_SCRAPE_TOKEN=preflight_metrics_scrape_token_012345
 EOF
 sed -i.bak "s/__APPROVED_SHA__/$approved_sha/" "$fixture_dir/.env"
 

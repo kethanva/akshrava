@@ -39,12 +39,17 @@ def test_iac_app_structure():
     manage_block = tf_content.split('variable "manage_pki_in_terraform"', 1)[1].split("variable ", 1)[0]
     assert "default     = false" in manage_block or "default = false" in manage_block
     
-    # Test GPU Worker VM
+    # Test GPU Worker VM. The worker machine type / accelerator are selected by the
+    # worker_use_gpu toggle (GPU is the default; a CPU VM is a supervised bench option), so
+    # assert the GPU contract is present rather than a single hardcoded literal line.
     assert 'resource "google_compute_instance" "worker"' in tf_content, "GPU Worker instance is missing"
-    assert 'machine_type = "g2-standard-4"' in tf_content, "GPU Worker is not using g2-standard-4"
-    assert 'type  = "nvidia-l4"' in tf_content, "GPU Worker is not using nvidia-l4 GPU"
-    assert 'image = "cos-cloud/cos-stable"' in tf_content, "GPU Worker is not using Container-Optimized OS"
+    assert '"g2-standard-4"' in tf_content, "GPU Worker default machine type g2-standard-4 is missing"
+    assert re.search(r'type\s*=\s*"nvidia-l4"', tf_content), "GPU Worker is not using nvidia-l4 GPU"
+    assert re.search(r'image\s*=\s*"cos-cloud/cos-stable"', tf_content), "GPU Worker is not using Container-Optimized OS"
     assert 'startup-script' in tf_content or 'cos-extensions install gpu' in tf_content, "GPU Worker startup script missing"
+    # The GPU worker must remain the default so production does not silently deploy a CPU box.
+    gpu_block = tf_content.split('variable "worker_use_gpu"', 1)[1].split("variable ", 1)[0]
+    assert "default     = true" in gpu_block or "default = true" in gpu_block, "worker_use_gpu must default to true"
 
 def test_iac_database_structure():
     tf_content = get_all_tf_content()

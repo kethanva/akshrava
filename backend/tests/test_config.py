@@ -112,3 +112,21 @@ def test_pilot_remote_inference_requires_mutual_tls_material(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     with pytest.raises(ValueError, match="client certificate"):
         Settings.from_env()
+
+
+def test_diagnostic_uploads_are_blocked_outside_development_until_blur_exists(monkeypatch):
+    # Raw-frame diagnostic upload has no in-repo face/plate blur; PRIVACY.md requires
+    # blur-before-upload. A signed consent claim + bucket must NOT be enough to ship unblurred
+    # bystander imagery to cloud in pilot/production.
+    _pilot_rs256(monkeypatch)
+    monkeypatch.setenv("DIAGNOSTIC_UPLOADS_ENABLED", "true")
+    monkeypatch.setenv("GCP_DIAGNOSTICS_BUCKET", "akshrava-diagnostics")
+    with pytest.raises(ValueError, match="DIAGNOSTIC_UPLOADS_ENABLED is not permitted outside development"):
+        Settings.from_env()
+
+
+def test_diagnostic_uploads_plumbing_is_allowed_in_development(monkeypatch):
+    monkeypatch.setenv("AKSHRAVA_ENV", "development")
+    monkeypatch.setenv("DIAGNOSTIC_UPLOADS_ENABLED", "true")
+    monkeypatch.setenv("GCP_DIAGNOSTICS_BUCKET", "akshrava-diagnostics")
+    assert Settings.from_env().diagnostic_uploads_enabled is True

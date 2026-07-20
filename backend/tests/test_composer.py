@@ -3,9 +3,14 @@ from akshrava_backend.domain import Hazard
 
 
 def test_look_summary_clear_and_hazard_never_claims_approach():
-    assert "clear" in look_summary(None, "en").lower()
-    assert "approach" not in look_summary(None, "en").lower()
-    assert "safe" not in look_summary(None, "en").lower()
+    # Checked empty view must not sound like "path is clear / safe".
+    summary_clear = look_summary(None, "en")
+    assert "alert" in summary_clear.lower()
+    assert "cane" in summary_clear.lower() or "guide" in summary_clear.lower()
+    assert "approach" not in summary_clear.lower()
+    assert "safe" not in summary_clear.lower()
+    # Ban the ambiguous word "clear" in user-facing look speech.
+    assert "clear" not in summary_clear.lower()
     hazard = Hazard(
         kind="vehicle",
         level="caution",
@@ -20,7 +25,8 @@ def test_look_summary_clear_and_hazard_never_claims_approach():
 
 
 def test_hindi_look_clear_language():
-    assert "खतरा" in look_summary(None, "hi") or "स्पष्ट" in look_summary(None, "hi")
+    text = look_summary(None, "hi")
+    assert "अलर्ट" in text or "बेंत" in text or "गाइड" in text
 
 
 def test_unchecked_look_never_claims_the_view_was_clear():
@@ -30,8 +36,10 @@ def test_unchecked_look_never_claims_the_view_was_clear():
     unchecked = look_summary(None, "en", checked=False)
     assert "clear" not in unchecked.lower()
     assert "no hazard" not in unchecked.lower()
-    checked_clear = look_summary(None, "en", checked=True)
-    assert "clear" in checked_clear.lower()
+    assert "alert" not in unchecked.lower() or "could not" in unchecked.lower()
+    checked_empty = look_summary(None, "en", checked=True)
+    assert "clear" not in checked_empty.lower()
+    assert "cane" in checked_empty.lower() or "guide" in checked_empty.lower()
 
 
 def test_hazard_payload_includes_spoken_preview():

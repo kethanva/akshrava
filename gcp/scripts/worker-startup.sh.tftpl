@@ -1,44 +1,50 @@
 #!/bin/bash
 set -euo pipefail
 
-# Terraform interpolates $${...} as shell $${...}; ${project_id} etc. come from templatefile().
+# Paths are literal (avoid Terraform $$ / shell $ escaping pitfalls on COS).
 CERT_DIR=/var/lib/akshrava/certs
-mkdir -p "$$CERT_DIR" /var/lib/akshrava/models
+mkdir -p /var/lib/akshrava/certs /var/lib/akshrava/models
 
-if ! cos-extensions install gpu -- -version latest; then
-  echo "FATAL: cos-extensions GPU install failed" >&2
-  exit 1
-fi
-gpu_ready=0
-for _ in $$(seq 1 60); do
-  if [[ -e /dev/nvidia0 ]]; then
-    gpu_ready=1
-    break
+WORKER_USE_GPU="${worker_use_gpu}"
+if [[ "$WORKER_USE_GPU" == "true" ]]; then
+  if ! cos-extensions install gpu -- -version latest; then
+    echo "FATAL: cos-extensions GPU install failed" >&2
+    exit 1
   fi
-  sleep 2
-done
-if [[ "$$gpu_ready" -ne 1 ]]; then
-  echo "FATAL: /dev/nvidia0 did not appear after GPU install" >&2
-  exit 1
+  gpu_ready=0
+  for _ in $(seq 1 60); do
+    if [[ -e /dev/nvidia0 ]]; then
+      gpu_ready=1
+      break
+    fi
+    sleep 2
+  done
+  if [[ "$gpu_ready" -ne 1 ]]; then
+    echo "FATAL: /dev/nvidia0 did not appear after GPU install" >&2
+    exit 1
+  fi
+else
+  echo "CPU worker mode: skipping NVIDIA install (supervised bench only)."
 fi
 
 access_secret() {
-  local name="$$1"
+  local name="$1"
   docker run --rm \
     -e "CLOUDSDK_CORE_PROJECT=${project_id}" \
     google/cloud-sdk:slim \
-    gcloud secrets versions access latest --secret="$$name"
+    gcloud secrets versions access latest --secret="$name"
 }
 
-access_secret akshrava-worker-tls-ca >"$$CERT_DIR/ca.pem"
-access_secret akshrava-worker-tls-server-cert >"$$CERT_DIR/server.pem"
-access_secret akshrava-worker-tls-server-key >"$$CERT_DIR/server.key"
-chmod 600 "$$CERT_DIR"/*
+access_secret akshrava-worker-tls-ca >"$CERT_DIR/ca.pem"
+access_secret akshrava-worker-tls-server-cert >"$CERT_DIR/server.pem"
+access_secret akshrava-worker-tls-server-key >"$CERT_DIR/server.key"
+chmod 600 "$CERT_DIR"/*
 
-WORKER_SECRET="$$(access_secret akshrava-worker-secret)"
-NONCE_REDIS_URL="$$(access_secret akshrava-nonce-redis-url)"
+WORKER_SECRET="$(access_secret akshrava-worker-secret)"
+NONCE_REDIS_URL="$(access_secret akshrava-nonce-redis-url)"
+METRICS_TOKEN="$(access_secret akshrava-metrics-scrape-token)"
 
-cat >"$$CERT_DIR/Caddyfile" <<'EOF'
+cat >"$CERT_DIR/Caddyfile" <<'EOF'
 worker.akshrava.internal:8443 {
   tls /etc/caddy/certs/server.pem /etc/caddy/certs/server.key {
     client_auth {
@@ -50,27 +56,60 @@ worker.akshrava.internal:8443 {
 }
 EOF
 
-if command -v docker-credential-gcr >/dev/null 2>&1; then
-  docker-credential-gcr configure-docker "${region}-docker.pkg.dev" || true
+# Explicit AR auth via instance SA access token.
+# COS root FS is read-only and docker-credential-gcr "add" is unimplemented,
+# so write Docker config.json auths directly (no credential helper / docker login).
+mkdir -p /var/lib/akshrava/docker-config
+export DOCKER_CONFIG=/var/lib/akshrava/docker-config
+ACCESS_TOKEN="$(curl -fsS -H 'Metadata-Flavor: Google' \
+  'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token' \
+  | sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+if [[ -z "$ACCESS_TOKEN" ]]; then
+  echo "FATAL: failed to fetch instance access token for Artifact Registry" >&2
+  exit 1
 fi
+AUTH_B64="$(printf 'oauth2accesstoken:%s' "$ACCESS_TOKEN" | openssl base64 -A 2>/dev/null \
+  || printf 'oauth2accesstoken:%s' "$ACCESS_TOKEN" | base64 | tr -d '\n')"
+cat > /var/lib/akshrava/docker-config/config.json <<EOF
+{"auths":{"${region}-docker.pkg.dev":{"auth":"$AUTH_B64"}}}
+EOF
+# Pre-pull so docker run failures are easier to diagnose.
+docker pull "${worker_image}"
 
 docker rm -f akshrava-worker akshrava-caddy 2>/dev/null || true
 
-docker run -d --restart=always --name akshrava-worker \
-  --device /dev/nvidia0 --device /dev/nvidia-uvm --device /dev/nvidiactl \
-  -p 127.0.0.1:8000:8000 \
-  -e AKSHRAVA_ENV="${environment}" \
-  -e WORKER_SHARED_SECRET="$$WORKER_SECRET" \
-  -e NONCE_REDIS_URL="$$NONCE_REDIS_URL" \
-  -e REQUIRE_GPU=true \
-  -e YOLO_WEIGHTS=/models/yolo11s.pt \
-  -e YOLO_WEIGHTS_SHA256="${yolo_weights_sha256}" \
-  -v /var/lib/akshrava/models:/models:ro \
-  "${worker_image}"
+REQUIRE_GPU=false
+if [[ "$WORKER_USE_GPU" == "true" ]]; then
+  REQUIRE_GPU=true
+  docker run -d --restart=always --name akshrava-worker \
+    --device /dev/nvidia0 --device /dev/nvidia-uvm --device /dev/nvidiactl \
+    -p 127.0.0.1:8000:8000 \
+    -e AKSHRAVA_ENV="${environment}" \
+    -e WORKER_SHARED_SECRET="$WORKER_SECRET" \
+    -e NONCE_REDIS_URL="$NONCE_REDIS_URL" \
+    -e METRICS_SCRAPE_TOKEN="$METRICS_TOKEN" \
+    -e REQUIRE_GPU="$REQUIRE_GPU" \
+    -e YOLO_WEIGHTS=/models/yolo11s.pt \
+    -e YOLO_WEIGHTS_SHA256="${yolo_weights_sha256}" \
+    "${worker_image}"
+else
+  docker run -d --restart=always --name akshrava-worker \
+    -p 127.0.0.1:8000:8000 \
+    -e AKSHRAVA_ENV="${environment}" \
+    -e WORKER_SHARED_SECRET="$WORKER_SECRET" \
+    -e NONCE_REDIS_URL="$NONCE_REDIS_URL" \
+    -e METRICS_SCRAPE_TOKEN="$METRICS_TOKEN" \
+    -e REQUIRE_GPU="$REQUIRE_GPU" \
+    -e YOLO_WEIGHTS=/models/yolo11s.pt \
+    -e YOLO_WEIGHTS_SHA256="${yolo_weights_sha256}" \
+    "${worker_image}"
+fi
 
 docker run -d --restart=always --name akshrava-caddy \
   --network host \
-  -v "$$CERT_DIR:/etc/caddy/certs:ro" \
-  -v "$$CERT_DIR/Caddyfile:/etc/caddy/Caddyfile:ro" \
+  -v "$CERT_DIR:/etc/caddy/certs:ro" \
+  -v "$CERT_DIR/Caddyfile:/etc/caddy/Caddyfile:ro" \
   caddy:2.8-alpine \
   caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+
+echo "akshrava worker startup finished"

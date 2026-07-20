@@ -11,6 +11,10 @@ from .detector import jpeg_dimensions
 
 logger = logging.getLogger(__name__)
 
+# Framing limit lives with the framing logic; main.py imports it rather than keeping a copy
+# that could silently drift from the value actually enforced here.
+MAX_CONTROL_MESSAGE_BYTES = 4096
+
 
 class FrameStreamHandler:
     def __init__(
@@ -49,8 +53,7 @@ class FrameStreamHandler:
 
         Returns an action dictionary, error response dictionary, or None (waiting for binary).
         """
-        # 4096 is MAX_CONTROL_MESSAGE_BYTES
-        if len(raw_payload.encode("utf-8")) > 4096:
+        if len(raw_payload.encode("utf-8")) > MAX_CONTROL_MESSAGE_BYTES:
             raise ProtocolError("control message is too large")
         payload = json.loads(raw_payload)
         if not isinstance(payload, dict):

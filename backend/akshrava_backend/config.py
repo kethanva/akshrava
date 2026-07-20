@@ -157,4 +157,16 @@ class Settings:
             raise ValueError(
                 "METRICS_SCRAPE_TOKEN is required outside development so /metrics is not public"
             )
+        # Diagnostic upload sends the RAW camera JPEG to cloud storage. The architecture/PRIVACY.md
+        # contract requires on-device face/plate blur BEFORE any frame leaves the phone, plus
+        # manual review. No blur pipeline exists in this repository, so a signed consent claim and
+        # a configured bucket are NOT sufficient: enabling raw-frame upload outside development
+        # would ship unblurred bystander imagery to cloud, contradicting the code's own fail-closed
+        # comments and DPDP posture. Keep it a development-only plumbing path until blur is wired.
+        if settings.diagnostic_uploads_enabled and settings.environment != "development":
+            raise ValueError(
+                "DIAGNOSTIC_UPLOADS_ENABLED is not permitted outside development: no face/plate "
+                "blur pipeline is implemented and PRIVACY.md requires blur-before-upload. Wire a "
+                "reviewed blur step before enabling diagnostic uploads in pilot/production."
+            )
         return settings

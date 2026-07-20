@@ -1,0 +1,27 @@
+# Cloud Build for CPU remote worker (supervised bench when GPU quota is unavailable).
+substitutions:
+  _REGION: us-central1
+  _REPO: akshrava
+  _IMAGE: akshrava-worker
+  _YOLO_WEIGHTS_SHA256: ""
+
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --build-arg
+      - YOLO_WEIGHTS_SHA256=${_YOLO_WEIGHTS_SHA256}
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:latest
+      - -f
+      - Dockerfile.worker-cpu
+      - .
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:latest
+
+options:
+  machineType: E2_HIGHCPU_8
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: 2400s
