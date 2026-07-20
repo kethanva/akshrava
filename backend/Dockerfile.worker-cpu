@@ -7,6 +7,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
+# Ultralytics pulls opencv-python; slim needs X11/GL shared libs even for CPU inference.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libgl1 \
+      libglib2.0-0 \
+      libsm6 \
+      libxext6 \
+      libxrender1 \
+      libxcb1 \
+      libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY pyproject.toml ./
@@ -20,7 +31,8 @@ ARG YOLO_WEIGHTS_SHA256
 RUN test -n "$YOLO_WEIGHTS_SHA256" || (echo "YOLO_WEIGHTS_SHA256 build-arg required" >&2; exit 1) && \
     echo "${YOLO_WEIGHTS_SHA256}  /models/yolo11s.pt" | sha256sum -c - && \
     pip install --upgrade "pip<25" && \
-    pip install "gunicorn>=23,<24" ".[yolo]" && \
+    pip install "gunicorn>=23,<24" "opencv-python-headless>=4.8,<5" ".[yolo]" && \
+    pip uninstall -y opencv-python || true && \
     addgroup --system appgroup && adduser --system --group appuser && \
     chown -R appuser:appgroup /app /models
 
