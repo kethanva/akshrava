@@ -15,6 +15,7 @@ async def upsert(
     camera_height_m: float,
     *,
     verified: bool,
+    reference_height_px: int,
 ) -> None:
     url = os.environ.get("DATABASE_URL")
     if not url:
@@ -27,14 +28,15 @@ async def upsert(
             focal_px,
             camera_height_m,
             verified=verified,
+            reference_height_px=reference_height_px,
         )
         profile = await store.geometry_profile(calibration_id)
         if verified and profile is None:
             raise SystemExit("profile written but geometry_profile still returns None")
         state = "verified" if verified else "unverified (fail-closed for range)"
         print(
-            "calibration_id=%s focal_px=%s height_m=%s %s"
-            % (calibration_id, focal_px, camera_height_m, state)
+            "calibration_id=%s focal_px=%s height_m=%s reference_height_px=%s %s"
+            % (calibration_id, focal_px, camera_height_m, reference_height_px, state)
         )
     finally:
         await store.engine.dispose()
@@ -46,13 +48,19 @@ def main() -> int:
     parser.add_argument("--focal-px", type=float, required=True)
     parser.add_argument("--camera-height-m", type=float, required=True)
     parser.add_argument(
+        "--reference-height-px",
+        type=int,
+        default=480,
+        help="JPEG height at which focal-px was measured (default 480 for 640x480 baseline).",
+    )
+    parser.add_argument(
         "--confirm-verified",
         action="store_true",
         help="Mark the profile verified after controlled-course sign-off. Required for range_valid.",
     )
     args = parser.parse_args()
-    if args.focal_px <= 0 or args.camera_height_m <= 0:
-        print("focal-px and camera-height-m must be positive", file=sys.stderr)
+    if args.focal_px <= 0 or args.camera_height_m <= 0 or args.reference_height_px < 1:
+        print("focal-px, camera-height-m, and reference-height-px must be positive", file=sys.stderr)
         return 2
     asyncio.run(
         upsert(
@@ -60,6 +68,7 @@ def main() -> int:
             args.focal_px,
             args.camera_height_m,
             verified=args.confirm_verified,
+            reference_height_px=args.reference_height_px,
         )
     )
     return 0

@@ -10,11 +10,12 @@
 #   GOOGLE_APPLICATION_CREDENTIALS=... ./scripts/e2e_android_gcp.sh [device_id]
 #
 # Optional env:
-#   AKSHRAVA_BASE_URL, AKSHRAVA_WSS_URL, AKSHRAVA_CALIBRATION_ID
+#   AKSHRAVA_BASE_URL, AKSHRAVA_WSS_URL, AKSHRAVA_CALIBRATION_ID, AKSHRAVA_EXPECTED_LABEL
 #   ANDROID_HOME / ANDROID_SDK_ROOT
 #   AKSHRAVA_AVD (default: akshrava_api34_arm64)
 #   AKSHRAVA_BOOT_EMULATOR=0 to skip auto-boot
 #   AKSHRAVA_SKIP_INSTALL=1 to skip assemble/install (still runs connected test)
+#   AKSHRAVA_PROVISION_TARGET_APP=1 to Keystore-provision the attached debug target app
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -30,10 +31,18 @@ EMULATOR="${ANDROID_HOME}/emulator/emulator"
 export ANDROID_HOME ANDROID_SDK_ROOT="$ANDROID_HOME"
 
 export PATH="${HOME}/google-cloud-sdk/bin:${ANDROID_HOME}/platform-tools:${ANDROID_HOME}/emulator:${PATH}"
-: "${GOOGLE_APPLICATION_CREDENTIALS:?Set GOOGLE_APPLICATION_CREDENTIALS}"
 : "${CLOUDSDK_CORE_PROJECT:=${AKSHRAVA_PROJECT_ID:-<your-gcp-project-id>}}"
 export CLOUDSDK_CORE_PROJECT CLOUDSDK_CORE_DISABLE_PROMPTS=1
-export CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE="${GOOGLE_APPLICATION_CREDENTIALS}"
+if [[ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]]; then
+  export CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE="${GOOGLE_APPLICATION_CREDENTIALS}"
+else
+  # A developer workstation may use an already authenticated gcloud account instead of a
+  # credential file. Verify that path without printing an access token or identity details.
+  if ! gcloud auth print-access-token >/dev/null 2>&1; then
+    echo "Set GOOGLE_APPLICATION_CREDENTIALS or authenticate gcloud before running live Android E2E." >&2
+    exit 1
+  fi
+fi
 
 if [[ -x "${ROOT}/backend/.venv/bin/python" ]]; then
   PY="${ROOT}/backend/.venv/bin/python"
@@ -139,12 +148,25 @@ else
 fi
 
 log "==> connectedAndroidTest GcpLiveProtocolClientE2eTest"
+if [[ "${AKSHRAVA_PROVISION_TARGET_APP:-0}" == "1" ]]; then
+  log "==> securely provisioning target debug app (token is not logged)"
+  (
+    cd "${ROOT}/android"
+    ./gradlew --no-daemon connectedDebugAndroidTest \
+      -Pandroid.testInstrumentationRunnerArguments.akshrava_test_token="${TOKEN}" \
+      -Pandroid.testInstrumentationRunnerArguments.akshrava_wss_url="${WSS_URL}" \
+      -Pandroid.testInstrumentationRunnerArguments.akshrava_calibration_id="${CALIBRATION_ID}" \
+      -Pandroid.testInstrumentationRunnerArguments.akshrava_provision_target=true \
+      -Pandroid.testInstrumentationRunnerArguments.class=org.akshrava.app.GcpLiveProvisioningTest
+  )
+fi
 (
   cd "${ROOT}/android"
   ./gradlew --no-daemon connectedDebugAndroidTest \
     -Pandroid.testInstrumentationRunnerArguments.akshrava_test_token="${TOKEN}" \
     -Pandroid.testInstrumentationRunnerArguments.akshrava_wss_url="${WSS_URL}" \
     -Pandroid.testInstrumentationRunnerArguments.akshrava_calibration_id="${CALIBRATION_ID}" \
+    -Pandroid.testInstrumentationRunnerArguments.akshrava_expected_label="${AKSHRAVA_EXPECTED_LABEL:-}" \
     -Pandroid.testInstrumentationRunnerArguments.class=org.akshrava.app.GcpLiveProtocolClientE2eTest
 )
 

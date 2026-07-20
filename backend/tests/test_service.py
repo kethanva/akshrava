@@ -13,6 +13,11 @@ class FixedPersonDetector(Detector):
         return [Detection(label="person", confidence=0.9, box=(220, 100, 430, 460))]
 
 
+class FixedCarDetector(Detector):
+    def detect(self, jpeg):
+        return [Detection(label="car", confidence=0.9, box=(220, 100, 430, 460))]
+
+
 class SlowFixedPersonDetector(Detector):
     def __init__(self, delay_s=0.01):
         self.delay_s = delay_s
@@ -90,6 +95,8 @@ async def test_detector_to_hazard_result_uses_the_phone_audio_message_contract()
     # Persistence requires two observations; the first stays silent, the second reaches the
     # exact `person_ahead` key consumed by AlertManager on Android.
     first = await service.analyze(state, _header(1, 1_000), b"jpeg")
+    assert first["detection_count"] == 1
+    assert first["detection_labels"] == ["person"]
     second = await service.analyze(state, _header(2, 1_500), b"jpeg")
 
     assert first["hazard"] is None
@@ -98,6 +105,45 @@ async def test_detector_to_hazard_result_uses_the_phone_audio_message_contract()
     assert second["pipeline_stage_ms"]["persist"] == 0
     await service.drain_persists()
     assert store.alerts[0][0:2] == ("device-1", 2)
+
+
+@pytest.mark.asyncio
+async def test_timely_vehicle_detection_reports_telemetry_and_conservative_s2_without_range_claims():
+    service = VisionService(FixedCarDetector(), RecordingStore(), alert_max_age_ms=1_000)
+    state = SessionState(device_id="vehicle-device")
+
+    first = await service.analyze(state, _header(1, 1_000), b"jpeg")
+    second = await service.analyze(state, _header(2, 1_500), b"jpeg")
+
+    assert first["detection_count"] == 1
+    assert first["detection_labels"] == ["car"]
+    assert second["late_suppressed"] is False
+    assert second["hazard"]["message_key"] == "vehicle_nearby"
+    assert second["hazard"]["level"] == "caution"
+    assert second["hazard"]["range_valid"] is False
+
+
+@pytest.mark.asyncio
+async def test_shared_alert_budget_scores_under_limit_and_keeps_labels_when_late():
+    # The shared 2.5-second boundary is never relaxed for slow CPU inference.
+    # Slow-but-under-budget inference must still speak; over-budget keeps detector telemetry.
+    store = RecordingStore()
+    detector = SlowFixedPersonDetector(delay_s=0.05)
+    service = VisionService(detector, store, alert_max_age_ms=2_500)
+    state = SessionState(device_id="cpu-pilot")
+
+    await service.analyze(state, _header(1, 1_000), b"jpeg")
+    under_budget = await service.analyze(state, _header(2, 1_500), b"jpeg")
+    assert under_budget["late_suppressed"] is False
+    assert under_budget["hazard"]["message_key"] == "person_ahead"
+    assert under_budget["detection_labels"] == ["person"]
+
+    service.alert_max_age_ms = 1
+    late = await service.analyze(state, _header(3, 2_000), b"jpeg")
+    assert late["late_suppressed"] is True
+    assert late["hazard"] is None
+    assert late["detection_count"] == 1
+    assert late["detection_labels"] == ["person"]
 
 
 @pytest.mark.asyncio
@@ -139,6 +185,8 @@ async def test_late_inference_never_consumes_the_alert_cooldown():
     second = await service.analyze(state, _header(2, 1_500), b"jpeg")
     assert second["late_suppressed"] is True
     assert second["hazard"] is None
+    assert second["detection_count"] == 1
+    assert second["detection_labels"] == ["person"]
     assert state.last_alert_at_ms == {}, "a hazard suppressed for lateness must not reserve a cooldown slot"
 
     # Frame 3: inference speed recovers. The object is still tracked (hits=3) and on time --

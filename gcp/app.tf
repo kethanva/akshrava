@@ -320,7 +320,9 @@ resource "google_cloud_run_v2_service" "api" {
       }
       env {
         name  = "ALERT_MAX_AGE_MS"
-        value = var.worker_use_gpu || var.detector != "remote" ? "500" : "2500"
+        # The 2.5 s end-to-end safety limit is never relaxed for CPU or GPU. Late results remain
+        # visible as telemetry but cannot consume the spoken-alert path.
+        value = "2500"
       }
       env {
         name  = "MIN_FRAME_INTERVAL_MS"

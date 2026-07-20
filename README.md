@@ -96,7 +96,7 @@ The system is a **freshness pipeline**, never a video recorder or catch-up queue
 
 - CameraX keeps only the latest frame. The phone allows one in-flight request and one replaceable pending frame; old frames are dropped.
 - The default capture envelope is roughly 0.2–1 FPS, with short confirmation sampling up to 2 FPS and never above 3 FPS in this cloud design.
-- `capture_mono_ms` is the phone's elapsed-realtime clock. The server echoes it; the phone rejects results older than 500 ms (250 ms for configured urgent nearby-obstruction output).
+- `capture_mono_ms` is the phone's elapsed-realtime clock. The server echoes it; both server and phone reject results older than the shared **2500 ms** safety boundary. Late inference remains telemetry and is never spoken.
 - The backend accepts bounded input, rate-limits before work, and performs alert persistence outside the WebSocket response path.
 - Raw images are processed in memory and discarded. Normal operation never stores video or JPEG frames.
 
@@ -215,11 +215,11 @@ The VPC connector reaches Caddy at `worker.akshrava.internal:8443`. mTLS authent
 ### Persistence and schema ownership
 
 PostgreSQL stores only operational metadata: `devices` (binding, calibration, revocation),
-`calibration_profiles` (focal length, mount height, verification state), and `alert_events`
+`calibration_profiles` (focal length at a reference JPEG height, mount height, verification state), and `alert_events`
 (device/frame, class, bearing, confidence, severity, message key, track and timestamp). Redis
 holds short-lived admission/session counters, revocation lookups, and atomically claimed HMAC
 nonces. SQLAlchemy uses bounded Cloud SQL pools and health checks; Alembic migration revision
-`20260719_01` is applied by the deployment job before the API rollout. SQLite is for local tests
+`20260721_01` is applied by the deployment job before the API rollout. SQLite is for local tests
 only. Schema initialization is not raced by production API replicas.
 
 ### Failure and recovery contracts
@@ -237,7 +237,7 @@ only. Schema initialization is not raced by production API replicas.
 
 The tracker makes repeated detections stable enough for suppression/confirmation; it does **not** infer motion. At low frame rate, box growth can be caused by wearer motion, camera swing, and autofocus. Every result keeps `motion_evidence: "insufficient"` for this operating envelope.
 
-Range remains invalid unless a verified `calibration_profiles` record and pose/agreement gates pass. Invalid, stale, or uncertain geometry never becomes a spoken distance. The policy permits urgent language only for a validated nearby central obstruction; vehicle language is awareness-only and directional. An uncertain frame, stale result, blocked camera, unavailable detector, or missing valid fallback produces no hazard claim and, where appropriate, an explicit state message.
+Range remains invalid unless a verified `calibration_profiles` record and pose/agreement gates pass. Focal length is scaled from its reference JPEG height to the current frame so quality downscaling does not inflate distance. Invalid, stale, or uncertain geometry never becomes a spoken distance. The policy permits urgent language only for a validated nearby central obstruction; vehicle language is awareness-only and directional. An uncertain frame, stale result, blocked camera, unavailable detector, or missing valid fallback produces no hazard claim and, where appropriate, an explicit state message.
 
 ```mermaid
 flowchart TD

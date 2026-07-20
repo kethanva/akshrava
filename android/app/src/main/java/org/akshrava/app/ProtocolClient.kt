@@ -40,6 +40,15 @@ data class Quality(val maxSide: Int = 640, val jpegQ: Int = 55, val fps: Double 
     }
 }
 
+/** Bounded, non-sensitive result telemetry for UI diagnostics and live E2E assertions. */
+data class DetectionTelemetry(
+    val frameId: Long,
+    val detectionCount: Int,
+    val labels: List<String>,
+    val lateSuppressed: Boolean,
+    val resultAgeMs: Long
+)
+
 class ProtocolClient(
     private val endpoint: String,
     private val token: String,
@@ -52,6 +61,7 @@ class ProtocolClient(
     private val onRoundTripMs: (Long) -> Unit = {},
     /** Fired when an in-flight frame hits the settle deadline (before optional reconnect). */
     private val onSettleTimeout: () -> Unit = {},
+    private val onResultTelemetry: (DetectionTelemetry) -> Unit = {},
     private val language: String = "en",
     private val http: OkHttpClient = OkHttpClient.Builder().pingInterval(20, TimeUnit.SECONDS).build()
 ) : WebSocketListener() {
@@ -60,18 +70,17 @@ class ProtocolClient(
         const val MAX_BACKOFF_SECONDS = 10.0
         /**
          * End-to-end phone freshness budget: age = elapsedRealtime() - capture_mono_ms.
-         * The server also rejects late frames, but its ALERT_MAX_AGE_MS (default 500ms) only
-         * covers server-side inference latency. This client budget covers the full round trip
-         * (network + inference + network return). CPU YOLO on GCP can take several seconds,
-         * so a generous client window avoids discarding real detections on slow links.
+         * The server also rejects late frames at the same 2.5-second safety boundary. This
+         * client budget covers the full round trip; late results remain diagnostics but are
+         * never spoken.
          */
-        const val STALE_ALERT_MS = 2500L
+        const val STALE_ALERT_MS = 2_500L
         /** Look answers use the full freshness budget even when the hazard is S1. */
-        const val LOOK_FRESHNESS_MS = 2500L
-        const val URGENT_FRESHNESS_MS = 1500L
+        const val LOOK_FRESHNESS_MS = 2_500L
+        const val URGENT_FRESHNESS_MS = 1_500L
         /**
-         * Must cover CPU remote YOLO (GCP pilot uses up to ~9s inference). A shorter budget
-         * cancels a healthy socket mid-infer and destroys end-to-end frame throughput.
+         * Allows a result to settle after slow inference while preserving the 2.5-second
+         * speech gate. A late result is diagnosed but never announced.
          */
         const val FRAME_SETTLE_TIMEOUT_MS = 10_000L
         /** Look answers use the same settle budget; announce failure if unanswered. */
@@ -85,6 +94,17 @@ class ProtocolClient(
         /** Wire contract uses en|hi; AppConfig stores BCP-47 tags like en-IN / hi-IN. */
         fun wireLanguage(tag: String): String =
             if (tag.lowercase().startsWith("hi")) "hi" else "en"
+
+        /** Keeps the stream gate independently testable: a transport-only socket is not vision. */
+        fun streamEnabled(sessionReady: Boolean, visionEnabled: Boolean): Boolean =
+            sessionReady && visionEnabled
+
+        /** Sanitized class for operator logs; neither endpoint nor server body is retained. */
+        fun transportFailureClass(httpStatus: Int?): String = when (httpStatus) {
+            401, 403 -> "authentication"
+            null -> "transport"
+            else -> "http"
+        }
     }
     private val reconnect: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
     private val inFlight = AtomicBoolean(false)
@@ -135,7 +155,7 @@ class ProtocolClient(
     }
 
     /** True only after ready with a live detector — not transport-only noop bench mode. */
-    fun canStream(): Boolean = sessionReady && visionEnabled
+    fun canStream(): Boolean = streamEnabled(sessionReady, visionEnabled)
 
     fun sendFrame(
         frameId: Long,
@@ -147,11 +167,11 @@ class ProtocolClient(
         priority: Boolean = false
     ): Boolean {
         val look = priority || mode == "priority"
-        val ws = socket ?: return failSendFrame(look)
+        val ws = socket ?: return failSendFrame(look, "socket_missing")
         // Do not produce traffic or imply an active service before the authenticated server has
         // explicitly confirmed that a real detector, rather than bench-mode NoopDetector, is live.
-        if (!canStream()) return failSendFrame(look)
-        if (!inFlight.compareAndSet(false, true)) return failSendFrame(look)
+        if (!canStream()) return failSendFrame(look, "vision_not_ready")
+        if (!inFlight.compareAndSet(false, true)) return failSendFrame(look, "frame_in_flight")
         val header = JSONObject()
             .put("type", "frame")
             .put("id", frameId)
@@ -173,21 +193,23 @@ class ProtocolClient(
         // socket rather than let the next JPEG attach to this header.
         if (!ws.send(header.toString())) {
             settleFrame()
-            return failSendFrame(look)
+            return failSendFrame(look, "header_rejected")
         }
         if (!ws.send(frame.jpeg.toByteString())) {
             ws.close(1011, "incomplete frame")
             settleFrame()
-            return failSendFrame(look)
+            return failSendFrame(look, "jpeg_rejected")
         }
         frameSentAtMonoMs = SystemClock.elapsedRealtime()
         scheduleSettleTimeout(look)
+        Log.i("AkshravaVision", "frame_sent id=$frameId endpoint_class=${EndpointPolicy.classify(endpoint).logValue}")
         return true
     }
 
     /** Every control action must be confirmed by voice (§6.4): an explicit look that never
      * even made it onto the wire must not resolve into silence just because it wasn't sent. */
-    private fun failSendFrame(isLook: Boolean): Boolean {
+    private fun failSendFrame(isLook: Boolean, reason: String): Boolean {
+        Log.i("AkshravaVision", "frame_drop reason=$reason session_ready=$sessionReady vision_enabled=$visionEnabled")
         if (isLook) {
             cancelLookTimeout()
             alertManager.announceLookFailed()
@@ -252,7 +274,7 @@ class ProtocolClient(
         visionEnabled = false
         cloudFallbackWarningAnnounced = false
         // #region agent log
-        Log.i("AkshravaDebug", "ws_open endpoint=$endpoint")
+        Log.i("AkshravaDebug", "ws_open endpoint_class=${EndpointPolicy.classify(endpoint).logValue}")
         // #endregion
         if (outageAnnounced) {
             outageAnnounced = false
@@ -272,10 +294,13 @@ class ProtocolClient(
                 sessionReady = true
                 visionEnabled = payload.optBoolean("vision_enabled", false)
                 // #region agent log
-                Log.i("AkshravaDebug", "ws_ready vision_enabled=$visionEnabled session_ready=$sessionReady")
-                // #endregion
                 val advertised = payload.optInt("max_in_flight", 1).coerceIn(1, 2)
                 maxInFlight = advertised
+                Log.i(
+                    "AkshravaDebug",
+                    "ws_ready detector=${payload.optString("detector", "unknown")} vision_enabled=$visionEnabled " +
+                        "session_ready=$sessionReady max_in_flight=$advertised"
+                )
                 if (visionEnabled) {
                     onState("Vision assistance connected")
                 } else {
@@ -314,11 +339,6 @@ class ProtocolClient(
                 payload.optDouble("fps", 1.0)
             ))
             "result" -> {
-                Log.i(
-                    "AkshravaVision",
-                    "frame=${payload.optLong("frame_id", -1)} detections=${payload.optInt("detection_count", -1)} " +
-                        "labels=${payload.optJSONArray("detection_labels") ?: "unknown"} hazard=${payload.has("hazard") && !payload.isNull("hazard")}"
-                )
                 payload.optString("trace_id", "").takeIf { it.isNotBlank() }?.let {
                     // No device ID, endpoint, image, or location is logged; this is only a
                     // cross-tier frame correlation key for diagnosing glass-to-ear latency.
@@ -355,6 +375,24 @@ class ProtocolClient(
                 }
                 val detectionCount = payload.optInt("detection_count", -1)
                 val labels = payload.optJSONArray("detection_labels")
+                val labelValues = buildList {
+                    if (labels != null) for (i in 0 until labels.length()) add(labels.optString(i))
+                }
+                val lateSuppressed = payload.optBoolean("late_suppressed", false)
+                Log.i(
+                    "AkshravaVision",
+                    "frame=${payload.optLong("frame_id", -1)} detections=$detectionCount labels=$labelValues " +
+                        "late_suppressed=$lateSuppressed result_age_ms=$age priority=$priority"
+                )
+                onResultTelemetry(
+                    DetectionTelemetry(
+                        frameId = payload.optLong("frame_id", -1),
+                        detectionCount = detectionCount,
+                        labels = labelValues,
+                        lateSuppressed = lateSuppressed,
+                        resultAgeMs = age
+                    )
+                )
                 val labelHint = when {
                     labels != null && labels.length() > 0 -> {
                         buildString {
@@ -389,11 +427,12 @@ class ProtocolClient(
                         )
                         onState("Live · ${hazard.optString("message_key")}")
                     } else if (labelHint != null) {
-                        onState("Live · $labelHint")
+                        val suffix = if (lateSuppressed) " (delayed)" else ""
+                        onState("Live · $labelHint$suffix")
                     }
                 } else if (labelHint != null) {
                     // Still surface detector output when speech was suppressed as late.
-                    onState("Live · $labelHint")
+                    onState("Live · $labelHint (delayed)")
                 }
                 settleFrame()
             }
@@ -483,6 +522,7 @@ class ProtocolClient(
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             if (!isCurrentGeneration(generation)) return
+            Log.i("AkshravaDebug", "ws_closed code=$code endpoint_class=${EndpointPolicy.classify(endpoint).logValue}")
             if (isPermanentAccessClose(code)) {
                 val message = if (code == 4403) {
                     "Device access has been revoked. Ask a volunteer to provision this phone."
@@ -497,6 +537,12 @@ class ProtocolClient(
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             if (!isCurrentGeneration(generation)) return
+            Log.w(
+                "AkshravaDebug",
+                "ws_failure endpoint_class=${EndpointPolicy.classify(endpoint).logValue} " +
+                    "http_status=${response?.code ?: "none"} failure_class=${transportFailureClass(response?.code)} " +
+                    "error_type=${t.javaClass.simpleName}"
+            )
             if (response?.code == 401 || response?.code == 403) {
                 handlePermanentFailure("Device authentication failed. Ask a volunteer to provision a new token.")
             } else {

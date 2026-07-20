@@ -75,7 +75,7 @@ class VisionService:
         self,
         detector: Detector,
         store,
-        alert_max_age_ms: int = 500,
+        alert_max_age_ms: int = 2500,
         language: str = "en",
         inference_timeout_ms: int = 800,
         inference_executor_workers: int = 2,

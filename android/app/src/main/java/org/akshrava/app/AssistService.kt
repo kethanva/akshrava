@@ -10,7 +10,6 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.graphics.Color
-import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Handler
@@ -139,6 +138,16 @@ class AssistService : LifecycleService() {
             },
             onRoundTripMs = { rtt -> applyEffectiveQuality(linkQuality.onRoundTrip(rtt)) },
             onSettleTimeout = { applyEffectiveQuality(linkQuality.onSettleTimeout()) },
+            onResultTelemetry = { telemetry ->
+                if (telemetry.lateSuppressed) {
+                    Log.i(
+                        "AkshravaVision",
+                        "result_late_suppressed frame=${telemetry.frameId} " +
+                            "detections=${telemetry.detectionCount} labels=${telemetry.labels} " +
+                            "age_ms=${telemetry.resultAgeMs}"
+                    )
+                }
+            },
             language = config.language,
             http = httpClient
         ).also { client = it }
@@ -158,10 +167,12 @@ class AssistService : LifecycleService() {
     }
 
     private fun endpointAllowed(endpoint: String): Boolean {
-        val uri = Uri.parse(endpoint)
-        val localMock = BuildConfig.DEBUG && uri.scheme == "ws" &&
-            uri.host in setOf("127.0.0.1", "localhost", "10.0.2.2")
-        return uri.scheme == "wss" || localMock
+        return EndpointPolicy.evaluate(
+            endpoint = endpoint,
+            debugBuild = BuildConfig.DEBUG,
+            isEmulator = DeviceCapability.isEmulator(),
+            allowPhysicalLoopbackDevelopment = BuildConfig.ALLOW_PHYSICAL_LOOPBACK_DEV
+        ).allowed
     }
     
     private fun bindCamera() {

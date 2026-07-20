@@ -93,6 +93,13 @@ async def test_upsert_calibration_profile_requires_verified_flag_for_geometry(tm
         assert profile is not None
         assert profile.focal_px == 520.0
         assert profile.camera_height_m == 1.4
+        assert profile.reference_height_px == 480
+        await store.upsert_calibration_profile(
+            "pilot-r0", 520.0, 1.4, verified=True, reference_height_px=240
+        )
+        profile = await store.geometry_profile("pilot-r0")
+        assert profile is not None
+        assert profile.reference_height_px == 240
     finally:
         await store.engine.dispose()
 

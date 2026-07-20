@@ -29,4 +29,28 @@ class ProtocolClientTest {
         assertEquals(2, ProtocolClient.SETTLE_TIMEOUTS_BEFORE_RECONNECT)
         assertEquals(ProtocolClient.FRAME_SETTLE_TIMEOUT_MS, ProtocolClient.LOOK_TIMEOUT_MS)
     }
+
+    @Test
+    fun speakBudgetPreservesSharedSafetyBoundary() {
+        assertEquals(2_500L, ProtocolClient.STALE_ALERT_MS)
+        assertEquals(2_500L, ProtocolClient.LOOK_FRESHNESS_MS)
+        assertEquals(1_500L, ProtocolClient.URGENT_FRESHNESS_MS)
+        assertTrue(ProtocolClient.FRAME_SETTLE_TIMEOUT_MS > ProtocolClient.STALE_ALERT_MS)
+    }
+
+    @Test
+    fun streamGateRequiresReadyAndLiveVision() {
+        assertFalse(ProtocolClient.streamEnabled(sessionReady = false, visionEnabled = false))
+        assertFalse(ProtocolClient.streamEnabled(sessionReady = true, visionEnabled = false))
+        assertFalse(ProtocolClient.streamEnabled(sessionReady = false, visionEnabled = true))
+        assertTrue(ProtocolClient.streamEnabled(sessionReady = true, visionEnabled = true))
+    }
+
+    @Test
+    fun transportFailureStateDistinguishesAuthenticationFromNetworkFailure() {
+        assertEquals("authentication", ProtocolClient.transportFailureClass(401))
+        assertEquals("authentication", ProtocolClient.transportFailureClass(403))
+        assertEquals("http", ProtocolClient.transportFailureClass(503))
+        assertEquals("transport", ProtocolClient.transportFailureClass(null))
+    }
 }

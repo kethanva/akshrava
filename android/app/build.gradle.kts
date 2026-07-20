@@ -46,6 +46,9 @@ android {
                 "DEFAULT_WSS_ENDPOINT",
                 "\"$wssUrl\""
             )
+            // A real phone must opt in explicitly; otherwise ws://127.0.0.1 is the phone itself.
+            val allowPhysicalLoopback = System.getenv("AKSHRAVA_ALLOW_PHYSICAL_LOOPBACK_DEV") == "true"
+            buildConfigField("boolean", "ALLOW_PHYSICAL_LOOPBACK_DEV", allowPhysicalLoopback.toString())
         }
         release {
             // Keep minify off until ProGuard/R8 keep rules are audited for CameraX, OkHttp, and TTS.
@@ -62,6 +65,7 @@ android {
                 "DEFAULT_WSS_ENDPOINT",
                 "\"$wssUrl\""
             )
+            buildConfigField("boolean", "ALLOW_PHYSICAL_LOOPBACK_DEV", "false")
         }
     }
 

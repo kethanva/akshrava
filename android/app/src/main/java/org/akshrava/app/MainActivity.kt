@@ -145,11 +145,17 @@ class MainActivity : AppCompatActivity() {
 
     private fun startServiceIfConfigured() {
         val config = AppConfigStore.load(this)
-        val endpointUri = Uri.parse(config.endpoint)
-        val localMock = BuildConfig.DEBUG && endpointUri.scheme == "ws" &&
-            endpointUri.host in setOf("127.0.0.1", "localhost", "10.0.2.2")
-        val secureEndpoint = endpointUri.scheme == "wss" || localMock
-        if (!secureEndpoint || config.deviceToken.isBlank() || config.calibrationId.isBlank()) {
+        val endpointDecision = EndpointPolicy.evaluate(
+            endpoint = config.endpoint,
+            debugBuild = BuildConfig.DEBUG,
+            isEmulator = DeviceCapability.isEmulator(),
+            allowPhysicalLoopbackDevelopment = BuildConfig.ALLOW_PHYSICAL_LOOPBACK_DEV
+        )
+        if (!endpointDecision.allowed) {
+            status.text = endpointDecision.message ?: getString(R.string.status_need_provisioning)
+            return
+        }
+        if (config.deviceToken.isBlank() || config.calibrationId.isBlank()) {
             status.text = getString(R.string.status_need_provisioning)
             return
         }

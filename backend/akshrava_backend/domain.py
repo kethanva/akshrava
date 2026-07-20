@@ -29,11 +29,17 @@ class Detection:
 
 @dataclass(frozen=True)
 class GeometryProfile:
-    """A verified, versioned mount/camera profile for one calibration ID."""
+    """A verified, versioned mount/camera profile for one calibration ID.
+
+    `focal_px` is defined at `reference_height_px` (default 480 for the 640×480 JPEG baseline).
+    Hazard scoring scales focal to the current frame height so quality downscaling does not
+    inflate range estimates.
+    """
 
     calibration_id: str
     focal_px: float
     camera_height_m: float
+    reference_height_px: int = 480
 
 
 @dataclass

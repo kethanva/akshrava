@@ -53,6 +53,8 @@ class CalibrationProfileRecord(Base):
     calibration_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     focal_px: Mapped[float] = mapped_column(Float)
     camera_height_m: Mapped[float] = mapped_column(Float)
+    # JPEG height at which focal_px was measured (640×480 baseline → 480).
+    reference_height_px: Mapped[int] = mapped_column(Integer, default=480)
     verified: Mapped[bool] = mapped_column(default=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
@@ -189,7 +191,12 @@ class Store:
             record = await session.get(CalibrationProfileRecord, calibration_id)
             if record is None or not record.verified:
                 return None
-            return GeometryProfile(record.calibration_id, record.focal_px, record.camera_height_m)
+            return GeometryProfile(
+                record.calibration_id,
+                record.focal_px,
+                record.camera_height_m,
+                reference_height_px=getattr(record, "reference_height_px", None) or 480,
+            )
 
     async def upsert_calibration_profile(
         self,
@@ -198,8 +205,11 @@ class Store:
         camera_height_m: float,
         *,
         verified: bool = False,
+        reference_height_px: int = 480,
     ) -> None:
         """Create or update a mount profile. verified=True only after controlled-course sign-off."""
+        if reference_height_px < 1:
+            raise ValueError("reference_height_px must be positive")
         async with self.sessions() as session:
             record = await session.get(CalibrationProfileRecord, calibration_id)
             if record is None:
@@ -208,6 +218,7 @@ class Store:
                         calibration_id=calibration_id,
                         focal_px=focal_px,
                         camera_height_m=camera_height_m,
+                        reference_height_px=reference_height_px,
                         verified=verified,
                         updated_at=datetime.now(timezone.utc),
                     )
@@ -215,6 +226,7 @@ class Store:
             else:
                 record.focal_px = focal_px
                 record.camera_height_m = camera_height_m
+                record.reference_height_px = reference_height_px
                 record.verified = verified
                 record.updated_at = datetime.now(timezone.utc)
             await session.commit()

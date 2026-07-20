@@ -12,6 +12,8 @@ import android.speech.tts.UtteranceProgressListener
 import java.util.ArrayDeque
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
 
 /**
  * Owns speech, haptics and the "never drown the user" rate policy (§6.3).
@@ -21,9 +23,12 @@ import java.util.concurrent.Executors
  *
  * Public methods are serialized onto a single worker so cooldown maps and the TTS queue
  * stay consistent across camera, headset, and main-thread callers.
+ *
+ * The phone owns the 5 s object cooldown. When a non-urgent alert arrives inside the 2 s
+ * utterance gap it is deferred once (not dropped), so a server admit is not wasted as silence.
  */
 class AlertManager(private val context: Context, languageTag: String) : TextToSpeech.OnInitListener {
-    private companion object {
+    internal companion object {
         const val OBJECT_COOLDOWN_MS = 5_000L
         const val MIN_UTTERANCE_GAP_MS = 2_000L
         const val BUSY_WINDOW_MS = 10_000L
@@ -33,11 +38,19 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
         // An urgent phrase's comprehension-critical head must land: a second urgent alert may
         // queue behind it but must not cut it off within its first 350 ms (architecture §5).
         const val URGENT_PROTECT_MS = 350L
+
+        /** Remaining wait before a gap-blocked caution may speak; null if it may speak now. */
+        fun deferralDelayMs(nowMs: Long, lastUtteranceMs: Long, gapMs: Long = MIN_UTTERANCE_GAP_MS): Long? {
+            val elapsed = nowMs - lastUtteranceMs
+            if (elapsed >= gapMs) return null
+            return (gapMs - elapsed).coerceAtLeast(0L)
+        }
     }
 
     private data class PendingStatus(val text: String, val onComplete: (() -> Unit)?)
+    private data class PendingAnnounce(val messageKey: String, val bearing: String, val haptic: String)
 
-    private val api = Executors.newSingleThreadExecutor()
+    private val api = Executors.newSingleThreadScheduledExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val language = Locale.forLanguageTag(languageTag)
     private val isHindi = language.language == "hi"
@@ -46,6 +59,8 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
     private val completionLock = Any()
     private val completionCallbacks = mutableMapOf<String, () -> Unit>()
     private var pendingStatus: PendingStatus? = null
+    private var pendingAnnounce: PendingAnnounce? = null
+    private var pendingAnnounceFuture: ScheduledFuture<*>? = null
     private var statusSequence = 0L
     @Volatile private var ready = false
     private val lastSpoken = mutableMapOf<String, Long>()
@@ -101,13 +116,32 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
 
         pruneRecent(now)
         if (!urgent) {
-            if (now - lastUtteranceMs < MIN_UTTERANCE_GAP_MS) return
+            val deferMs = deferralDelayMs(now, lastUtteranceMs)
+            if (deferMs != null) {
+                scheduleDeferredCaution(PendingAnnounce(messageKey, bearing, haptic), deferMs)
+                return
+            }
             if (recentUtterances.size >= BUSY_COUNT) {
+                cancelDeferredCaution()
                 summarize(now)
                 return
             }
+        } else {
+            // Urgent preempts a waiting caution so the gap deferral cannot bury S1.
+            cancelDeferredCaution()
         }
 
+        deliverAnnounce(messageKey, bearing, urgent, haptic, now, cooldownKey)
+    }
+
+    private fun deliverAnnounce(
+        messageKey: String,
+        bearing: String,
+        urgent: Boolean,
+        haptic: String,
+        now: Long,
+        cooldownKey: String
+    ) {
         lastSpoken[cooldownKey] = now
         markUtterance(now)
         val text = template(messageKey, bearing)
@@ -123,6 +157,23 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
         val protectingUrgentHead = urgent && now - lastUrgentSpokenAtMs < URGENT_PROTECT_MS
         if (urgent) lastUrgentSpokenAtMs = now
         speak(text, flush = urgent && !protectingUrgentHead, id = cooldownKey)
+    }
+
+    private fun scheduleDeferredCaution(pending: PendingAnnounce, delayMs: Long) {
+        pendingAnnounce = pending
+        pendingAnnounceFuture?.cancel(false)
+        pendingAnnounceFuture = api.schedule({
+            val next = pendingAnnounce ?: return@schedule
+            pendingAnnounce = null
+            pendingAnnounceFuture = null
+            announceLocked(next.messageKey, next.bearing, urgent = false, next.haptic)
+        }, delayMs, TimeUnit.MILLISECONDS)
+    }
+
+    private fun cancelDeferredCaution() {
+        pendingAnnounceFuture?.cancel(false)
+        pendingAnnounceFuture = null
+        pendingAnnounce = null
     }
 
     /** Double-press headset mute. Auto-unmutes after [durationMs] so it can never be left silently dead. */
@@ -252,6 +303,7 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
     }
 
     fun shutdown() {
+        cancelDeferredCaution()
         val pending = synchronized(completionLock) {
             val values = completionCallbacks.values.toMutableList()
             completionCallbacks.clear()

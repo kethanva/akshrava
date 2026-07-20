@@ -96,7 +96,7 @@ jobs:
           manifest = {
               "tag": tag,
               "commit": commit,
-              "database_schema_revision": "20260719_01",
+              "database_schema_revision": "20260721_01",
               "detector_default": "noop",
               "yolo_weights_sha256": os.environ.get("YOLO_WEIGHTS_SHA256", ""),
               "artifacts": [

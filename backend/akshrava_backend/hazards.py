@@ -61,15 +61,30 @@ def _bearing(track: Track, width: int) -> str:
     return "ahead"
 
 
-def _pinhole_distance(label: str, box: Tuple[float, float, float, float], profile: Optional[GeometryProfile]) -> Optional[float]:
+def _effective_focal(profile: GeometryProfile, image_height: int) -> Optional[float]:
+    """Scale calibrated focal_px from reference_height_px to the current JPEG height."""
+    if image_height < 1 or profile.reference_height_px < 1:
+        return None
+    return profile.focal_px * (float(image_height) / float(profile.reference_height_px))
+
+
+def _pinhole_distance(
+    label: str,
+    box: Tuple[float, float, float, float],
+    image_height: int,
+    profile: Optional[GeometryProfile],
+) -> Optional[float]:
     """Calibrated pinhole estimate: distance = focal_px * H_known / box_height_px."""
     h_known = KNOWN_HEIGHTS_M.get(label)
     if h_known is None or profile is None:
         return None
+    focal = _effective_focal(profile, image_height)
+    if focal is None:
+        return None
     box_height = max(0.0, box[3] - box[1])
     if box_height < 1.0:
         return None
-    return profile.focal_px * h_known / box_height
+    return focal * h_known / box_height
 
 
 def _ground_plane_distance(
@@ -85,6 +100,9 @@ def _ground_plane_distance(
     """
     if pitch_cdeg is None or profile is None:
         return None
+    focal = _effective_focal(profile, image_height)
+    if focal is None:
+        return None
     # Pitch in radians (centidegrees → degrees → radians).  Negative pitch means
     # the camera tilts downward, which is the normal walking orientation.
     pitch_rad = math.radians(pitch_cdeg / 100.0)
@@ -95,7 +113,7 @@ def _ground_plane_distance(
     pixel_offset = bottom_px - cy
     if image_height < 1:
         return None
-    pixel_angle = math.atan2(pixel_offset, profile.focal_px)
+    pixel_angle = math.atan2(pixel_offset, focal)
 
     # Android pose uses negative pitch for a downward-mounted camera. Keep that sign: using
     # abs() turns an upward tilt into a downward one and can manufacture a near range.
@@ -181,7 +199,7 @@ class HazardScorer:
                 continue
 
             # ---------- geometry ----------
-            pinhole_dist = _pinhole_distance(track.label, track.box, geometry_profile)
+            pinhole_dist = _pinhole_distance(track.label, track.box, height, geometry_profile)
             ground_dist = _ground_plane_distance(track.box, height, pitch_cdeg, geometry_profile)
             
             valid_range = _range_valid(

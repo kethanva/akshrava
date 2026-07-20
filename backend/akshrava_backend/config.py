@@ -61,7 +61,9 @@ class Settings:
             max_image_bytes=int(os.getenv("MAX_IMAGE_BYTES", "200000")),
             max_frame_side=int(os.getenv("MAX_FRAME_SIDE", "1280")),
             dev_auth_bypass=_env_bool("DEV_AUTH_BYPASS", False),
-            alert_max_age_ms=int(os.getenv("ALERT_MAX_AGE_MS", "500")),
+            # Shared end-to-end safety boundary. Late results may be reported diagnostically but
+            # must never be scored into a spoken hazard.
+            alert_max_age_ms=int(os.getenv("ALERT_MAX_AGE_MS", "2500")),
             min_frame_interval_ms=int(os.getenv("MIN_FRAME_INTERVAL_MS", "200")),
             alert_retention_days=int(os.getenv("ALERT_RETENTION_DAYS", "30")),
             cloud_fallback_provider=os.getenv("CLOUD_FALLBACK_PROVIDER", "none").lower(),
@@ -77,7 +79,7 @@ class Settings:
             redis_url=os.getenv("REDIS_URL", "").strip(),
             inference_timeout_ms=int(os.getenv("INFERENCE_TIMEOUT_MS", "800")),
             inference_executor_workers=int(os.getenv("INFERENCE_EXECUTOR_WORKERS", "2")),
-            expected_schema_revision=os.getenv("DATABASE_SCHEMA_REVISION", "20260719_01").strip(),
+            expected_schema_revision=os.getenv("DATABASE_SCHEMA_REVISION", "20260721_01").strip(),
             remote_tls_ca_file=os.getenv("REMOTE_TLS_CA_FILE", "").strip(),
             remote_tls_client_cert_file=os.getenv("REMOTE_TLS_CLIENT_CERT_FILE", "").strip(),
             remote_tls_client_key_file=os.getenv("REMOTE_TLS_CLIENT_KEY_FILE", "").strip(),

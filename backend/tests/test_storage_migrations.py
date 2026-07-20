@@ -3,11 +3,16 @@ from pathlib import Path
 
 def test_production_schema_is_owned_by_a_versioned_alembic_revision():
     root = Path(__file__).resolve().parents[1]
-    revision = root / "migrations" / "versions" / "20260719_01_initial_schema.py"
-    assert revision.is_file()
-    source = revision.read_text()
-    assert 'revision = "20260719_01"' in source
-    assert "op.create_table(" in source
+    initial = root / "migrations" / "versions" / "20260719_01_initial_schema.py"
+    assert initial.is_file()
+    assert 'revision = "20260719_01"' in initial.read_text()
+    assert "op.create_table(" in initial.read_text()
+    head = root / "migrations" / "versions" / "20260721_01_reference_height_px.py"
+    assert head.is_file()
+    head_source = head.read_text()
+    assert 'revision = "20260721_01"' in head_source
+    assert 'down_revision = "20260719_01"' in head_source
+    assert "reference_height_px" in head_source
 
 
 def test_runtime_storage_contains_no_schema_alter_statements():

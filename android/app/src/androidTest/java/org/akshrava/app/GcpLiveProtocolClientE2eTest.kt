@@ -63,6 +63,10 @@ class GcpLiveProtocolClientE2eTest {
         val calibrationId = args.getString("akshrava_calibration_id")
             ?: System.getenv("AKSHRAVA_CALIBRATION_ID")
             ?: "e2e-r0"
+        val expectedLabel = args.getString("akshrava_expected_label")
+            ?.trim()
+            ?.lowercase()
+            ?.takeIf { it.isNotBlank() }
 
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val alertManager = AlertManager(context, "en-IN")
@@ -71,6 +75,7 @@ class GcpLiveProtocolClientE2eTest {
         val settledLatch = CountDownLatch(1)
         val lastState = AtomicReference("")
         val lastQuality = AtomicReference<Quality?>(null)
+        val resultTelemetry = AtomicReference<DetectionTelemetry?>(null)
 
         val client = ProtocolClient(
             endpoint = wssUrl,
@@ -82,6 +87,7 @@ class GcpLiveProtocolClientE2eTest {
                 lastQuality.set(it)
                 qualityLatch.countDown()
             },
+            onResultTelemetry = { resultTelemetry.set(it) },
             language = "en-IN"
         )
 
@@ -122,6 +128,16 @@ class GcpLiveProtocolClientE2eTest {
             )
             assertNotNull(lastQuality.get())
             assertTrue(lastQuality.get()!!.maxSide in 320..640)
+            val result = resultTelemetry.get()
+            assertNotNull("A settled frame must include result telemetry", result)
+            assertEquals(1L, result!!.frameId)
+            assertTrue("detection_count must be present", result.detectionCount >= 0)
+            if (expectedLabel != null) {
+                assertTrue(
+                    "Controlled target '$expectedLabel' missing from ${result.labels}",
+                    result.labels.any { it.lowercase() == expectedLabel }
+                )
+            }
         } finally {
             client.close()
             alertManager.shutdown()
@@ -129,7 +145,7 @@ class GcpLiveProtocolClientE2eTest {
 
         // Application-level ping/pong on the same Android OkHttp stack + JWT.
         assertPingPong(wssUrl, token)
-        println("ANDROID_GCP_E2E_PASS wss=$wssUrl vision_enabled=true")
+        println("ANDROID_GCP_E2E_PASS vision_enabled=true frame_result_correlated=true")
     }
 
     private fun assertPingPong(wssUrl: String, token: String) {

@@ -12,6 +12,17 @@ import android.os.Build
  * recent 3G/4G optimizations do not begin at 640/Q55 on a 2 GB phone.
  */
 object DeviceCapability {
+    /** Avoid treating a physical handset's 127.0.0.1 as a developer workstation. */
+    fun isEmulator(): Boolean =
+        Build.FINGERPRINT.startsWith("generic") ||
+            Build.FINGERPRINT.startsWith("unknown") ||
+            Build.MODEL.contains("google_sdk", ignoreCase = true) ||
+            Build.MODEL.contains("Emulator", ignoreCase = true) ||
+            Build.MODEL.contains("Android SDK built for", ignoreCase = true) ||
+            Build.MANUFACTURER.contains("Genymotion", ignoreCase = true) ||
+            (Build.BRAND.startsWith("generic") && Build.DEVICE.startsWith("generic")) ||
+            "google_sdk" == Build.PRODUCT
+
     /** True for ActivityManager low-RAM profiles or &lt; 3 GB total memory. */
     fun isConstrained(context: Context): Boolean {
         val am = context.getSystemService(ActivityManager::class.java) ?: return false

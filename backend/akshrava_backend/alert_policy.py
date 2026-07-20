@@ -1,7 +1,11 @@
 """Application-layer alert delivery policy.
 
 Hazard scoring is deliberately pure.  This policy owns the user/session-specific side effects
-that decide whether an already-scored hazard is allowed to consume speech budget.
+that decide whether an already-scored hazard is allowed onto the wire.
+
+The phone AlertManager owns the 5 s per-object speech cooldown and the 2 s utterance gap.
+This policy only debounces same-key re-admits across consecutive frames (~800 ms) and applies
+a coarse global backstop so a saturated detector cannot flood the socket.
 """
 
 import time
@@ -10,7 +14,9 @@ from typing import Optional
 from .domain import Hazard, SessionState
 
 
-ALERT_COOLDOWN_MS = 5_000
+# Short same-key debounce only. Speech cooldowns live on the phone so a client drop
+# (utterance gap / busy collapse) cannot create a multi-second phantom silence.
+ALERT_DEBOUNCE_MS = 800
 GLOBAL_RATE_LIMIT = 6
 GLOBAL_RATE_WINDOW_MS = 60_000
 
@@ -24,7 +30,7 @@ class AlertPolicy:
         self._prune_rate_window(state, now)
         if not priority:
             previous = state.last_alert_at_ms.get(cooldown_key)
-            if previous is not None and now - previous < ALERT_COOLDOWN_MS:
+            if previous is not None and now - previous < ALERT_DEBOUNCE_MS:
                 return None
             if len(state.alert_timestamps_ms) >= GLOBAL_RATE_LIMIT:
                 return None

@@ -1,10 +1,15 @@
 from akshrava_backend.domain import Detection, GeometryProfile, SessionState
-from akshrava_backend.hazards import HazardScorer, _ground_plane_distance
-from akshrava_backend.alert_policy import AlertPolicy
+from akshrava_backend.hazards import (
+    HazardScorer,
+    _ground_plane_distance,
+    _pinhole_distance,
+)
+from akshrava_backend.alert_policy import ALERT_DEBOUNCE_MS, AlertPolicy
 from akshrava_backend.tracker import SimpleTracker
 
 
 CENTRAL_BOX = (220, 100, 430, 460)
+HALF_CENTRAL_BOX = tuple(v / 2.0 for v in CENTRAL_BOX)
 
 
 def _single_frame_track(label="person", confidence=0.9):
@@ -91,6 +96,48 @@ def test_upward_pitch_never_becomes_a_downward_ground_plane_estimate():
     # result produced by abs(pitch).
     profile = GeometryProfile("verified-r0", 500.0, 1.35)
     assert _ground_plane_distance((100, 100, 200, 240), 480, 1_000, profile) is None
+
+
+def test_focal_scales_with_frame_height_so_quality_downscale_preserves_range():
+    # Without scaling, half-resolution boxes with a static focal inflate distance ~2x and can
+    # push a near hazard out of the near band while still passing the agreement ratio.
+    profile = GeometryProfile("verified-r0", 500.0, 1.35, reference_height_px=480)
+    full = _pinhole_distance("person", CENTRAL_BOX, 480, profile)
+    half = _pinhole_distance("person", HALF_CENTRAL_BOX, 240, profile)
+    assert full is not None and half is not None
+    assert abs(full - half) < 0.05
+
+    ground_full = _ground_plane_distance(CENTRAL_BOX, 480, -1_200, profile)
+    ground_half = _ground_plane_distance(HALF_CENTRAL_BOX, 240, -1_200, profile)
+    assert ground_full is not None and ground_half is not None
+    assert abs(ground_full - ground_half) < 0.05
+
+
+def test_unscaled_focal_at_half_resolution_inflates_pinhole_distance():
+    # Control: treating focal as resolution-invariant doubles distance at half height.
+    profile = GeometryProfile("verified-r0", 500.0, 1.35, reference_height_px=480)
+    full = _pinhole_distance("person", CENTRAL_BOX, 480, profile)
+    naive_half = 500.0 * 1.65 / max(0.0, HALF_CENTRAL_BOX[3] - HALF_CENTRAL_BOX[1])
+    assert full is not None
+    assert naive_half > full * 1.8
+
+
+def test_server_same_key_debounce_is_short_phone_owns_speech_cooldown():
+    # Phone AlertManager owns the 5s object cooldown; server only debounces ~800ms.
+    assert ALERT_DEBOUNCE_MS == 800
+    assert ALERT_DEBOUNCE_MS < 5_000
+    scorer = HazardScorer()
+    policy = AlertPolicy()
+    state = SessionState(device_id="test", tracks=_stable_track())
+    first = policy.admit(state, scorer.score(state, 640, 480, 20, -1200, 0), priority=False)
+    assert first is not None
+    blocked = policy.admit(state, scorer.score(state, 640, 480, 20, -1200, 0), priority=False)
+    assert blocked is None
+    # Simulate debounce expiry without waiting wall clock.
+    key = "%s:%s" % (first.kind, first.bearing)
+    state.last_alert_at_ms[key] = state.last_alert_at_ms[key] - ALERT_DEBOUNCE_MS - 1
+    again = policy.admit(state, scorer.score(state, 640, 480, 20, -1200, 0), priority=False)
+    assert again is not None
 
 
 def test_only_a_verified_geometry_profile_can_enable_range_validation():

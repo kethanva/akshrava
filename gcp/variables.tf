@@ -69,7 +69,7 @@ variable "worker_machine_type" {
 
 variable "database_schema_revision" {
   type        = string
-  default     = "20260719_01"
+  default     = "20260721_01"
   description = "Must match backend Settings expected_schema_revision / alembic head marker."
 }
 
