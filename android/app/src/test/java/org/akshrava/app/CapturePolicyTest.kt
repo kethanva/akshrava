@@ -9,7 +9,7 @@ class CapturePolicyTest {
         val policy = CapturePolicy()
         policy.quality = Quality(fps = 1.0)
 
-        assertEquals(5_000L, policy.captureIntervalMs(1_000L, MotionState.STATIONARY))
+        assertEquals(1_000L, policy.captureIntervalMs(1_000L, MotionState.STATIONARY))
     }
 
     @Test

@@ -9,8 +9,11 @@ package org.akshrava.app
  */
 class CapturePolicy {
     companion object {
+        private const val MIN_FPS = 0.2
         private const val THROTTLED_FPS = 0.5
-        private const val STATIONARY_FPS = 0.2
+        // Stationary still needs >= 2 tracker hits for S2 (~1 s apart with cloud RTT).
+        // 0.2 FPS made a standing look take 10+ s before the first caution could fire.
+        private const val STATIONARY_FPS = 1.0
         private const val MAX_FPS = 3.0
         private const val HIGH_ALERT_FPS = 2.0
         private const val BATTERY_LOW_FPS = 0.2
@@ -40,7 +43,7 @@ class CapturePolicy {
             nowMs < highAlertUntilMs -> HIGH_ALERT_FPS
             motionState == MotionState.STATIONARY -> STATIONARY_FPS
             else -> quality.fps
-        }.coerceIn(STATIONARY_FPS, MAX_FPS)
+        }.coerceIn(MIN_FPS, MAX_FPS)
         return (1000.0 / targetFps).toLong()
     }
 }

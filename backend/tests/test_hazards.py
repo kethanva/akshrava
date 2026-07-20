@@ -21,7 +21,7 @@ def test_stable_large_central_person_gets_obstacle_alert():
     state = SessionState(device_id="test", tracks=_stable_track())
     hazard = HazardScorer().score(state, 640, 480, 20, -1200, 0)
     assert hazard is not None
-    assert hazard.message_key == "obstacle_ahead"
+    assert hazard.message_key == "person_ahead"
     assert not hazard.range_valid
     assert hazard.level == "caution"
 
@@ -145,4 +145,4 @@ def test_on_demand_look_answers_a_never_before_seen_object_on_its_first_frame():
     assert HazardScorer().score(state, 640, 480, 20, -1200, 0) is None  # ambient: still silent
     looked = HazardScorer().score(state, 640, 480, 20, -1200, 0, skip_cooldowns=True)
     assert looked is not None
-    assert looked.message_key == "obstacle_ahead"
+    assert looked.message_key == "person_ahead"

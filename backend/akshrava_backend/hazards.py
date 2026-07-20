@@ -243,7 +243,7 @@ class HazardScorer:
                         level="urgent" if is_s1 else "caution",
                         severity="S1" if is_s1 else "S2",
                         bearing=bearing,
-                        message_key="obstacle_ahead",
+                        message_key="person_ahead" if track.label == "person" else "obstacle_ahead",
                         haptic="triple" if is_s1 else "none",
                         confidence=track.confidence,
                         range_band=band,

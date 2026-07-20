@@ -11,8 +11,8 @@ android {
         // Android 8 covers the intended 2018–2021 donated-phone cohort.
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 12
+        versionName = "0.2.12"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

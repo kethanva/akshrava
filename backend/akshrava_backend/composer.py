@@ -7,6 +7,7 @@ from .domain import Hazard
 
 TEMPLATES_EN = {
     "obstacle_ahead": "Obstacle ahead",
+    "person_ahead": "Person ahead",
     "vehicle_nearby": "Vehicle nearby, {bearing}",
     "busy_road": "Busy road, careful",
     # Never imply the path is safe/clear — silence never means safety (architecture §1).
@@ -16,6 +17,7 @@ TEMPLATES_EN = {
 
 TEMPLATES_HI = {
     "obstacle_ahead": "आगे रुकावट",
+    "person_ahead": "आगे व्यक्ति",
     "vehicle_nearby": "वाहन {bearing_hi}",
     "busy_road": "व्यस्त सड़क, सावधान",
     "look_clear": "इस हाल के दृश्य में कोई अलर्ट नहीं. बेंत या गाइड का उपयोग जारी रखें",

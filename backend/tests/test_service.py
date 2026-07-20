@@ -88,12 +88,12 @@ async def test_detector_to_hazard_result_uses_the_phone_audio_message_contract()
     state = SessionState(device_id="device-1")
 
     # Persistence requires two observations; the first stays silent, the second reaches the
-    # exact `obstacle_ahead` key consumed by AlertManager on Android.
+    # exact `person_ahead` key consumed by AlertManager on Android.
     first = await service.analyze(state, _header(1, 1_000), b"jpeg")
     second = await service.analyze(state, _header(2, 1_500), b"jpeg")
 
     assert first["hazard"] is None
-    assert second["hazard"]["message_key"] == "obstacle_ahead"
+    assert second["hazard"]["message_key"] == "person_ahead"
     assert second["hazard"]["range_valid"] is False
     assert second["pipeline_stage_ms"]["persist"] == 0
     await service.drain_persists()
@@ -147,7 +147,7 @@ async def test_late_inference_never_consumes_the_alert_cooldown():
     third = await service.analyze(state, _header(3, 2_000), b"jpeg")
     assert third["late_suppressed"] is False
     assert third["hazard"] is not None
-    assert third["hazard"]["message_key"] == "obstacle_ahead"
+    assert third["hazard"]["message_key"] == "person_ahead"
 
 
 @pytest.mark.asyncio

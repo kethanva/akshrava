@@ -93,7 +93,7 @@ async def test_phase0_policy_replay_enforces_safety_contract():
                 assert "approach" not in blob
                 assert "safe to cross" not in blob
                 key = hazard.get("message_key")
-                assert key in {"obstacle_ahead", "vehicle_nearby", "busy_road"}
+                assert key in {"obstacle_ahead", "person_ahead", "vehicle_nearby", "busy_road"}
         await service.drain_persists()
     finally:
         service.shutdown()

@@ -17,10 +17,8 @@ import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
-import android.graphics.SurfaceTexture
 import android.util.Log
 import android.util.Size
-import android.view.Surface
 import okhttp3.OkHttpClient
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
@@ -65,9 +63,11 @@ class AssistService : LifecycleService() {
     private var reflexEngine: ReflexEngine = DisabledReflexEngine()
     private var wakeLock: PowerManager.WakeLock? = null
     private var cameraProvider: ProcessCameraProvider? = null
-    private var dummyPreviewSurface: Surface? = null
-    private var dummySurfaceTexture: SurfaceTexture? = null
+    private var cameraLifecycleOwner: CameraLifecycleOwner? = null
+    private var previewDrain: PreviewSurfaceDrain? = null
+    private var screenKeepAlive: ScreenKeepAlive? = null
     private var lastDarkAnnounceMs = 0L
+    private var framesAnalyzed = 0L
     private val framePending = AtomicBoolean(false)
     private val lookRequested = AtomicBoolean(false)
     private val bindGeneration = AtomicInteger(0)
@@ -147,6 +147,7 @@ class AssistService : LifecycleService() {
             onMute = { am.muteFor(15 * 60_000L) },
             onLook = { lookRequested.set(true); am.acknowledgeLook() }
         ).also { it.start() }
+        screenKeepAlive = ScreenKeepAlive(this).also { it.start() }
         bindCamera()
         SessionFlags.setActive(this, true)
         Watchdog.schedule(this)
@@ -182,22 +183,20 @@ class AssistService : LifecycleService() {
                 val analysisSide = analysisTargetSide(quality.maxSide)
                 boundAnalysisMaxSide = analysisSide
                 val rotation = currentDisplayRotation()
-                // Some OEMs (incl. OnePlus) deliver black ImageAnalysis buffers unless a Preview
-                // use-case is also bound. Feed an off-screen SurfaceTexture sized to the request.
-                releaseDummyPreview()
+                // Some OEMs (incl. OnePlus) deliver black / zero ImageAnalysis frames unless a
+                // Preview use-case is also bound. Drain Preview via ImageReader so the capture
+                // session is not stalled by an undrained SurfaceTexture buffer queue.
+                previewDrain?.release()
+                cameraLifecycleOwner?.destroy()
+                val owner = CameraLifecycleOwner().also {
+                    it.resume()
+                    cameraLifecycleOwner = it
+                }
+                val drain = PreviewSurfaceDrain().also { previewDrain = it }
                 val preview = Preview.Builder()
                     .setTargetRotation(rotation)
                     .build()
-                val mainExecutor = ContextCompat.getMainExecutor(this)
-                preview.setSurfaceProvider { request ->
-                    val size = request.resolution
-                    val texture = SurfaceTexture(0).also {
-                        it.setDefaultBufferSize(size.width, size.height)
-                        dummySurfaceTexture = it
-                    }
-                    val surface = Surface(texture).also { dummyPreviewSurface = it }
-                    request.provideSurface(surface, mainExecutor) { }
-                }
+                drain.attach(preview)
                 val analysis = ImageAnalysis.Builder()
                     .setResolutionSelector(
                         ResolutionSelector.Builder()
@@ -219,16 +218,18 @@ class AssistService : LifecycleService() {
                 val exec = frameExecutor
                 if (stopping || generation != bindGeneration.get() || exec == null || exec.isShutdown) {
                     provider.unbindAll()
-                    releaseDummyPreview()
+                    previewDrain?.release(); previewDrain = null
+                    cameraLifecycleOwner?.destroy(); cameraLifecycleOwner = null
                     return@addListener
                 }
                 analysis.setAnalyzer(exec) { image -> analyzeImage(image) }
                 provider.unbindAll()
-                provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+                provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
                 Log.i("AkshravaVision", "camera bound preview+analysis rotation=$rotation")
             } catch (ex: Exception) {
                 Log.e("AkshravaVision", "camera bind failed", ex)
-                releaseDummyPreview()
+                previewDrain?.release(); previewDrain = null
+                cameraLifecycleOwner?.destroy(); cameraLifecycleOwner = null
                 if (!stopping) {
                     updateNotification("Rear camera unavailable")
                     stopAfterCameraFailure()
@@ -237,16 +238,13 @@ class AssistService : LifecycleService() {
         }, ContextCompat.getMainExecutor(this))
     }
 
-    private fun releaseDummyPreview() {
-        dummyPreviewSurface?.release()
-        dummyPreviewSurface = null
-        dummySurfaceTexture?.release()
-        dummySurfaceTexture = null
-    }
-
     private fun analyzeImage(image: ImageProxy) {
         var closed = false
         try {
+            framesAnalyzed += 1
+            if (framesAnalyzed == 1L || framesAnalyzed % 30L == 0L) {
+                Log.i("AkshravaVision", "analyze frames=$framesAnalyzed ${image.width}x${image.height}")
+            }
             val now = SystemClock.elapsedRealtime()
             maybeCheckThermal(now)
             // Heartbeat means "the camera pipeline is alive", not "a frame was uploaded". It
@@ -266,20 +264,27 @@ class AssistService : LifecycleService() {
             val currentClient = client
             if (currentClient == null || !currentClient.canStream()) return
 
-            // In-flight: CameraX KEEP_ONLY_LATEST already discards older frames; skip work.
-            if (framePending.get()) return
+            // One encode/upload at a time. CameraX KEEP_ONLY_LATEST already sheds older
+            // buffers; this flag also stops us from racing the WebSocket in-flight slot.
+            if (!framePending.compareAndSet(false, true)) return
             val priority = lookRequested.getAndSet(false)
             // Headset long-press look or a fresh turn asks for one immediate frame.
             val turning = poseTracker?.consumeTurn() ?: false
-            if (!priority && !turning && now - lastCaptureMs < captureIntervalMs()) return
+            if (!priority && !turning && now - lastCaptureMs < captureIntervalMs()) {
+                framePending.set(false)
+                return
+            }
 
             val thumbnail = FrameGate.luma(image)
             if (FrameGate.isNearBlack(thumbnail)) {
+                framePending.set(false)
                 if (now - lastDarkAnnounceMs > 8_000L) {
                     lastDarkAnnounceMs = now
                     updateNotification("Camera is dark — uncover rear lens")
                     alertManager?.status("Camera is dark. Uncover the rear lens.")
                 }
+                // Never upload black OEM buffers — YOLO returns empty and burns RTT budget.
+                return
             }
             if (FrameGate.isBlurred(thumbnail)) {
                 consecutiveBlurredFrames += 1
@@ -293,15 +298,27 @@ class AssistService : LifecycleService() {
             } else {
                 consecutiveBlurredFrames = 0
             }
-            if (!priority && !turning) {
-                if (FrameGate.isDuplicate(previousThumbnail, thumbnail)) { previousThumbnail = thumbnail; return }
+            // Do NOT drop near-duplicate frames after the capture interval has elapsed.
+            // Hazard S2 requires tracker hits >= 2; a still scene of a person/vehicle is
+            // intentionally re-sampled and must reach the cloud so the second hit can fire.
+            // Burst-only duplicate suppression: same-interval accidental double analyze.
+            if (!priority && !turning && now - lastCaptureMs < 350L) {
+                if (FrameGate.isDuplicate(previousThumbnail, thumbnail)) {
+                    previousThumbnail = thumbnail
+                    framePending.set(false)
+                    return
+                }
             }
             // Blur is recorded as a cheap diagnostic signal by FrameGate, but never used to drop
             // a frame: a bad quality estimate must not become a missed-obstacle decision.
             previousThumbnail = thumbnail
 
             val encoder = frameEncoder
-            if (encoder == null) { image.close(); return }
+            if (encoder == null) {
+                framePending.set(false)
+                image.close()
+                return
+            }
             val prepared = encoder.prepare(image, quality.maxSide)
             image.close()
             closed = true
@@ -445,7 +462,8 @@ class AssistService : LifecycleService() {
         SessionFlags.setActive(this, false)
         Watchdog.cancel(this)
         cameraProvider?.unbindAll()
-        releaseDummyPreview()
+        previewDrain?.release(); previewDrain = null
+        cameraLifecycleOwner?.destroy(); cameraLifecycleOwner = null
         client?.close(); client = null
         poseTracker?.stop(); poseTracker = null
         frameExecutor?.shutdownNow(); frameExecutor = null
@@ -503,8 +521,10 @@ class AssistService : LifecycleService() {
         Watchdog.cancel(this)
         headsetControls?.stop()
         headsetControls = null
+        screenKeepAlive?.stop(); screenKeepAlive = null
         cameraProvider?.unbindAll()
-        releaseDummyPreview()
+        previewDrain?.release(); previewDrain = null
+        cameraLifecycleOwner?.destroy(); cameraLifecycleOwner = null
         client?.close(); client = null
         alertManager?.shutdown(); alertManager = null
         poseTracker?.stop(); poseTracker = null

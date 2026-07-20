@@ -233,6 +233,7 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
 
     private fun template(key: String, bearing: String): String = when (key) {
         "obstacle_ahead" -> if (isHindi) "आगे रुकावट" else "Obstacle ahead"
+        "person_ahead" -> if (isHindi) "आगे व्यक्ति" else "Person ahead"
         "vehicle_nearby" -> if (isHindi) {
             when (bearing) { "left" -> "वाहन बाईं ओर है"; "right" -> "वाहन दाईं ओर है"; else -> "वाहन आगे है" }
         } else "Vehicle nearby, $bearing"
