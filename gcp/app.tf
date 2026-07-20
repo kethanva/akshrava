@@ -268,7 +268,12 @@ resource "google_cloud_run_v2_service" "api" {
       }
       env {
         name  = "INFERENCE_TIMEOUT_MS"
-        value = "800"
+        # CPU remote YOLO is slower than GPU; keep GPU/noop path tight.
+        value = var.worker_use_gpu || var.detector != "remote" ? "800" : "9000"
+      }
+      env {
+        name  = "REMOTE_INFERENCE_TIMEOUT_MS"
+        value = var.worker_use_gpu || var.detector != "remote" ? "450" : "8500"
       }
       env {
         name  = "INFERENCE_EXECUTOR_WORKERS"

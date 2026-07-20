@@ -102,6 +102,8 @@ else
     -e REQUIRE_GPU="$REQUIRE_GPU" \
     -e YOLO_WEIGHTS=/models/yolo11s.pt \
     -e YOLO_WEIGHTS_SHA256="${yolo_weights_sha256}" \
+    -e YOLO_CONFIG_DIR=/tmp/Ultralytics \
+    -e MPLCONFIGDIR=/tmp/matplotlib \
     "${worker_image}"
 fi
 
