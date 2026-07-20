@@ -319,10 +319,11 @@ resource "google_cloud_run_v2_service" "api" {
         value = "false"
       }
       env {
-        name  = "ALERT_MAX_AGE_MS"
-        # The 2.5 s end-to-end safety limit is never relaxed for CPU or GPU. Late results remain
-        # visible as telemetry but cannot consume the spoken-alert path.
-        value = "2500"
+        name = "ALERT_MAX_AGE_MS"
+        # GPU / noop keep the tight 2.5 s speak boundary. CPU remote YOLO routinely needs several
+        # seconds; align with REMOTE_INFERENCE_TIMEOUT_MS so scored hazards are not late-suppressed
+        # while inference is still inside the allowed remote budget.
+        value = var.worker_use_gpu || var.detector != "remote" ? "2500" : "8500"
       }
       env {
         name  = "MIN_FRAME_INTERVAL_MS"

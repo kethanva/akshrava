@@ -12,6 +12,10 @@
 #   3. Phone has USB Debugging enabled (Settings → Developer Options → USB Debugging)
 #   4. You have authorised the Mac in the "Allow USB debugging?" dialog on the phone
 #
+# Optional env (or set in .env at repo root):
+#   AKSHRAVA_BASE_URL   Cloud Run HTTPS base URL (default: akshrava-api-c7d3j4nzdq-uc.a.run.app)
+#   AKSHRAVA_WSS_URL    Full WSS endpoint; overrides AKSHRAVA_BASE_URL derivation
+#
 # Troubleshooting tips are printed if anything fails.
 
 set -euo pipefail
@@ -20,6 +24,19 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 if [ -f "$REPO_ROOT/.env" ]; then set -a; source "$REPO_ROOT/.env"; set +a; fi
 ANDROID_DIR="$REPO_ROOT/android"
 APK_PATH="$ANDROID_DIR/app/build/outputs/apk/debug/app-debug.apk"
+
+# ── 0. Resolve the live GCP WSS endpoint ──────────────────────────────────────
+# Prefer terraform output (authoritative for whichever project/region is applied);
+# fall back to the known pilot Cloud Run URL used by the other e2e scripts; allow
+# explicit override via AKSHRAVA_BASE_URL / AKSHRAVA_WSS_URL / .env.
+TF_WSS_URL=""
+if command -v terraform &>/dev/null && [ -d "$REPO_ROOT/gcp" ]; then
+    TF_WSS_URL=$(terraform -chdir="$REPO_ROOT/gcp" output -raw websocket_url 2>/dev/null || true)
+fi
+BASE_URL="${AKSHRAVA_BASE_URL:-https://akshrava-api-c7d3j4nzdq-uc.a.run.app}"
+WSS_URL="${AKSHRAVA_WSS_URL:-${TF_WSS_URL:-${BASE_URL/https/wss}/v1/session}}"
+export AKSHRAVA_WSS_URL="$WSS_URL"
+echo "==> GCP WSS endpoint: $WSS_URL"
 
 # ── 1. Find ADB ──────────────────────────────────────────────────────────────
 ADB=""
@@ -222,8 +239,9 @@ echo "=============================================="
 echo "   ✅  Akshrava is installed and launched!"
 echo "=============================================="
 echo ""
-echo "Next steps — enter in the app:"
-echo "  WSS endpoint:  wss://<your-cloud-run-endpoint>/v1/session"
+echo "The WSS endpoint below is already baked into this debug build (BuildConfig.DEFAULT_WSS_ENDPOINT)."
+echo "Only re-enter it in the app if you previously provisioned a different endpoint on this phone:"
+echo "  WSS endpoint:  $WSS_URL"
 echo "  Device token:  Run: GOOGLE_APPLICATION_CREDENTIALS=<your-creds.json> ./scripts/print_android_pilot_provisioning.sh"
 echo "  Calibration:   e.g. 'volunteer-test-1'"
 echo ""

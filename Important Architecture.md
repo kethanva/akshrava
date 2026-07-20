@@ -120,7 +120,7 @@ sequenceDiagram
     Cmp->>WS: {message_key, bearing, level, severity, haptic,<br/>range_valid, spoken_preview, motion_evidence:"insufficient"}
     Note over WS: late_suppressed frames send NO hazard;<br/>a priority look sends look_summary instead
     WS-->>PC: result (echoes capture_mono_ms)
-    PC->>PC: age = elapsedRealtime - capture_mono_ms<br/>reject if > 2500ms
+    PC->>PC: age = elapsedRealtime - capture_mono_ms<br/>reject if > speak budget<br/>(CPU pilot ~9s; GPU target 2.5s)
     alt priority look
         PC->>AM: speakComposed(look_summary)
     else hazard present and fresh
@@ -134,7 +134,7 @@ sequenceDiagram
 
 **Why the split.** The composer emits `message_key + bearing` (e.g. `vehicle_nearby` / `right`) plus a `spoken_preview` string. The phone re-renders from its own offline template table (`AlertManager.template`), so speech works with the network dead, a Hindi phone always gets Hindi, and an unknown future `message_key` degrades to a safe `Assistance is limited` rather than mis-speaking. `spoken_preview`/`look_summary` are used verbatim only for the on-demand look, which is composed for that single frame.
 
-**Freshness and honesty gates on the return leg.** The phone computes age with its own `elapsedRealtime()` clock against the echoed `capture_mono_ms` (never a server clock) and drops any result older than 2500 ms. The server uses the same 2500 ms maximum; slower CPU/GPU work remains visible as telemetry but is never scored into a spoken hazard. A `late_suppressed` frame carries no hazard at all — the server skips scoring rather than speak an old detection — and a look answered past budget says *"could not check just now"*, never *"no hazard"*.
+**Freshness and honesty gates on the return leg.** The phone computes age with its own `elapsedRealtime()` clock against the echoed `capture_mono_ms` (never a server clock) and drops any result older than the speak budget. Live **CPU remote** pilot uses ~9 s (server `ALERT_MAX_AGE_MS=8500`, phone `9000`) so multi-second YOLO can still score; GPU / noop keep the tight 2500 ms target. A `late_suppressed` frame carries no hazard at all — the server skips scoring rather than speak an old detection — and a look answered past budget says *"could not check just now"*, never *"no hazard"*.
 
 **The single speaking lane (`AlertManager`).** Every caller — cloud alert, on-demand look, mode/status message, headset repeat — is serialised onto one worker thread so cooldown maps and the TTS queue stay consistent. Rules enforced there: a 5 s per-object cooldown; one utterance per 2 s (a gap-blocked caution is deferred once, not dropped, so a server admit is not wasted as silence); three alerts in ten seconds collapse to a single *"busy road, careful"*; an S1 urgent phrase flushes a caution mid-word but its own first 350 ms is protected from a following urgent; **haptics always fire, even while muted**, because the buzz is the channel a muted user still relies on. Mute auto-expires after 15 minutes so it can never be left silently dead, and single-press repeat replays the last alert if it is under 30 s old. The server only debounces same-key admits (~800 ms); it does not own the 5 s speech cooldown.
 
@@ -146,7 +146,7 @@ sequenceDiagram
 | Network round trip | normally 40–220 ms | Discard late work; do not replay it after reconnect |
 | Decode, inference, tracking, scoring | 45–80 ms target | Shed load through server quality guidance; bounded worker queue only |
 | Result validation and audio start | 60–110 ms | Urgent haptic can lead; stale speech is dropped |
-| Glass-to-audio p95 | **under 2500 ms safety maximum** | Speak only within the shared 2500 ms freshness boundary; late results remain diagnostics only |
+| Glass-to-audio p95 | **CPU pilot under ~9 s; GPU target under 2500 ms** | Speak only within the configured freshness boundary; late results remain diagnostics only |
 
 Every header includes monotonically increasing `id`, phone-local `capture_mono_ms`, dimensions, JPEG byte count, calibration ID, filtered pitch/roll and pose age. The phone calculates age with its own elapsed-realtime clock and rejects a result if it is too old; it never relies on server-clock comparison. The backend also rejects headers that arrive too quickly and consumes their JPEG companion so the stream remains aligned.
 
@@ -222,7 +222,7 @@ Ground-plane geometry may derive a rough band from a verified mount height, pitc
 
 ### Conservative hazard decision
 
-The scorer considers class, detector confidence, valid proximity, central path corridor and multi-frame stability. S1 urgent output is reserved for a validated nearby central obstruction (`range_valid` plus confidence); S2/caution requires repeated evidence. Vehicle language is awareness-only. On-demand **priority look** (`FrameHeader.priority` or `mode=priority`) skips alert cooldowns / device rate limits and returns a `look_summary` for that frame; the phone speaks it only within the shared 2500 ms freshness boundary. Look never invents approach or crossing advice. MediaSession long-press can request a priority frame after device-specific testing.
+The scorer considers class, detector confidence, valid proximity, central path corridor and multi-frame stability. S1 urgent output is reserved for a validated nearby central obstruction (`range_valid` plus confidence); S2/caution requires repeated evidence. Vehicle language is awareness-only. On-demand **priority look** (`FrameHeader.priority` or `mode=priority`) skips alert cooldowns / device rate limits and returns a `look_summary` for that frame; the phone speaks it only within the configured speak budget (CPU pilot ~9 s; GPU target 2500 ms). Look never invents approach or crossing advice. MediaSession long-press can request a priority frame after device-specific testing.
 
 | Condition | Permitted response | Never infer |
 |---|---|---|
@@ -298,7 +298,7 @@ this document's delivery and release sections for the engineering release sequen
 
 | Gate | Minimum evidence before progressing | In-repo support today |
 |---|---|---|
-| Bench → one-phone integration | Policy tests + Phase-0 replay (≥50 synthetic events); every spoken output carries age; speak only within the shared 2500 ms safety boundary | `verify_phases.sh`, `datasets/phase0/`, Android assemble |
+| Bench → one-phone integration | Policy tests + Phase-0 replay (≥50 synthetic events); every spoken output carries age; speak only within the configured freshness boundary | `verify_phases.sh`, `datasets/phase0/`, Android assemble |
 | One phone → field-survival work | 50 controlled-course repetitions per declared static class; ≥45/50 alerts in budget; zero unannounced service deaths; mute/stop without sight | Field evidence (not CI); calibration upsert via `scripts/upsert_calibration_profile.py` |
 | Survival → supervised participant trial | Three 45-minute device/carrier sessions; state announcements once each; mobility instructor signs | Process in this document's field readiness and supervised-trial guidance |
 | Participant trial → small pilot | 3–5 guided sessions, no attributable injury, regressions triaged, alerts understandable | Process + ops runbooks |

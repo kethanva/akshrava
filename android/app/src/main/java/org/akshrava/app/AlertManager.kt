@@ -72,40 +72,52 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
     @Volatile private var lastAlertAtMs = 0L
     private var lastUrgentSpokenAtMs = 0L
     private val vibrator = context.getSystemService(Vibrator::class.java)
+    @Volatile private var closed = false
     private var tts: TextToSpeech? = TextToSpeech(context, this)
 
     override fun onInit(status: Int) {
-        api.execute {
-            ready = status == TextToSpeech.SUCCESS
-            if (ready) {
-                tts?.language = language
-                tts?.setAudioAttributes(
-                    AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY).build()
-                )
-                tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                    override fun onStart(utteranceId: String) = Unit
-                    override fun onDone(utteranceId: String) = complete(utteranceId)
-                    override fun onStop(utteranceId: String, interrupted: Boolean) = complete(utteranceId)
-                    @Deprecated("Deprecated in Java")
-                    override fun onError(utteranceId: String) = complete(utteranceId)
-                    override fun onError(utteranceId: String, errorCode: Int) = complete(utteranceId)
-                })
-                // pendingStatus is written from status() on the camera analyzer's background
-                // executor thread and read here on whatever thread the TTS engine completes init
-                // on -- not necessarily the same thread. Guard it with the same lock already used
-                // for completionCallbacks rather than relying on @Volatile visibility alone, since
-                // this is a read-then-clear that must not race a concurrent status() write.
-                val toSpeak = synchronized(completionLock) { pendingStatus.also { pendingStatus = null } }
-                toSpeak?.let { speak(it.text, flush = true, id = nextStatusId(), onComplete = it.onComplete) }
-            } else {
-                val toDrop = synchronized(completionLock) { pendingStatus.also { pendingStatus = null } }
-                toDrop?.onComplete?.invoke()
+        // TTS init is asynchronous on many OEMs. shutdown() may already have torn down the
+        // worker; never throw RejectedExecutionException back onto the main thread.
+        if (closed || api.isShutdown) return
+        runCatching {
+            api.execute {
+                if (closed) return@execute
+                ready = status == TextToSpeech.SUCCESS
+                if (ready) {
+                    tts?.language = language
+                    tts?.setAudioAttributes(
+                        AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY).build()
+                    )
+                    tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                        override fun onStart(utteranceId: String) = Unit
+                        override fun onDone(utteranceId: String) = complete(utteranceId)
+                        override fun onStop(utteranceId: String, interrupted: Boolean) = complete(utteranceId)
+                        @Deprecated("Deprecated in Java")
+                        override fun onError(utteranceId: String) = complete(utteranceId)
+                        override fun onError(utteranceId: String, errorCode: Int) = complete(utteranceId)
+                    })
+                    // pendingStatus is written from status() on the camera analyzer's background
+                    // executor thread and read here on whatever thread the TTS engine completes init
+                    // on -- not necessarily the same thread. Guard it with the same lock already used
+                    // for completionCallbacks rather than relying on @Volatile visibility alone, since
+                    // this is a read-then-clear that must not race a concurrent status() write.
+                    val toSpeak = synchronized(completionLock) { pendingStatus.also { pendingStatus = null } }
+                    toSpeak?.let { speak(it.text, flush = true, id = nextStatusId(), onComplete = it.onComplete) }
+                } else {
+                    val toDrop = synchronized(completionLock) { pendingStatus.also { pendingStatus = null } }
+                    toDrop?.onComplete?.invoke()
+                }
             }
         }
     }
 
+    private fun runApi(block: () -> Unit) {
+        if (closed || api.isShutdown) return
+        runCatching { api.execute(block) }
+    }
+
     fun announce(messageKey: String, bearing: String, urgent: Boolean, haptic: String) {
-        api.execute { announceLocked(messageKey, bearing, urgent, haptic) }
+        runApi { announceLocked(messageKey, bearing, urgent, haptic) }
     }
 
     private fun announceLocked(messageKey: String, bearing: String, urgent: Boolean, haptic: String) {
@@ -178,7 +190,7 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
 
     /** Double-press headset mute. Auto-unmutes after [durationMs] so it can never be left silently dead. */
     fun muteFor(durationMs: Long) {
-        api.execute {
+        runApi {
             mutedUntilMs = SystemClock.elapsedRealtime() + durationMs
             speak(
                 if (isHindi) "पंद्रह मिनट के लिए म्यूट" else "Muted for fifteen minutes",
@@ -189,7 +201,7 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
 
     /** Single-press headset repeat: replays the last spoken alert if it is still recent. */
     fun repeatLast() {
-        api.execute {
+        runApi {
             val text = lastAlertText
             val now = SystemClock.elapsedRealtime()
             if (text == null || now - lastAlertAtMs > REPEATABLE_WINDOW_MS) {
@@ -197,14 +209,14 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
                     if (isHindi) "कोई हाल का अलर्ट नहीं" else "No recent alert",
                     flush = true, id = nextStatusId()
                 )
-                return@execute
+                return@runApi
             }
             speak(text, flush = true, id = nextStatusId())
         }
     }
 
     fun status(text: String, onComplete: (() -> Unit)? = null) {
-        api.execute {
+        runApi {
             if (ready) {
                 speak(text, flush = true, id = nextStatusId(), onComplete = onComplete)
             } else {
@@ -223,7 +235,7 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
 
     /** User-pulled look summary: flush and bypass object cooldown / busy collapse. */
     fun speakComposed(text: String, urgent: Boolean = true) {
-        api.execute {
+        runApi {
             val now = SystemClock.elapsedRealtime()
             markUtterance(now)
             speak(text, flush = urgent, id = "look-${++statusSequence}")
@@ -303,6 +315,7 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
     }
 
     fun shutdown() {
+        closed = true
         cancelDeferredCaution()
         val pending = synchronized(completionLock) {
             val values = completionCallbacks.values.toMutableList()

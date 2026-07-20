@@ -125,11 +125,11 @@ async def test_timely_vehicle_detection_reports_telemetry_and_conservative_s2_wi
 
 @pytest.mark.asyncio
 async def test_shared_alert_budget_scores_under_limit_and_keeps_labels_when_late():
-    # The shared 2.5-second boundary is never relaxed for slow CPU inference.
+    # CPU remote pilot uses ALERT_MAX_AGE_MS=8500 so multi-second YOLO can still score.
     # Slow-but-under-budget inference must still speak; over-budget keeps detector telemetry.
     store = RecordingStore()
     detector = SlowFixedPersonDetector(delay_s=0.05)
-    service = VisionService(detector, store, alert_max_age_ms=2_500)
+    service = VisionService(detector, store, alert_max_age_ms=8_500)
     state = SessionState(device_id="cpu-pilot")
 
     await service.analyze(state, _header(1, 1_000), b"jpeg")

@@ -225,11 +225,12 @@ class HazardScorer:
             # where ambient 0.2 FPS capture has NOT yet given the tracker a second look. Ordinary
             # ambient (non-priority) frames still require two-frame persistence to fire.
             stability = 1.0 if (skip_cooldowns or track.hits >= 2) else 0.0
-            risk = cw * track.confidence * proximity_validity * path_factor * stability
+            risk_base = cw * track.confidence * proximity_validity * path_factor
+            risk = risk_base * stability
 
             # ---------- severity assignment ----------
             is_s1 = (
-                risk >= 1.3
+                risk_base >= 1.3
                 and valid_range
                 and track.confidence >= S1_CONFIDENCE
             )

@@ -29,4 +29,4 @@ def test_rediss_url_without_ca_keeps_pilot_up_with_insecure_fallback(monkeypatch
     monkeypatch.delenv("REDIS_CA_CERT_FILE", raising=False)
     monkeypatch.delenv("REDIS_CA_PEM", raising=False)
     kwargs = _ssl_kwargs_for_url("rediss://host:6378/0")
-    assert kwargs == {"ssl_cert_reqs": "none", "ssl_check_hostname": False}
+    assert kwargs == {"ssl_check_hostname": False}

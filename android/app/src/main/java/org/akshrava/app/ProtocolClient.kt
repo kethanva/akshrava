@@ -70,17 +70,16 @@ class ProtocolClient(
         const val MAX_BACKOFF_SECONDS = 10.0
         /**
          * End-to-end phone freshness budget: age = elapsedRealtime() - capture_mono_ms.
-         * The server also rejects late frames at the same 2.5-second safety boundary. This
-         * client budget covers the full round trip; late results remain diagnostics but are
-         * never spoken.
+         * Must cover the live CPU remote YOLO path (server ALERT_MAX_AGE_MS=8500 plus uplink).
+         * GPU / tight pilots can still shed quality; late results remain diagnostics only.
          */
-        const val STALE_ALERT_MS = 2_500L
+        const val STALE_ALERT_MS = 9_000L
         /** Look answers use the full freshness budget even when the hazard is S1. */
-        const val LOOK_FRESHNESS_MS = 2_500L
-        const val URGENT_FRESHNESS_MS = 1_500L
+        const val LOOK_FRESHNESS_MS = 9_000L
+        const val URGENT_FRESHNESS_MS = 9_000L
         /**
-         * Allows a result to settle after slow inference while preserving the 2.5-second
-         * speech gate. A late result is diagnosed but never announced.
+         * Allows a result to settle after slow inference while preserving the speak budget.
+         * A late result is diagnosed but never announced.
          */
         const val FRAME_SETTLE_TIMEOUT_MS = 10_000L
         /** Look answers use the same settle budget; announce failure if unanswered. */
