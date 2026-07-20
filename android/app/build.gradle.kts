@@ -2,6 +2,27 @@ plugins {
     id("com.android.application")
 }
 
+// Resolve the live WSS endpoint even when Gradle is invoked directly (not via
+// scripts/install_android_debug.sh). Order: AKSHRAVA_WSS_URL env var → repo-root
+// .env AKSHRAVA_WSS_URL → documented placeholder. The placeholder is a genuine last
+// resort: a build that ships it can never reach GCP, which is exactly the bug that
+// stranded ADB-installed phones.
+val placeholderWssUrl = "wss://<your-cloud-run-endpoint>/v1/session"
+fun resolveWssUrl(): String {
+    System.getenv("AKSHRAVA_WSS_URL")?.takeIf { it.isNotBlank() }?.let { return it }
+    val dotenv = rootProject.projectDir.parentFile?.resolve(".env")
+    if (dotenv != null && dotenv.isFile) {
+        dotenv.readLines().forEach { raw ->
+            val line = raw.trim()
+            if (line.startsWith("AKSHRAVA_WSS_URL=")) {
+                return line.substringAfter('=').trim().trim('"', '\'')
+                    .takeIf { it.isNotBlank() } ?: placeholderWssUrl
+            }
+        }
+    }
+    return placeholderWssUrl
+}
+
 android {
     namespace = "org.akshrava.app"
     compileSdk = 36
@@ -40,7 +61,7 @@ android {
     buildTypes {
         debug {
             // Supervised GCP pilot WSS — volunteer screen remains editable.
-            val wssUrl = System.getenv("AKSHRAVA_WSS_URL") ?: "wss://<your-cloud-run-endpoint>/v1/session"
+            val wssUrl = resolveWssUrl()
             buildConfigField(
                 "String",
                 "DEFAULT_WSS_ENDPOINT",
@@ -59,7 +80,7 @@ android {
             // Release phones must have a real, secure endpoint by default. Provisioning may
             // still override this value, but example.invalid made every unconfigured release
             // build silently fail before it could reach the backend.
-            val wssUrl = System.getenv("AKSHRAVA_WSS_URL") ?: "wss://<your-cloud-run-endpoint>/v1/session"
+            val wssUrl = resolveWssUrl()
             buildConfigField(
                 "String",
                 "DEFAULT_WSS_ENDPOINT",
