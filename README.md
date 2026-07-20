@@ -115,7 +115,118 @@ sequenceDiagram
 
 ---
 
-## 3. Core Component & Pipeline Details
+## 3. Security Architecture & Threat Model
+
+Akshrava operates under a strict zero-trust boundary separating public mobile networks from backend compute infrastructure.
+
+```mermaid
+flowchart LR
+    subgraph PublicNet["Untrusted Network (Public Mobile Internet)"]
+        Phone["Android Device<br/>(Keystore Encrypted Token)"]
+    end
+
+    subgraph Edge["Control Plane Boundary (Google Cloud Run)"]
+        JWTCheck["RS256 JWT Validator<br/>(Public Key Verification)"]
+        RateLimiter["Redis Token Bucket<br/>(Admission Guard)"]
+        Phone <-->|"WSS TLS 1.3 / Port 443"| JWTCheck
+        JWTCheck --> RateLimiter
+    end
+
+    subgraph InternalVPC["GCP Private VPC (Isolated Subnet)"]
+        VPCConn["VPC Access Connector"]
+        CaddyProxy["Caddy Edge Proxy<br/>(mTLS Client Cert Auth)"]
+        HMACVerifier["HMAC-SHA256 Signer/Verifier<br/>(Timestamp + Nonce Replay Check)"]
+        WorkerPool["Worker Instance Group<br/>(No External Public IP)"]
+
+        RateLimiter --> VPCConn
+        VPCConn --> CaddyProxy
+        CaddyProxy --> HMACVerifier
+        HMACVerifier --> WorkerPool
+    end
+
+    subgraph Secrets["GCP Secret Manager"]
+        Sec1[("akshrava-jwt-private")]
+        Sec2[("worker-hmac-secret")]
+        Sec1 -.->|"Mounted at deployment"| JWTCheck
+        Sec2 -.->|"Read on boot"| HMACVerifier
+    end
+```
+
+### Security Principles
+- **Encrypted Local Storage**: Device JWT tokens are stored on the Android device using `AES-256-GCM` via `AndroidKeyStore`. Plaintext tokens are scrubbed immediately.
+- **HMAC-SHA256 Replay Protection**: API-to-Worker requests append `X-Akshrava-Timestamp`, `X-Akshrava-Nonce`, and HMAC signatures. Nonces are cached in Redis to reject duplicate or replayed frames.
+- **Zero Raw Video Retention**: JPEGs exist only in volatile RAM during inference and are discarded immediately. Database persistence (`Cloud SQL`) stores alert metadata only—never raw video frames.
+
+---
+
+## 4. Android State Machine & Service Lifecycle
+
+The `AssistService` foreground service manages hardware camera streams, network connectivity, thermal constraints, and battery guard thresholds.
+
+```mermaid
+stateDiagram-v2
+    [*] --> STOPPED
+    
+    STOPPED --> INITIALIZING: User Taps 'Start Assistance'
+    INITIALIZING --> ACTIVE_STREAMING: Config Loaded & WSS Connected
+    INITIALIZING --> STOPPED: Invalid Config / Unprovisioned
+    
+    state ACTIVE_STREAMING {
+        [*] --> NormalSampling
+        NormalSampling --> HighAlertSampling: High Hazard Detected (Accelerated Rate)
+        HighAlertSampling --> NormalSampling: Hazard Cleared
+    }
+    
+    ACTIVE_STREAMING --> THERMAL_THROTTLED: Temp ≥ 43°C (Cooldown Throttling)
+    THERMAL_THROTTLED --> ACTIVE_STREAMING: Temp ≤ 41°C (Thermal Recovery)
+    
+    ACTIVE_STREAMING --> BATTERY_CRITICAL: Battery < 10%
+    BATTERY_CRITICAL --> STOPPED: Clean Teardown & TTS Alert
+    
+    ACTIVE_STREAMING --> DISCONNECTED_RETRY: Network Drop / WS Error
+    DISCONNECTED_RETRY --> ACTIVE_STREAMING: Reconnected (Exponential Backoff)
+    DISCONNECTED_RETRY --> STOPPED: Max Retries / Service Shutdown
+    
+    ACTIVE_STREAMING --> CAMERA_FAILURE: Camera Hardware Unbind
+    CAMERA_FAILURE --> STOPPED: Speak Warning & Teardown Service
+    
+    ACTIVE_STREAMING --> STOPPED: User Taps 'Stop Assistance'
+```
+
+---
+
+## 5. Adaptive Quality & Network Rate Control
+
+To maintain low end-to-end latency on variable 3G/4G/5G mobile networks, Akshrava employs a dynamic dual-control loop adjusting both camera resolution rungs and JPEG compression quality.
+
+```mermaid
+flowchart TD
+    Start["Frame Analysis Triggered"] --> MeasureRTT["Measure Link RTT & Settle Timeout"]
+    MeasureRTT --> CheckRTT{"Evaluate Network Latency"}
+    
+    CheckRTT -->|"RTT < 300ms (Good Network)"| StepUp["Increase Quality / Step Up Resolution Rung"]
+    CheckRTT -->|"300ms ≤ RTT ≤ 800ms (Stable)"| HoldQuality["Maintain Current Ladder Rung"]
+    CheckRTT -->|"RTT > 800ms or Settle Timeout"| StepDown["Lower JPEG Quality / Step Down Resolution"]
+    
+    StepUp --> CheckLadder{"Crossed Resolution Rung?"}
+    StepDown --> CheckLadder
+    HoldQuality --> EndLoop["Process Frame"]
+    
+    CheckLadder -->|"Yes (e.g., 384p → 480p)"| RebindCam["Rebind CameraX Resolution Strategy"]
+    CheckLadder -->|"No (Quality Only)"| ApplyJPEGQ["Update FrameEncoder JPEG Quality"]
+    
+    RebindCam --> EndLoop
+    ApplyJPEGQ --> EndLoop
+```
+
+### Resolution & Quality Rungs
+- **Resolution Rungs (`max_side`)**: `320p` $\rightarrow$ `384p` $\rightarrow$ `480p` $\rightarrow$ `512p` $\rightarrow$ `640p`.
+- **JPEG Compression Rungs**: Dynamic JPEG quality scaling between `45` and `80`.
+- **Zero-Copy Rebinding**: CameraX rebinds automatically when crossing resolution boundaries, avoiding unnecessary CPU scale/rotate operations on the mobile processor.
+
+---
+
+## 6. Core Component & Pipeline Details
 
 ### Frame-to-Ear Pipeline Steps
 
@@ -133,7 +244,7 @@ sequenceDiagram
 
 ---
 
-## 4. Protocols & Wire Contracts
+## 7. Protocols & Wire Contracts
 
 ### A. Phone ↔ Control Plane (WebSocket Wire Protocol)
 
@@ -177,7 +288,7 @@ X-Akshrava-Signature: <HMAC-SHA256(Secret, Timestamp + Nonce + Body)>
 
 ---
 
-## 5. System Observability & Infrastructure Reliability
+## 8. System Observability & Infrastructure Reliability
 
 The system implements enterprise-grade reliability patterns verified via automated CI and GCP monitoring:
 
@@ -188,7 +299,7 @@ The system implements enterprise-grade reliability patterns verified via automat
 
 ---
 
-## 6. Repository Structure
+## 9. Repository Structure
 
 ```
 Akshrava/
@@ -220,7 +331,7 @@ Akshrava/
 
 ---
 
-## 7. Local Development & Verification
+## 10. Local Development & Verification
 
 ### Running Backend Tests & Verifications
 
@@ -242,7 +353,7 @@ Akshrava/
 
 ---
 
-## 8. License & Attribution
+## 11. License & Attribution
 
 - **Application Code**: Licensed under Apache 2.0.
 - **YOLO Model Weights**: Ultralytics YOLO model weights are licensed under AGPL-3.0. Enterprise deployment requires appropriate licensing decisions.
