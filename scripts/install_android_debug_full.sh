@@ -133,18 +133,45 @@ adb -s "$DEVICE_SERIAL" shell pm list packages | grep -q "org.akshrava.app$" || 
 log "APKs installed and verified present on device"
 
 # ── Provision via am instrument (no gradle uninstall side effect) ───────────
+# The instrumentation test itself only guarantees the write is *issued*; we independently
+# read the app's SharedPreferences back to confirm the endpoint, encrypted token, and
+# calibration actually landed on disk, and retry if a write was lost. A green "OK (1 test)"
+# alone is NOT proof of provisioning — that lesson is why this loop exists.
+provisioned_prefs() {
+  adb -s "$DEVICE_SERIAL" shell run-as org.akshrava.app cat \
+    /data/data/org.akshrava.app/shared_prefs/akshrava.xml 2>/dev/null
+}
 log "==> Provisioning Keystore (endpoint + token + calibration)..."
-INSTRUMENT_OUT=$(adb -s "$DEVICE_SERIAL" shell am instrument -w -r \
-  -e akshrava_test_token "$TOKEN" \
-  -e akshrava_wss_url "$WSS_URL" \
-  -e akshrava_calibration_id "$CALIBRATION_ID" \
-  -e akshrava_provision_target true \
-  -e class org.akshrava.app.GcpLiveProvisioningTest \
-  org.akshrava.app.test/androidx.test.runner.AndroidJUnitRunner 2>&1)
-if ! echo "$INSTRUMENT_OUT" | grep -q "OK ("; then
-  echo "$INSTRUMENT_OUT" >&2
-  die "Provisioning instrumentation failed (see output above)"
-fi
+PROVISION_OK=false
+for attempt in 1 2 3 4 5; do
+  # Force-stop first so instrumentation starts from a clean process (no stale in-memory prefs).
+  adb -s "$DEVICE_SERIAL" shell am force-stop org.akshrava.app >/dev/null 2>&1 || true
+  adb -s "$DEVICE_SERIAL" shell am force-stop org.akshrava.app.test >/dev/null 2>&1 || true
+  INSTRUMENT_OUT=$(adb -s "$DEVICE_SERIAL" shell am instrument -w -r \
+    -e akshrava_test_token "$TOKEN" \
+    -e akshrava_wss_url "$WSS_URL" \
+    -e akshrava_calibration_id "$CALIBRATION_ID" \
+    -e akshrava_provision_target true \
+    -e class org.akshrava.app.GcpLiveProvisioningTest \
+    org.akshrava.app.test/androidx.test.runner.AndroidJUnitRunner 2>&1)
+  if ! echo "$INSTRUMENT_OUT" | grep -q "OK ("; then
+    echo "$INSTRUMENT_OUT" >&2
+    die "Provisioning instrumentation failed (see output above)"
+  fi
+  sleep 1
+  PREFS="$(provisioned_prefs)"
+  if echo "$PREFS" | grep -q "encrypted_token" \
+     && echo "$PREFS" | grep -q "name=\"calibration\">$CALIBRATION_ID<" \
+     && echo "$PREFS" | grep -q "name=\"endpoint\">$WSS_URL<"; then
+    PROVISION_OK=true
+    log "Provisioning verified on device (attempt $attempt): endpoint + token + calibration present"
+    break
+  fi
+  log "⚠️  Attempt $attempt: provisioning did not fully persist yet; retrying..."
+done
+[ "$PROVISION_OK" = "true" ] || die "Provisioning failed to persist after 5 attempts.
+Last on-device prefs:
+$(provisioned_prefs)"
 # Confirm the app is still installed (am instrument never uninstalls, but verify anyway).
 adb -s "$DEVICE_SERIAL" shell pm list packages | grep -q "org.akshrava.app$" || die "App package missing after provisioning"
 log "Keystore provisioned and app confirmed installed"

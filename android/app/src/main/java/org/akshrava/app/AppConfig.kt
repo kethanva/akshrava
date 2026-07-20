@@ -38,11 +38,16 @@ object AppConfigStore {
     }
 
     fun save(context: Context, config: AppConfig): Boolean {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+        // commit(), not apply(): the returned Boolean must reflect durable persistence.
+        // apply() flushes on a background thread, so a short-lived caller (e.g. an
+        // instrumentation-driven provisioning run) can exit before the write reaches disk,
+        // silently losing the endpoint/token/calibration. commit() guarantees it landed.
+        val committed = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString(ENDPOINT, config.endpoint.trim())
             .putString(LANGUAGE, config.language)
             .putString(CALIBRATION, config.calibrationId.trim())
-            .apply()
+            .commit()
+        if (!committed) return false
         return saveToken(context, config.deviceToken.trim())
     }
 
@@ -61,7 +66,8 @@ object AppConfigStore {
                 String(cipher.doFinal(Base64.decode(encrypted, Base64.NO_WRAP)), Charsets.UTF_8)
             }.getOrElse {
                 // Do not fall back to a possibly copied plaintext token after keystore failure.
-                prefs.edit().remove(ENCRYPTED_TOKEN).remove(TOKEN_IV).remove(TOKEN).apply()
+                // commit() so the scrub is durable even if the process exits right after.
+                prefs.edit().remove(ENCRYPTED_TOKEN).remove(TOKEN_IV).remove(TOKEN).commit()
                 ""
             }
         }
@@ -69,10 +75,10 @@ object AppConfigStore {
         if (legacy.isNotBlank()) {
             // One-shot migration into Keystore, then scrub plaintext immediately.
             if (saveToken(context, legacy)) {
-                prefs.edit().remove(TOKEN).apply()
+                prefs.edit().remove(TOKEN).commit()
                 return legacy
             }
-            prefs.edit().remove(TOKEN).apply()
+            prefs.edit().remove(TOKEN).commit()
             return ""
         }
         return ""
@@ -82,22 +88,22 @@ object AppConfigStore {
     private fun saveToken(context: Context, token: String): Boolean {
         val editor = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(TOKEN)
         if (token.isBlank()) {
-            editor.remove(ENCRYPTED_TOKEN).remove(TOKEN_IV).apply()
-            return true
+            // commit() so callers that immediately exit still durably clear the token.
+            return editor.remove(ENCRYPTED_TOKEN).remove(TOKEN_IV).commit()
         }
         return try {
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE, tokenKey())
             val ciphertext = cipher.doFinal(token.toByteArray(Charsets.UTF_8))
+            // commit() guarantees the encrypted bearer is on disk before we report success.
             editor
                 .putString(ENCRYPTED_TOKEN, Base64.encodeToString(ciphertext, Base64.NO_WRAP))
                 .putString(TOKEN_IV, Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
-                .apply()
-            true
+                .commit()
         } catch (_: Exception) {
             // An unavailable Android Keystore is a provisioning failure, not a reason to retain
             // a bearer token in plaintext storage.
-            editor.remove(ENCRYPTED_TOKEN).remove(TOKEN_IV).apply()
+            editor.remove(ENCRYPTED_TOKEN).remove(TOKEN_IV).commit()
             false
         }
     }
