@@ -40,6 +40,10 @@ class GcpDiagnosticStorage:
 
         GCS uploads block, so they run in a bounded executor off the event loop.
         """
+        if not file_name:
+            raise ValueError("Object name cannot be empty")
+        if ".." in file_name or file_name.startswith("/"):
+            raise ValueError("Invalid object name: path traversal or absolute paths are not allowed")
         self._init_client()
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(self._executor, self._upload_blocking, file_name, jpeg_bytes)

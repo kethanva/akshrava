@@ -369,6 +369,8 @@ async def session(websocket: WebSocket):
                         vision.schedule_diagnostic_upload(_upload_diagnostic())
 
                     await websocket.send_json(quality_for_inference(result["server_inference_ms"]))
+                else:
+                    await websocket.send_json(resp)
             else:
                 await websocket.send_json({"type": "error", "code": "unsupported_message"})
     except (WebSocketDisconnect, RuntimeError):
