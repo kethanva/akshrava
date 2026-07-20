@@ -23,6 +23,8 @@ class Metrics:
         self._session_admission_rejected_total = 0
         self._inference_failures_total = 0
         self._worker_saturated_total = 0
+        self._db_pool_checkedin = 0
+        self._db_pool_checkedout = 0
         self._inference_counts: Dict[int, int] = {bucket: 0 for bucket in self._INFERENCE_BUCKETS}
         self._inference_sum_ms = 0
         self._inference_count = 0
@@ -102,6 +104,12 @@ class Metrics:
         with self._lock:
             self._worker_saturated_total += 1
 
+    def set_db_pool_stats(self, checkedin: int, checkedout: int) -> None:
+        with self._lock:
+            self._db_pool_checkedin = checkedin
+            self._db_pool_checkedout = checkedout
+
+
     def render(self) -> str:
         with self._lock:
             lines = [
@@ -129,6 +137,12 @@ class Metrics:
                 "# HELP akshrava_worker_saturated_total Frames soft-shed because the worker queue was full.",
                 "# TYPE akshrava_worker_saturated_total counter",
                 "akshrava_worker_saturated_total %s" % self._worker_saturated_total,
+                "# HELP akshrava_db_pool_checkedin SQLAlchemy connection pool idle count.",
+                "# TYPE akshrava_db_pool_checkedin gauge",
+                "akshrava_db_pool_checkedin %s" % self._db_pool_checkedin,
+                "# HELP akshrava_db_pool_checkedout SQLAlchemy connection pool active count.",
+                "# TYPE akshrava_db_pool_checkedout gauge",
+                "akshrava_db_pool_checkedout %s" % self._db_pool_checkedout,
                 "# HELP akshrava_inference_duration_milliseconds Vision inference and queue duration.",
                 "# TYPE akshrava_inference_duration_milliseconds histogram",
             ]

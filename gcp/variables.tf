@@ -166,7 +166,7 @@ check "cloud_armor_requires_domain" {
 
 variable "enable_worker_ha" {
   type        = bool
-  default     = false
+  default     = true
   description = "When true, replace the single-VM GPU/CPU worker with a regional Managed Instance Group behind an internal L4 LB with auto-healing (see worker_ha.tf). Default false preserves the documented single-VM pilot posture; review a terraform plan before enabling against a live project."
 }
 

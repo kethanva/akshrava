@@ -305,3 +305,23 @@ async def test_inference_circuit_is_per_device():
     detections, status = await service._detect("good-phone", b"jpeg")
     assert detections == []
     assert status is None
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_state_is_bounded_against_device_rotation(monkeypatch):
+    # release_session keeps per-device breaker state across reconnects by design, but a device
+    # that opens a circuit and never returns (or rotates its id) must not leak these dicts
+    # forever. Once past the cap, expired circuits are swept.
+    service = VisionService(FixedPersonDetector(), RecordingStore())
+    monkeypatch.setattr(type(service), "_CIRCUIT_STATE_MAX", 5)
+    # Open circuits for many devices with an already-past cooldown, then trigger one more open
+    # to fire the prune. Directly drive the internal breaker to avoid needing real timeouts.
+    for index in range(20):
+        service._circuit_open_until["dead-%d" % index] = 0.0  # already expired
+    service._timeout_streak["live"] = service._CIRCUIT_OPEN_AFTER - 1
+    service._note_timeout("live")  # crosses threshold -> opens + prunes
+    try:
+        assert len(service._circuit_open_until) <= 6  # <= cap + the freshly opened "live"
+        assert "live" in service._circuit_open_until  # active circuit preserved
+    finally:
+        service.shutdown()

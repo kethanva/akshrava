@@ -77,6 +77,7 @@ flowchart LR
 flowchart TB
   subgraph Secrets["Secret Manager"]
     S1["akshrava-jwt-public · mounted on API"]
+    S1b["akshrava-jwt-public-previous · dual-key cutover"]
     S2["akshrava-jwt-private · provisioning only"]
     S3["DB / Redis URLs · HMAC worker secret"]
     S4["mTLS CA + client/server PEMs"]
@@ -112,6 +113,18 @@ flowchart LR
   Ops["IAP SSH · 35.235.240.0/20<br/>worker has no public IP"] -.-> WorkerVM["Worker VM"]
   TF --> WorkerVM
 ```
+
+### Enterprise production readiness (Top 5) — status
+
+| Review item | Status | How to enable / operate |
+|---|---|---|
+| Regional MIG worker (SPOF) | **IaC ready, off by default** | `enable_worker_ha=true` + `worker_ha_target_size≥2` in tfvars; see `gcp/worker_ha.tf` and `gcp/terraform.tfvars.production.example` |
+| Cloud Armor + LB rate limit | **IaC ready, off by default** | `enable_cloud_armor=true` + `cloud_armor_domain`; DNS A → LB IP before apply (`gcp/cloud_armor.tf`) |
+| API soft backpressure | **Shipped in API/Android** | Worker HTTP 503 → `worker_saturated` JSON error; WSS stays open; phone honors `max_in_flight` + soft shed |
+| JSON logs + SLI/SLO | **Shipped + optional alert** | Structured JSON on API/worker; uptime check on `/readyz`; optional `enable_worker_saturation_log_metric` |
+| JWT Secret Manager rotation | **Dual-key cutover** | `./scripts/rotate_jwt_rs256.sh`; API mounts current + previous public PEMs |
+
+Details: [`PRODUCTION_READINESS_REMEDIATION.md`](PRODUCTION_READINESS_REMEDIATION.md).
 
 ---
 
@@ -397,6 +410,13 @@ DATABASE_URL='postgresql+asyncpg://...' python ../scripts/revoke_device.py pilot
 Revocation is checked during WebSocket upgrade, before every frame header, and during event reads.
 An already-open session is closed before its next frame; issue a new device ID/token after
 re-provisioning, and do not "unrevoke" a lost device.
+
+To rotate the fleet RS256 signing keys with a dual-key cutover window:
+
+```bash
+./scripts/rotate_jwt_rs256.sh
+# then re-mint tokens for field phones via mint_device_token_gcp.sh
+```
 
 ---
 

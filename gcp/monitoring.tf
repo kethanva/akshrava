@@ -73,3 +73,8 @@ resource "google_monitoring_alert_policy" "worker_saturated_slo" {
     mime_type = "text/markdown"
   }
 }
+
+# DB pool / custom-service SLO alerts require metrics that only appear after the new API revision
+# scrapes Prometheus and a GCLB/Cloud Run monitored service type. Keep them out of the default
+# apply path so pilot deploys are not blocked by missing metric descriptors.
+

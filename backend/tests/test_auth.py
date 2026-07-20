@@ -142,3 +142,26 @@ def test_rs256_key_cache_picks_up_a_rotated_public_key_on_mtime_change(tmp_path,
     except AuthError:
         pass
     assert device_id_from_token(_rs256_token(key_b), settings) == "phone-1"
+
+
+def test_rs256_dual_key_accepts_previous_during_rotation_cutover(tmp_path, monkeypatch):
+    """During rotate_jwt_rs256.sh cutover, tokens minted with the previous private key still verify."""
+    import akshrava_backend.auth as auth
+
+    auth._KEY_CACHE.clear()
+    previous = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    current = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    current_path = tmp_path / "current.pem"
+    previous_path = tmp_path / "previous.pem"
+    current_path.write_bytes(_public_pem(current))
+    previous_path.write_bytes(_public_pem(previous))
+    monkeypatch.setenv("AKSHRAVA_ENV", "production")
+    monkeypatch.setenv("DEV_AUTH_BYPASS", "false")
+    monkeypatch.setenv("JWT_ALGORITHM", "RS256")
+    monkeypatch.setenv("JWT_PUBLIC_KEY_FILE", str(current_path))
+    monkeypatch.setenv("JWT_PUBLIC_KEY_PREVIOUS_FILE", str(previous_path))
+    monkeypatch.setenv("REDIS_URL", "rediss://redis.internal:6380/0")
+    monkeypatch.setenv("METRICS_SCRAPE_TOKEN", "test-metrics-token")
+    settings = Settings.from_env()
+    assert device_id_from_token(_rs256_token(current), settings) == "phone-1"
+    assert device_id_from_token(_rs256_token(previous), settings) == "phone-1"

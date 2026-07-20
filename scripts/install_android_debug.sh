@@ -206,7 +206,12 @@ elif [ $INSTALL_EXIT -ne 0 ]; then
     exit 1
 fi
 
-# ── 7. Launch app ─────────────────────────────────────────────────────────────
+# ── 7. Configure Port Forwarding (Local Dev) ──────────────────────────────────
+echo ""
+echo "==> Configuring ADB reverse port forwarding (tcp:8000 -> tcp:8000)..."
+"$ADB" -s "$DEVICE_SERIAL" reverse tcp:8000 tcp:8000 || echo "⚠️   Failed to reverse port 8000"
+
+# ── 8. Launch app ─────────────────────────────────────────────────────────────
 echo ""
 echo "==> Launching Akshrava on device..."
 "$ADB" -s "$DEVICE_SERIAL" shell am start -n org.akshrava.app/.MainActivity 2>&1 || true

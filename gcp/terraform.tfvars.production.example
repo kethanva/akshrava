@@ -1,18 +1,10 @@
 # Production-hardening profile (Enterprise Readiness Review Top 5).
-# Copy values into terraform.tfvars after quota/DNS review — do not apply blindly.
+# Copy selected flags into terraform.tfvars AFTER quota/DNS review — do not apply this file blindly.
 #
-# 1) Regional MIG worker (fixes single-zone SPOF)
-# enable_worker_ha       = true
-# worker_ha_target_size  = 2
-#
-# 2) Cloud Armor + external HTTPS LB (DDoS / rate limit)
-# enable_cloud_armor     = true
-# cloud_armor_domain     = "api.akshrava.example.org"
-#
-# 3) Monitoring SLOs
-# enable_worker_saturation_log_metric = true
-#
-# Keep PoC cost toggles documented in poc_cost_optimization_guide.md for overnight pause.
+# Defaults for the supervised pilot remain:
+#   enable_worker_ha = false
+#   enable_cloud_armor = false
+# Flip only after reviewing `terraform plan` and confirming GPU/CPU quota + DNS for the LB cert.
 
 project_id  = "project-704ccb8e-8b12-4da6-a3f"
 region      = "us-central1"
@@ -25,10 +17,17 @@ manage_pki_in_terraform   = false
 worker_use_gpu            = false
 redis_transit_encryption  = true
 
-enable_worker_ha      = true
-worker_ha_target_size = 2
-
-enable_cloud_armor = true
-cloud_armor_domain = "REPLACE_WITH_MANAGED_DOMAIN"
-
-enable_worker_saturation_log_metric = true
+# --- Top 5 enablement (opt-in; leave commented until ready) ---
+# 1) Regional MIG worker (fixes single-zone SPOF)
+# enable_worker_ha       = true
+# worker_ha_target_size  = 2
+#
+# 2) Cloud Armor + external HTTPS LB (DDoS / edge rate limit)
+# enable_cloud_armor     = true
+# cloud_armor_domain     = "api.akshrava.example.org"
+#
+# 3) Soft-shed SLO alert (requires log-based metric akshrava_worker_saturated)
+# enable_worker_saturation_log_metric = true
+#
+# JWT dual-key rotation: ./scripts/rotate_jwt_rs256.sh
+# Soft backpressure + JSON logs + W3C tracing ship in the API/worker images (no tfvars flag).

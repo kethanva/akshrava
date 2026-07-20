@@ -166,7 +166,10 @@ async def prometheus_metrics(
             or not hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
         ):
             raise HTTPException(status_code=404, detail="not found")
+    checkedin, checkedout = store.pool_status()
+    metrics.set_db_pool_stats(checkedin, checkedout)
     return Response(metrics.render(), media_type="text/plain; version=0.0.4; charset=utf-8")
+
 
 
 async def _retention_loop(stop: asyncio.Event):

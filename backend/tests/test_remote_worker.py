@@ -375,3 +375,37 @@ def test_remote_worker_detect_async_raises_saturated_on_503(monkeypatch):
     with pytest.raises(WorkerSaturatedError):
         asyncio.run(detector.detect_async(JPEG))
 
+
+def test_registry_remote_preserves_worker_saturated_error(monkeypatch):
+    """Single-endpoint registry must not rewrite 503 into a generic RemoteInferenceError."""
+    from akshrava_backend.detector import (
+        InferenceEndpoint,
+        RegistryRemoteWorkerDetector,
+        StaticInferenceEndpointRegistry,
+        WorkerSaturatedError,
+    )
+
+    class FakeClient:
+        async def post(self, url, content=None, headers=None, follow_redirects=False):
+            class FakeResp:
+                status_code = 503
+                content = b"queue full"
+
+                def raise_for_status(self):
+                    pass
+
+            return FakeResp()
+
+    registry = StaticInferenceEndpointRegistry(
+        [InferenceEndpoint(id="worker-1", url="https://worker.internal/v1/infer")]
+    )
+    detector = RegistryRemoteWorkerDetector(
+        registry,
+        shared_secret=SECRET,
+        timeout_ms=450,
+    )
+    worker = next(iter(detector._workers.values()))
+    monkeypatch.setattr(worker, "_get_async_client", lambda: asyncio.sleep(0, result=FakeClient()))
+    with pytest.raises(WorkerSaturatedError):
+        asyncio.run(detector.detect_async_for_device("phone-1", JPEG))
+

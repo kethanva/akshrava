@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Request, Response, Depends
 
 from .detector import Detector, jpeg_dimensions, make_detector
 from .coordination import nonce_store_for
@@ -153,6 +153,19 @@ def _authenticated_body(request: Request, body: bytes, settings: WorkerSettings)
     return nonce
 
 
+def get_settings(request: Request) -> WorkerSettings:
+    return request.app.state.worker_settings
+
+def get_nonce_store(request: Request):
+    return request.app.state.nonce_store
+
+def get_metrics(request: Request) -> Metrics:
+    return request.app.state.metrics
+
+def get_inference_queue(request: Request) -> asyncio.Queue:
+    return request.app.state.inference_queue
+
+
 def create_worker_app(
     settings: Optional[WorkerSettings] = None,
     detector: Optional[Detector] = None,
@@ -214,16 +227,19 @@ def create_worker_app(
         return {"ok": True, "role": "gpu-worker"}
 
     @app.get("/readyz")
-    async def readyz():
+    async def readyz(nonce_store=Depends(get_nonce_store)):
         try:
-            await app.state.nonce_store.health()
+            await nonce_store.health()
         except Exception as exc:
             raise HTTPException(status_code=503, detail="worker replay protection unavailable") from exc
         return {"ok": True, "role": "gpu-worker", "detector": "ultralytics"}
 
     @app.get("/metrics", include_in_schema=False)
-    async def prometheus_metrics(request: Request):
-        settings_value = app.state.worker_settings
+    async def prometheus_metrics(
+        request: Request,
+        settings_value: WorkerSettings = Depends(get_settings),
+        metrics: Metrics = Depends(get_metrics)
+    ):
         if settings_value.environment != "development":
             expected = settings_value.metrics_scrape_token
             provided = (request.headers.get("x-akshrava-metrics-token") or "").strip()
@@ -236,13 +252,18 @@ def create_worker_app(
                 or not hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
             ):
                 raise HTTPException(status_code=404, detail="not found")
-        return Response(app.state.metrics.render(), media_type="text/plain; version=0.0.4; charset=utf-8")
+        return Response(metrics.render(), media_type="text/plain; version=0.0.4; charset=utf-8")
 
     @app.post("/v1/infer")
-    async def infer(request: Request):
+    async def infer(
+        request: Request,
+        settings_value: WorkerSettings = Depends(get_settings),
+        nonce_store = Depends(get_nonce_store),
+        inference_queue: asyncio.Queue = Depends(get_inference_queue),
+        metrics: Metrics = Depends(get_metrics)
+    ):
         trace_id = _trace_id(request)
         body = await request.body()
-        settings_value = app.state.worker_settings
         if len(body) > settings_value.max_image_bytes:
             raise HTTPException(status_code=413, detail="worker request too large")
         try:
@@ -251,7 +272,7 @@ def create_worker_app(
             logger.warning("worker auth rejected trace=%s status=%d detail=%s", trace_id, exc.status_code, exc.detail)
             raise
         try:
-            first_use = await app.state.nonce_store.claim(nonce, settings_value.request_max_age_seconds)
+            first_use = await nonce_store.claim(nonce, settings_value.request_max_age_seconds)
         except Exception as exc:
             # A failed coordinator is a security failure, never a reason to accept a potentially
             # replayed request on another replica.
@@ -281,7 +302,7 @@ def create_worker_app(
         started = time.monotonic()
         future = asyncio.get_running_loop().create_future()
         try:
-            app.state.inference_queue.put_nowait((jpeg, future))
+            inference_queue.put_nowait((jpeg, future))
         except asyncio.QueueFull as exc:
             raise HTTPException(status_code=503, detail="worker inference queue full") from exc
         try:
@@ -301,7 +322,7 @@ def create_worker_app(
             raise
         inference_ms = int((time.monotonic() - started) * 1000)
         logger.info("worker inference completed trace=%s inference_ms=%d detections=%d", trace_id, inference_ms, len(detections))
-        app.state.metrics.observe_result(inference_ms, bool(detections))
+        metrics.observe_result(inference_ms, bool(detections))
         return {
             "detections": [
                 {"label": item.label, "confidence": item.confidence, "box": list(item.box)}

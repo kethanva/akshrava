@@ -380,7 +380,8 @@ class RegistryRemoteWorkerDetector(Detector):
                 return self._workers[endpoint.id].detect(jpeg)
             except RemoteInferenceError as exc:
                 errors.append(exc)
-        raise RemoteInferenceError("all configured remote workers are unavailable") from errors[-1]
+        aggregated = self._aggregate_remote_errors(errors)
+        raise aggregated from errors[-1]
 
     async def detect_async(self, jpeg: bytes) -> List[Detection]:
         return await self.detect_async_for_device("", jpeg)
@@ -392,7 +393,21 @@ class RegistryRemoteWorkerDetector(Detector):
                 return await self._workers[endpoint.id].detect_async(jpeg)
             except RemoteInferenceError as exc:
                 errors.append(exc)
-        raise RemoteInferenceError("all configured remote workers are unavailable") from errors[-1]
+        aggregated = self._aggregate_remote_errors(errors)
+        raise aggregated from errors[-1]
+
+    @staticmethod
+    def _aggregate_remote_errors(errors: List[Exception]) -> RemoteInferenceError:
+        """Preserve WorkerSaturatedError so the API can soft-shed without tearing down WSS.
+
+        A single-endpoint pilot that returns HTTP 503 must not be rewritten into a generic
+        RemoteInferenceError — that path closes the socket as vision_unavailable.
+        """
+        if not errors:
+            return RemoteInferenceError("all configured remote workers are unavailable")
+        if all(isinstance(exc, WorkerSaturatedError) for exc in errors):
+            return WorkerSaturatedError("all configured remote workers are saturated")
+        return RemoteInferenceError("all configured remote workers are unavailable")
 
     def requires_serial_execution(self) -> bool:
         return False

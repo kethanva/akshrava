@@ -67,6 +67,9 @@ class VisionService:
     _POSE_DISCONTINUITY_CDEG = 1_200
     _CIRCUIT_OPEN_AFTER = 3
     _CIRCUIT_COOLDOWN_SECONDS = 5.0
+    # Sweep expired per-device breaker entries once the dict grows past this, bounding memory
+    # against device-id rotation without touching still-active circuits.
+    _CIRCUIT_STATE_MAX = 10000
 
     def __init__(
         self,
@@ -257,6 +260,24 @@ class VisionService:
             else:
                 close_method()
 
+    def _prune_circuit_state(self) -> None:
+        """Drop expired circuit entries so device rotation cannot leak these dicts unbounded.
+
+        release_session deliberately keeps per-device breaker state across a reconnect (an
+        offending device should still find its circuit open). But a device that opens a circuit
+        and never returns, or churns its id on re-provisioning, would otherwise leave an entry
+        forever. An expired circuit (its cooldown has passed) is safe to forget; a device whose
+        cooldown lapsed and reconnects simply starts a fresh streak. Cheap O(expired) sweep,
+        only triggered once the dict grows past a threshold.
+        """
+        if len(self._circuit_open_until) <= self._CIRCUIT_STATE_MAX:
+            return
+        now = time.monotonic()
+        expired = [key for key, until in self._circuit_open_until.items() if until <= now]
+        for key in expired:
+            self._circuit_open_until.pop(key, None)
+            self._timeout_streak.pop(key, None)
+
     def _circuit_allows(self, device_id: str) -> None:
         until = self._circuit_open_until.get(device_id, 0.0)
         if time.monotonic() < until:
@@ -268,6 +289,7 @@ class VisionService:
         if streak >= self._CIRCUIT_OPEN_AFTER:
             self._circuit_open_until[device_id] = time.monotonic() + self._CIRCUIT_COOLDOWN_SECONDS
             self._timeout_streak[device_id] = 0
+            self._prune_circuit_state()
             logger.warning(
                 "inference circuit opened for device=%s for %.1fs after repeated timeouts",
                 device_id,

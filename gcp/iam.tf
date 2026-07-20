@@ -13,6 +13,7 @@ locals {
   # Static keys so for_each is known at plan time (secret_id strings are fixed in config).
   api_secret_ids = toset(concat([
     "akshrava-jwt-public",
+    "akshrava-jwt-public-previous",
     "akshrava-worker-secret",
     "akshrava-database-url",
     "akshrava-database-url-sync",
@@ -37,8 +38,11 @@ resource "google_secret_manager_secret_iam_member" "api_secret_accessor" {
   secret_id = each.value
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.api_sa.email}"
-  # Secret Manager can 404 briefly after create; pin IAM after redis_ca exists.
-  depends_on = [google_secret_manager_secret.redis_ca]
+  # Secret Manager can 404 briefly after create; pin IAM after secrets exist.
+  depends_on = [
+    google_secret_manager_secret.redis_ca,
+    google_secret_manager_secret.jwt_public_previous,
+  ]
 }
 
 resource "google_secret_manager_secret_iam_member" "worker_secret_accessor" {

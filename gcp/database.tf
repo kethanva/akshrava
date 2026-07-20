@@ -19,6 +19,14 @@ resource "google_sql_database_instance" "postgres" {
       name  = "log_connections"
       value = "on"
     }
+    # Pin the connection ceiling so it does not silently drift with tier defaults, and so it is
+    # visibly reconciled with the backend's bounded pool: API pool is 5 + 3 overflow per Cloud Run
+    # instance (max 10 instances) = 80, leaving headroom under 100 for the migrate job, backups,
+    # and operator sessions. Raise both together if either the pool or max_instance_count grows.
+    database_flags {
+      name  = "max_connections"
+      value = "100"
+    }
   }
 
   deletion_protection = var.environment == "production"

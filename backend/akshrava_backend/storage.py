@@ -2,7 +2,7 @@ from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 import logging
 import os
-from typing import Optional
+from typing import Optional, Tuple
 
 from sqlalchemy import DateTime, Float, Integer, String, delete, event, inspect, select, text
 from sqlalchemy.exc import IntegrityError
@@ -292,6 +292,14 @@ class Store:
     async def ping(self):
         async with self.engine.connect() as connection:
             await connection.execute(text("SELECT 1"))
+
+    def pool_status(self) -> Tuple[int, int]:
+        """Returns (checkedin, checkedout) connection counts for the SQLAlchemy pool."""
+        try:
+            pool = self.engine.pool
+            return pool.checkedin(), pool.checkedout()
+        except Exception:
+            return 0, 0
 
     async def purge_alert_events_older_than(self, retention_days: int) -> int:
         """Enforce the documented alert-event retention window without touching device records."""

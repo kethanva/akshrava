@@ -29,6 +29,26 @@ resource "google_secret_manager_secret_version" "jwt_public" {
   secret_data = local.jwt_public_pem
 }
 
+# Dual-key cutover mount for rotate_jwt_rs256.sh. Seeded with the current public key so Cloud Run
+# always has a file at public-previous.pem; auth.py skips verify when previous == current.
+resource "google_secret_manager_secret" "jwt_public_previous" {
+  secret_id = "akshrava-jwt-public-previous"
+  replication {
+    auto {}
+  }
+  depends_on = [google_project_service.required]
+}
+
+resource "google_secret_manager_secret_version" "jwt_public_previous" {
+  secret      = google_secret_manager_secret.jwt_public_previous.id
+  secret_data = local.jwt_public_pem
+
+  lifecycle {
+    # Rotation script updates this secret out-of-band; do not clobber on terraform apply.
+    ignore_changes = [secret_data]
+  }
+}
+
 resource "google_secret_manager_secret" "jwt_private" {
   secret_id = "akshrava-jwt-private"
   replication {

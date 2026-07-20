@@ -157,6 +157,16 @@ resource "google_cloud_run_v2_service" "api" {
       }
     }
     volumes {
+      name = "jwt-previous"
+      secret {
+        secret = google_secret_manager_secret.jwt_public_previous.secret_id
+        items {
+          path    = "public-previous.pem"
+          version = "latest"
+        }
+      }
+    }
+    volumes {
       name = "worker-mtls"
       secret {
         secret = google_secret_manager_secret.worker_tls_ca.secret_id
@@ -219,6 +229,10 @@ resource "google_cloud_run_v2_service" "api" {
         mount_path = "/run/secrets/jwt"
       }
       volume_mounts {
+        name       = "jwt-previous"
+        mount_path = "/run/secrets/jwt-previous"
+      }
+      volume_mounts {
         name       = "worker-mtls"
         mount_path = "/run/secrets/worker-mtls-ca"
       }
@@ -255,10 +269,10 @@ resource "google_cloud_run_v2_service" "api" {
         value = "/run/secrets/jwt/public.pem"
       }
       env {
-        # Optional dual-key cutover path used by rotate_jwt_rs256.sh. Empty is fine when
-        # akshrava-jwt-public-previous is absent; auth.py skips a missing previous key.
+        # Dual-key cutover path used by rotate_jwt_rs256.sh. Seeded equal to current at first
+        # apply; auth.py skips verify when previous PEM equals current.
         name  = "JWT_PUBLIC_KEY_PREVIOUS_FILE"
-        value = "/run/secrets/jwt/public-previous.pem"
+        value = "/run/secrets/jwt-previous/public-previous.pem"
       }
       # JWT_SECRET is intentionally NOT set here: JWT_ALGORITHM is hardcoded RS256 above, and
       # config.py only reads/validates jwt_secret when the algorithm is HS256. A static

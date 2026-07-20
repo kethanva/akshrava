@@ -68,7 +68,11 @@ def start_inference_span(name: str = "akshrava.inference") -> Iterator[None]:
         from opentelemetry import trace
 
         tracer = trace.get_tracer("akshrava")
-        with tracer.start_as_current_span(name):
-            yield
     except Exception:
+        yield
+        return
+    # Keep the span `with` outside exception handlers so WorkerSaturatedError (and any other
+    # inference failure) propagates cleanly — a broad except around yield re-enters the
+    # generator and raises "generator didn't stop after throw()".
+    with tracer.start_as_current_span(name):
         yield

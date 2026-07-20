@@ -7,6 +7,19 @@ on:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: test-password
+          POSTGRES_DB: akshrava_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     defaults:
       run:
         working-directory: backend
@@ -14,6 +27,7 @@ jobs:
       AKSHRAVA_ENV: development
       DEV_AUTH_BYPASS: "true"
       DETECTOR: noop
+      DATABASE_URL: "postgresql+asyncpg://postgres:test-password@localhost:5432/akshrava_ci"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -21,7 +35,7 @@ jobs:
           python-version: "3.11"
       - run: python -m pip install '.[dev]' pip-audit
       - run: ../scripts/verify_phases.sh
-      - run: DATABASE_URL=sqlite:///./migration-check.db alembic upgrade head
+      - run: alembic upgrade head
       - run: python -m pip check
       - run: pip-audit
 
