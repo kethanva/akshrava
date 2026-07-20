@@ -19,7 +19,7 @@ This repository is a **bench and supervised-pilot** implementation. A green CI r
 **Live supervised GCP pilot (2026-07)** — not Compose-only, not unsupervised field production,
 not L4 GPU (quota 0; `worker_use_gpu=false`). Live WSS:
 `wss://akshrava-api-c7d3j4nzdq-uc.a.run.app/v1/session`. Full trust/store/deploy diagrams:
-[`docs/OPERATIONS.md`](docs/OPERATIONS.md).
+[`Important Architecture.md`](Important%20Architecture.md).
 
 ```mermaid
 flowchart TB
@@ -86,10 +86,8 @@ Default detector is `DETECTOR=noop` until licensed weights and release gates exi
 | `backend/akshrava_backend/` | FastAPI control plane, vision policy, remote/local detectors |
 | `gcp/` | Live pilot Terraform: Cloud Run API, private CPU worker (GPU optional), SQL, Redis, mTLS, secrets |
 | `infra/` | Compose profiles: `control-plane`, `gpu-worker`, edge, monitoring |
-| `docs/` | [README.md](docs/README.md) product/protocol/privacy/field · [OPERATIONS.md](docs/OPERATIONS.md) deploy/ops |
 | `scripts/` | `verify_phases.sh`, backend run/test, token minting |
-| `Important Architecture.md` | Full product / safety / release boundary |
-| `NOT_NOW.md` | Explicit non-goals (GPS memory, looming, foveated upload, …) |
+| `Important Architecture.md` | Full product, safety, protocol, deploy, operations, release, privacy, and deferred-scope boundary |
 
 ---
 
@@ -118,7 +116,7 @@ Production: `wss://HOST/v1/session` with `Authorization: Bearer <device JWT>`.
 }
 ```
 
-`capture_mono_ms` is **phone elapsedRealtime**. The phone owns staleness; the server does not compare clocks. Full rules: [`docs/README.md`](docs/README.md).
+`capture_mono_ms` is **phone elapsedRealtime**. The phone owns staleness; the server does not compare clocks. Full rules: [`Important Architecture.md`](Important%20Architecture.md).
 
 ### Control plane ↔ remote worker
 
@@ -183,13 +181,13 @@ docker compose --profile control-plane up -d
 # docker compose --profile gpu-worker up -d
 ```
 
-See [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for Compose and GCP deploy/ops (including the live supervised pilot WSS URL and E2E scripts).
+See [`Important Architecture.md`](Important%20Architecture.md) for Compose and GCP deploy/ops, including the live supervised pilot WSS URL and E2E scripts.
 
 ---
 
 ## Deploy on Google Cloud
 
-Authoritative pilot facts and E2E scripts: [`docs/OPERATIONS.md`](docs/OPERATIONS.md) §4.
+Authoritative pilot facts and E2E scripts: [`Important Architecture.md`](Important%20Architecture.md).
 Live supervised WSS: `wss://akshrava-api-c7d3j4nzdq-uc.a.run.app/v1/session`
 (public invoker + JWT; remote CPU YOLO; GPU quota 0 — not unsupervised field production).
 
@@ -225,7 +223,7 @@ Never: numeric metres, “approaching”, “safe to cross”, “path clear”,
 
 - Normal frames stay in RAM and are discarded. No raw video/audio/GPS trail by default.
 - Persisted rows are alert/audit metadata only (`record_alert`), not JPEGs.
-- Consent and retention: [`docs/README.md`](docs/README.md) (privacy programme).
+- Consent and retention: [`Important Architecture.md`](Important%20Architecture.md) (privacy programme).
 
 ---
 
@@ -238,7 +236,7 @@ Never: numeric metres, “approaching”, “safe to cross”, “path clear”,
 | Supervised trial | Named mobility instructor with stop authority; Tier-A phone; consent |
 | Pilot | Approved device inventory, ops runbook, model SHA pin, privacy review |
 
-Checklist: [`docs/README.md`](docs/README.md) (field readiness) · [`docs/OPERATIONS.md`](docs/OPERATIONS.md) (release sequence).
+Checklist: [`Important Architecture.md`](Important%20Architecture.md) (field readiness and release sequence).
 
 **Licensing note:** Ultralytics YOLO weights are AGPL-3.0 unless you have an enterprise licence. Do not enable `DETECTOR=ultralytics` / remote YOLO in a closed deployment without a licence decision.
 
@@ -248,7 +246,5 @@ Checklist: [`docs/README.md`](docs/README.md) (field readiness) · [`docs/OPERAT
 
 | Doc | Contents |
 |---|---|
-| [`Important Architecture.md`](Important%20Architecture.md) | Full E2E architecture, timing budgets, model governance |
-| [`docs/README.md`](docs/README.md) | Protocol, Android, privacy, field readiness |
-| [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | Compose/GCP deploy, tokens, E2E, failure handling |
-| [`NOT_NOW.md`](NOT_NOW.md) | Deferred features |
+| [`README.md`](README.md) | Short end-to-end map, setup, verification, and current code paths |
+| [`Important Architecture.md`](Important%20Architecture.md) | Full architecture, protocol, Android policy, privacy, deploy/ops, release gates, and deferred scope |

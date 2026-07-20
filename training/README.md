@@ -3,7 +3,7 @@
 This folder holds the **fine-tune configuration and recipe**, not weights or images. No model
 artifact is committed: shipping an unvalidated safety-critical detector would be dishonest, and
 the frames are never persisted (Part 10). Produce weights locally, gate them, then bake them into
-a private serving image (see `docs/OPERATIONS.md` → Model activation).
+a private serving image (see `../Important Architecture.md` → model activation and release gates).
 
 ## Licence gate (do this first — plan Part 1)
 
@@ -52,7 +52,7 @@ INT8 needs calibration images (`data=`); use ~500 walking frames. **Record the e
 SHA-256 in the release manifest and set `YOLO_WEIGHTS_SHA256` in deployment** — a floating dependency in a safety component is how "it worked
 last month" happens.
 
-> Note: the on-device always-on reflex is currently **deferred** (see `../NOT_NOW.md`). This
+> Note: the on-device always-on reflex is currently **deferred** (see `../Important Architecture.md`). This
 > export recipe is retained for the separate collision-research gate, not the current sprint.
 
 ## Spoken-scope pin (§8)

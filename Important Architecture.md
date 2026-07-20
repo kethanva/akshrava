@@ -30,8 +30,8 @@ admission → VPC connector → private DNS `worker.akshrava.internal:8443` (Cad
 YOLO worker (`worker_use_gpu=false`; GPU quota 0). Cloud SQL, Memorystore Redis (BASIC), Secret
 Manager, Artifact Registry, diagnostics GCS, COS iptables `:8443`, and IAP SSH firewall are in
 Terraform; PKI PEMs live under `gcp/pki/` (`manage_pki_in_terraform=false`). This is **not**
-unsupervised field production and **not** a live L4 GPU claim. Operator diagrams:
-[docs/OPERATIONS.md](docs/OPERATIONS.md).
+unsupervised field production and **not** a live L4 GPU claim. Operator diagrams and release
+procedures are consolidated in this document.
 
 ```mermaid
 flowchart TB
@@ -295,13 +295,13 @@ Run the repository verification baseline with:
 installed. That replay proves fail-closed speech contracts (`motion_evidence`, no approach/cross
 language)—**not** street perception. A green suite is not field-use approval. CI runs the same
 backend gate, Compose config, `gcp_preflight`, and Android unit/APK assembly. See
-[docs/OPERATIONS.md](docs/OPERATIONS.md) (engineering release sequence).
+this document's delivery and release sections for the engineering release sequence.
 
 | Gate | Minimum evidence before progressing | In-repo support today |
 |---|---|---|
 | Bench → one-phone integration | Policy tests + Phase-0 replay (≥50 synthetic events); every spoken output carries age; no result older than 500 ms is spoken | `verify_phases.sh`, `datasets/phase0/`, Android assemble |
 | One phone → field-survival work | 50 controlled-course repetitions per declared static class; ≥45/50 alerts in budget; zero unannounced service deaths; mute/stop without sight | Field evidence (not CI); calibration upsert via `scripts/upsert_calibration_profile.py` |
-| Survival → supervised participant trial | Three 45-minute device/carrier sessions; state announcements once each; mobility instructor signs | Process in [docs/README.md](docs/README.md) (field readiness) |
+| Survival → supervised participant trial | Three 45-minute device/carrier sessions; state announcements once each; mobility instructor signs | Process in this document's field readiness and supervised-trial guidance |
 | Participant trial → small pilot | 3–5 guided sessions, no attributable injury, regressions triaged, alerts understandable | Process + ops runbooks |
 
 Operator scripts that close the documented working path:
@@ -332,15 +332,12 @@ Stop a session after an unexpected urgent miss, repeated stale alerts, unannounc
 | 3 — supervised participant | Accessible onboarding, consent, controlled course then short guided route, incident/replay loop |
 | 4 — small monitored pilot | Approved-device inventory, support, rollout/rollback, privacy workflow and local failure labels; no scale or iOS promise until Android is stable |
 
-Keep `NOT_NOW.md` as an enforceable scope guard. Deferred features include GPS hazard memory, optical-flow/looming or local approach tracking, foveated native-resolution uploads, continuous OCR, iOS, broad language rollout and large-scale cloud operations. Revisit each only with a specific evidence, privacy, latency and operating-cost case.
+Deferred features remain an enforceable scope guard. They include GPS hazard memory, optical-flow/looming or local approach tracking, foveated native-resolution uploads, continuous OCR, iOS, broad language rollout and large-scale cloud operations. Revisit each only with a specific evidence, privacy, latency and operating-cost case.
 
 Before Phase 1, name the NGO safety partner and stop authority; choose one familiar daylight route and first Tier-A phone; settle English/Hindi audio and retention defaults; obtain a recurring-cost owner and monthly shutoff policy; and define success as timely, comprehensible alerts for a narrow class set without increased cognitive load—not “AI navigation.”
 
 ## 12. Primary implementation references
 
 - [README.md](README.md) — end-to-end architecture map, code paths, local setup and verification.
-- [docs/README.md](docs/README.md) — WebSocket contract, Android policy, privacy, field readiness.
-- [docs/OPERATIONS.md](docs/OPERATIONS.md) — Compose/GCP deploy, model activation, tokens, E2E, failure handling.
 - [gcp/](gcp/) — Terraform for Cloud Run API, SQL, Redis, mTLS worker, secrets, Artifact Registry, IAP SSH, diagnostics GCS. PKI PEMs: `gcp/pki/` (not TF state).
 - [datasets/phase0/](datasets/phase0/) — synthetic Phase-0 policy replay fixtures (not street evidence).
-- [NOT_NOW.md](NOT_NOW.md) — deferred scope guard.

@@ -11,4 +11,4 @@ Run the repository test command from the project root:
 ./scripts/test_backend.sh
 ```
 
-See the [field guide](../docs/README.md#field-readiness-and-supervised-trials) before field use.
+See the [field guide](../Important%20Architecture.md#10-verification-release-gates-and-supervised-trials) before field use.
