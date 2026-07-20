@@ -115,7 +115,7 @@ def test_pilot_remote_inference_requires_mutual_tls_material(monkeypatch):
 
 
 def test_diagnostic_uploads_are_blocked_outside_development_until_blur_exists(monkeypatch):
-    # Raw-frame diagnostic upload has no in-repo face/plate blur; PRIVACY.md requires
+    # Raw-frame diagnostic upload has no in-repo face/plate blur; docs/README.md (privacy) requires
     # blur-before-upload. A signed consent claim + bucket must NOT be enough to ship unblurred
     # bystander imagery to cloud in pilot/production.
     _pilot_rs256(monkeypatch)

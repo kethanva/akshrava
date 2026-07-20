@@ -78,7 +78,7 @@ Default detector is `DETECTOR=noop` until licensed weights and release gates exi
 | `backend/akshrava_backend/` | FastAPI control plane, vision policy, optional GPU worker |
 | `gcp/` | GCP Terraform (Cloud Run API, private GPU worker, SQL, Redis, mTLS, secrets) |
 | `infra/` | Compose profiles: `control-plane`, `gpu-worker`, edge, monitoring |
-| `docs/` | Protocol, ops, privacy, field guide, Android matrix |
+| `docs/` | [README.md](docs/README.md) product/protocol/privacy/field · [OPERATIONS.md](docs/OPERATIONS.md) deploy/ops |
 | `scripts/` | `verify_phases.sh`, backend run/test, token minting |
 | `Important Architecture.md` | Full product / safety / release boundary |
 | `NOT_NOW.md` | Explicit non-goals (GPS memory, looming, foveated upload, …) |
@@ -110,7 +110,7 @@ Production: `wss://HOST/v1/session` with `Authorization: Bearer <device JWT>`.
 }
 ```
 
-`capture_mono_ms` is **phone elapsedRealtime**. The phone owns staleness; the server does not compare clocks. Full rules: [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
+`capture_mono_ms` is **phone elapsedRealtime**. The phone owns staleness; the server does not compare clocks. Full rules: [`docs/README.md`](docs/README.md).
 
 ### Control plane ↔ GPU worker
 
@@ -174,31 +174,30 @@ docker compose --profile control-plane up -d
 # docker compose --profile gpu-worker up -d
 ```
 
-See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) and [`docs/OPERATIONS.md`](docs/OPERATIONS.md). GCP live deploy lives under [`gcp/`](gcp/) — see the **GCP** section in the deployment guide.
+See [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for Compose and GCP deploy/ops (including the live supervised pilot WSS URL and E2E scripts).
 
 ---
 
 ## Deploy on Google Cloud
 
+Authoritative pilot facts and E2E scripts: [`docs/OPERATIONS.md`](docs/OPERATIONS.md) §4.
+Live supervised WSS: `wss://akshrava-api-c7d3j4nzdq-uc.a.run.app/v1/session`
+(public invoker + JWT; remote CPU YOLO; GPU quota 0 — not unsupervised field production).
+
 ```bash
 # 1) Build images (API includes gcp extras for diagnostic uploads)
 ./scripts/build_gcp_images.sh YOUR_PROJECT_ID us-central1
 
-# 2) Apply IaC (defaults DETECTOR=noop so phones can connect before GPU weights exist)
+# 2) Apply IaC (see gcp/terraform.tfvars.example; pilot uses detector=remote + CPU worker)
 cp gcp/terraform.tfvars.example gcp/terraform.tfvars
-# edit project_id
+# edit project_id, image digests, detector / worker_use_gpu / PKI flags
 terraform -chdir=gcp init
-terraform -chdir=gcp apply
+./scripts/gcp_migrate_then_deploy.sh YOUR_PROJECT_ID us-central1
 
-# 3) Run schema migrations once
-gcloud run jobs execute akshrava-migrate --region us-central1 --wait
-
-# 4) Point the Android debug/release WSS URL at the output
+# 3) Point the Android WSS URL at the output
 terraform -chdir=gcp output websocket_url
-# Provision device JWTs with the private key from Secret Manager: akshrava-jwt-private
+# Provision device JWTs from Secret Manager: akshrava-jwt-private (never mount private key on Cloud Run)
 ```
-
-When licensed weights are ready: set `detector = "remote"`, `yolo_weights_sha256 = "<64 hex>"`, place weights on the worker at `/var/lib/akshrava/models/yolo11s.pt`, rebuild/push the worker image, and `terraform apply` again.
 
 ## Alert vocabulary (allowed)
 
@@ -217,7 +216,7 @@ Never: numeric metres, “approaching”, “safe to cross”, “path clear”,
 
 - Normal frames stay in RAM and are discarded. No raw video/audio/GPS trail by default.
 - Persisted rows are alert/audit metadata only (`record_alert`), not JPEGs.
-- Consent and retention: [`docs/PRIVACY.md`](docs/PRIVACY.md).
+- Consent and retention: [`docs/README.md`](docs/README.md) (privacy programme).
 
 ---
 
@@ -230,7 +229,7 @@ Never: numeric metres, “approaching”, “safe to cross”, “path clear”,
 | Supervised trial | Named mobility instructor with stop authority; Tier-A phone; consent |
 | Pilot | Approved device inventory, ops runbook, model SHA pin, privacy review |
 
-Checklist: [`docs/FIELD_GUIDE.md`](docs/FIELD_GUIDE.md) · [`docs/RELEASE_AND_VERIFICATION.md`](docs/RELEASE_AND_VERIFICATION.md).
+Checklist: [`docs/README.md`](docs/README.md) (field readiness) · [`docs/OPERATIONS.md`](docs/OPERATIONS.md) (release sequence).
 
 **Licensing note:** Ultralytics YOLO weights are AGPL-3.0 unless you have an enterprise licence. Do not enable `DETECTOR=ultralytics` / remote YOLO in a closed deployment without a licence decision.
 
@@ -241,8 +240,6 @@ Checklist: [`docs/FIELD_GUIDE.md`](docs/FIELD_GUIDE.md) · [`docs/RELEASE_AND_VE
 | Doc | Contents |
 |---|---|
 | [`Important Architecture.md`](Important%20Architecture.md) | Full E2E architecture, timing budgets, model governance |
-| [`docs/PROTOCOL.md`](docs/PROTOCOL.md) | WebSocket + look / freshness invariants |
-| [`docs/ANDROID.md`](docs/ANDROID.md) | API matrix and resource policy |
-| [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | Deploy, secrets, failure handling |
-| [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) | Compose / edge / worker layout |
+| [`docs/README.md`](docs/README.md) | Protocol, Android, privacy, field readiness |
+| [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | Compose/GCP deploy, tokens, E2E, failure handling |
 | [`NOT_NOW.md`](NOT_NOW.md) | Deferred features |
