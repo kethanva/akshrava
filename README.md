@@ -82,11 +82,11 @@ sequenceDiagram
   API->>Worker: raw image/jpeg + HMAC timestamp/nonce over mTLS
   Worker->>Redis: claim HMAC replay nonce
   Worker-->>API: detection boxes and labels
-  API->>Policy: associate tracks; conservative score and compose
+  API->>Policy: associate tracks, conservative score and compose
   Policy-->>API: compact result / quality hint / no hazard
   par Response path
     API-->>Phone: JSON result echoing capture_mono_ms
-    Phone->>Audio: reject stale/mismatched; speak template + haptic
+    Phone->>Audio: reject stale/mismatched, speak template + haptic
   and Persistence path
     API->>DB: background alert/audit record
   end
