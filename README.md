@@ -16,42 +16,50 @@ This repository is a **bench and supervised-pilot** implementation. A green CI r
 
 ## End-to-end architecture
 
+**Live supervised GCP pilot (2026-07)** — not Compose-only, not unsupervised field production,
+not L4 GPU (quota 0; `worker_use_gpu=false`). Live WSS:
+`wss://akshrava-api-c7d3j4nzdq-uc.a.run.app/v1/session`. Full trust/store/deploy diagrams:
+[`docs/OPERATIONS.md`](docs/OPERATIONS.md).
+
 ```mermaid
 flowchart TB
   subgraph Phone["Android phone — AssistService"]
     Cam["CameraX ImageAnalysis<br/>KEEP_ONLY_LATEST · setTargetRotation"]
     Gate["CapturePolicy + FrameGate<br/>IMU · duplicate · blur"]
     Enc["FrameEncoder<br/>NV21 rotate/scale · one JPEG"]
-    WSS["ProtocolClient<br/>1 in-flight · 1 pending"]
+    WSS["ProtocolClient · OkHttp<br/>1 in-flight · 1 pending"]
     Alert["AlertManager<br/>TTS · haptic · freshness"]
     Cam --> Gate --> Enc --> WSS
     WSS --> Alert
   end
 
-  subgraph Edge["TLS edge"]
-    Proxy["Caddy / reverse proxy · WSS"]
-  end
-
-  subgraph Control["Control plane — FastAPI"]
-    Sess["/v1/session<br/>JWT · rate limit · validate"]
+  subgraph CR["Cloud Run · akshrava-api"]
+    Sess["/v1/session<br/>public invoker + RS256 JWT"]
+    Admit["Redis admission + rate limit"]
     VS["VisionService<br/>detect · track · score · policy"]
     Persist["Background record_alert<br/>never blocks WS reply"]
-    DB[("PostgreSQL / SQLite<br/>alerts · devices · no raw frames")]
-    Sess --> VS --> Persist --> DB
+    Sess --> Admit
+    Sess --> VS --> Persist
   end
 
-  subgraph GPU["Private GPU worker — optional"]
-    Infer["POST /v1/infer<br/>raw image/jpeg + HMAC headers"]
-    YOLO["Ultralytics / noop detector"]
-    Infer --> YOLO
+  subgraph VPC["Private VPC"]
+    Redis[("Memorystore Redis BASIC")]
+    SQL[("Cloud SQL Postgres<br/>alerts · devices · no raw frames")]
+    Caddy["Caddy :8443 mTLS<br/>worker.akshrava.internal"]
+    Worker["COS GCE · CPU YOLO<br/>POST /v1/infer + HMAC"]
+    Caddy --> Worker
   end
 
-  WSS <-->|"JSON frame header + binary JPEG"| Proxy
-  Proxy --> Sess
-  VS -->|"RemoteWorkerDetector<br/>signed JPEG body"| Infer
-  Infer -->|"detections JSON"| VS
+  WSS <-->|"wss://…run.app/v1/session<br/>JSON header + binary JPEG"| Sess
+  Admit --> Redis
+  Persist --> SQL
+  VS -->|"VPC connector · mTLS + signed JPEG"| Caddy
+  Worker -.-> Redis
   VS -->|"result + optional quality"| Sess
 ```
+
+Optional local path: Compose control-plane + worker under `infra/` (Caddy as public TLS edge).
+That is a bench/deploy option, not the live pilot topology above.
 
 ### Frame-to-ear path (implemented)
 
@@ -75,8 +83,8 @@ Default detector is `DETECTOR=noop` until licensed weights and release gates exi
 | Path | Role |
 |---|---|
 | `android/` | Kotlin app: CameraX, NV21 encode, WSS client, TTS/haptics, watchdog |
-| `backend/akshrava_backend/` | FastAPI control plane, vision policy, optional GPU worker |
-| `gcp/` | GCP Terraform (Cloud Run API, private GPU worker, SQL, Redis, mTLS, secrets) |
+| `backend/akshrava_backend/` | FastAPI control plane, vision policy, remote/local detectors |
+| `gcp/` | Live pilot Terraform: Cloud Run API, private CPU worker (GPU optional), SQL, Redis, mTLS, secrets |
 | `infra/` | Compose profiles: `control-plane`, `gpu-worker`, edge, monitoring |
 | `docs/` | [README.md](docs/README.md) product/protocol/privacy/field · [OPERATIONS.md](docs/OPERATIONS.md) deploy/ops |
 | `scripts/` | `verify_phases.sh`, backend run/test, token minting |
@@ -112,8 +120,9 @@ Production: `wss://HOST/v1/session` with `Authorization: Bearer <device JWT>`.
 
 `capture_mono_ms` is **phone elapsedRealtime**. The phone owns staleness; the server does not compare clocks. Full rules: [`docs/README.md`](docs/README.md).
 
-### Control plane ↔ GPU worker
+### Control plane ↔ remote worker
 
+Live pilot: VPC → `https://worker.akshrava.internal:8443/v1/infer` (Caddy mTLS + HMAC).
 `RemoteWorkerDetector` posts the **raw JPEG body** (not base64):
 
 ```http

@@ -12,6 +12,24 @@ Auth is app JWT (RS256); Cloud Run currently allows public invokers so worn phon
 WSS. Inference is remote YOLO on a **CPU** worker (`worker_use_gpu=false`; GPU quota is 0).
 PKI PEMs live under `gcp/pki/` (gitignored), not in Terraform state.
 
+Operator topology, trust boundaries, stores/secrets, and deploy path diagrams:
+[`OPERATIONS.md`](OPERATIONS.md) (live pilot topology).
+
+```mermaid
+flowchart LR
+  Phone["Android ProtocolClient<br/>OkHttp WSS"]
+  API["Cloud Run API<br/>public invoker + RS256 JWT"]
+  Redis[("Memorystore Redis<br/>admission + nonces")]
+  Worker["Private CPU YOLO<br/>worker.akshrava.internal:8443<br/>Caddy mTLS + HMAC"]
+  SQL[("Cloud SQL<br/>alerts · devices")]
+
+  Phone -->|"wss://…/v1/session"| API
+  API --> Redis
+  API -->|"VPC connector"| Worker
+  API --> SQL
+  API -->|"result / quality"| Phone
+```
+
 ---
 
 ## 1. Safety and product boundary

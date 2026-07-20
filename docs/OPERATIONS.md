@@ -16,6 +16,103 @@ engineering release checks. Product/protocol/privacy/field content lives in [`RE
 E2E scripts: `scripts/e2e_gcp_pilot.sh`, `scripts/e2e_android_gcp.sh`,
 `scripts/e2e_android_protocol_gcp.sh`.
 
+### Live pilot topology (authoritative)
+
+Compose (`infra/`) remains a local/single-host option (§3). The diagrams below describe the
+**deployed GCP supervised pilot**, not a Compose-only or L4-GPU stack.
+
+```mermaid
+flowchart TB
+  subgraph Public["Public internet"]
+    Phone["Android · ProtocolClient<br/>OkHttp WSS · 1 in-flight"]
+  end
+
+  subgraph CR["Cloud Run · akshrava-api"]
+    WSS["/v1/session<br/>public invoker + RS256 JWT"]
+    Admit["Redis session admission<br/>+ per-device rate limit"]
+    VS["VisionService<br/>RemoteWorkerDetector"]
+    Persist["Background record_alert"]
+  end
+
+  subgraph VPC["Private VPC"]
+    Conn["Serverless VPC connector"]
+    Redis[("Memorystore Redis · BASIC<br/>AUTH · admission + HMAC nonces")]
+    SQL[("Cloud SQL Postgres<br/>private IP · no raw frames")]
+    DNS["Private DNS<br/>worker.akshrava.internal:8443"]
+    Caddy["Caddy · HTTPS + client-cert mTLS"]
+    Worker["COS GCE worker · CPU YOLO<br/>worker_use_gpu=false"]
+  end
+
+  Phone -->|"wss://akshrava-api-…run.app/v1/session<br/>Authorization: Bearer JWT"| WSS
+  WSS --> Admit
+  Admit --> Redis
+  WSS --> VS
+  VS --> Conn
+  Conn --> DNS --> Caddy --> Worker
+  Worker -.->|"nonce claim Redis db/1"| Redis
+  VS --> Persist --> SQL
+  VS -->|"result + optional quality"| WSS
+```
+
+```mermaid
+flowchart LR
+  subgraph BoundA["Boundary A · phone edge"]
+    direction TB
+    A1["Cloud Run invoker: public<br/>api_allow_unauthenticated=true"]
+    A2["App auth: RS256 device JWT<br/>upgrade + per-frame revoke check"]
+  end
+
+  subgraph BoundB["Boundary B · private infer"]
+    direction TB
+    B1["VPC only · no public worker IP"]
+    B2["mTLS to Caddy:8443<br/>+ HMAC ts.nonce.body on JPEG"]
+    B3["COS iptables ACCEPT :8443<br/>TF allow VPC connector → worker"]
+  end
+
+  BoundA -->|"WSS JSON + binary JPEG"| API["Control plane"]
+  API -->|"POST /v1/infer raw image/jpeg"| BoundB
+```
+
+```mermaid
+flowchart TB
+  subgraph Secrets["Secret Manager"]
+    S1["akshrava-jwt-public · mounted on API"]
+    S2["akshrava-jwt-private · provisioning only"]
+    S3["DB / Redis URLs · HMAC worker secret"]
+    S4["mTLS CA + client/server PEMs"]
+    S5["METRICS_SCRAPE_TOKEN"]
+  end
+
+  subgraph Stores["Data stores"]
+    SQL[("Cloud SQL · devices · alerts · audit")]
+    Redis[("Redis · admission · frame bucket · nonces")]
+    GCS[("GCS diagnostics · consented uploads only")]
+  end
+
+  subgraph PKI["PKI outside TF state"]
+    PEMs["gcp/pki/*.pem · gitignored<br/>manage_pki_in_terraform=false"]
+  end
+
+  PEMs --> Secrets
+  Secrets --> API["Cloud Run API"]
+  Secrets --> Worker["Worker / Caddy"]
+  API --> SQL
+  API --> Redis
+  Worker --> Redis
+  API -.->|"DIAGNOSTIC_UPLOADS_ENABLED"| GCS
+```
+
+```mermaid
+flowchart LR
+  Build["scripts/build_gcp_images.sh"] --> AR["Artifact Registry<br/>akshrava-api / akshrava-worker"]
+  AR --> TF["terraform apply · gcp/"]
+  TF --> Mig["Cloud Run Job akshrava-migrate<br/>alembic upgrade head"]
+  Mig --> Live["API revision live"]
+  Live --> E2E["e2e_gcp_pilot.sh · e2e_android_*.sh"]
+  Ops["IAP SSH · 35.235.240.0/20<br/>worker has no public IP"] -.-> WorkerVM["Worker VM"]
+  TF --> WorkerVM
+```
+
 ---
 
 ## 1. Before any field use

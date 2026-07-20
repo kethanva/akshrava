@@ -24,29 +24,67 @@ Silence never means safety. The app must state `Camera view unclear`, `Limited a
 
 ## 2. End-to-end system
 
+**Live supervised GCP pilot (2026-07):** Android `ProtocolClient` → Cloud Run
+`wss://akshrava-api-c7d3j4nzdq-uc.a.run.app/v1/session` (public invoker + RS256 JWT) → Redis
+admission → VPC connector → private DNS `worker.akshrava.internal:8443` (Caddy mTLS) → **CPU**
+YOLO worker (`worker_use_gpu=false`; GPU quota 0). Cloud SQL, Memorystore Redis (BASIC), Secret
+Manager, Artifact Registry, diagnostics GCS, COS iptables `:8443`, and IAP SSH firewall are in
+Terraform; PKI PEMs live under `gcp/pki/` (`manage_pki_in_terraform=false`). This is **not**
+unsupervised field production and **not** a live L4 GPU claim. Operator diagrams:
+[docs/OPERATIONS.md](docs/OPERATIONS.md).
+
 ```mermaid
-flowchart LR
+flowchart TB
   subgraph Phone["Worn Android phone — current baseline"]
     Camera["CameraX ImageAnalysis\nKEEP_ONLY_LATEST · target rotation"] --> Gate["IMU, duplicate and blur gate\nlatest frame only"]
     Gate --> Encode["FrameEncoder NV21 path\nrotate/scale · one JPEG · no Bitmap"]
-    Encode --> Socket["Authenticated WSS client\n1 in-flight + 1 pending"]
+    Encode --> Socket["ProtocolClient · OkHttp WSS\n1 in-flight + 1 pending"]
     Result["Result validation\nexpiry, dedupe, state handling"] --> Alert["AlertManager\noffline TTS, haptic, headset"]
     Socket --> Result
     Sensors["Pose, thermal, battery, network"] --> Gate
     Sensors --> Result
   end
-  Socket <-->|"JSON header + JPEG / JSON result"| Edge["TLS reverse proxy"]
-  Edge --> Session["FastAPI session/ingest\nauth, limits, validation"]
-  Session --> Vision["VisionService\ndetect · track · score · policy"]
-  Vision --> Remote["Optional RemoteWorkerDetector\nraw signed image/jpeg"]
-  Remote --> GPU["Private GPU /v1/infer\nHMAC + Redis nonce"]
-  Vision --> Persist["Background record_alert\noff the WS reply path"]
-  Persist --> Store[("PostgreSQL/SQLite\nusers, devices, config, audit\nno raw frames")]
+
+  subgraph CR["Cloud Run control plane"]
+    Session["/v1/session\npublic invoker + RS256 JWT"]
+    Admit["Redis admission + rate limits"]
+    Vision["VisionService\ndetect · track · score · policy"]
+    Persist["Background record_alert\noff the WS reply path"]
+    Session --> Admit
+    Session --> Vision --> Persist
+  end
+
+  subgraph VPC["Private VPC"]
+    Redis[("Memorystore Redis BASIC\nadmission + HMAC nonces")]
+    Store[("Cloud SQL Postgres\ndevices, alerts, audit\nno raw frames")]
+    Remote["RemoteWorkerDetector\nraw signed image/jpeg"]
+    Caddy["Caddy :8443 mTLS\nworker.akshrava.internal"]
+    Worker["COS GCE worker\nCPU YOLO · worker_use_gpu=false"]
+    Caddy --> Worker
+  end
+
+  Socket <-->|"JSON header + JPEG / JSON result"| Session
+  Admit --> Redis
+  Persist --> Store
+  Vision --> Remote --> Caddy
+  Worker -.-> Redis
   Vision --> Session
-  Metrics["Prometheus/Grafana\naggregate operational metrics"] --- Session
 ```
 
-The architecture is intentionally a freshness pipeline, not a video system. Raw frames are processed in memory, never queued to catch up, and are not retained in normal operation. A consented diagnostic sample is a separate privacy-controlled workflow. The repository [`README.md`](README.md) is the short end-to-end map of these code paths.
+```mermaid
+flowchart LR
+  subgraph Public["Public trust boundary"]
+    Phone2["Phone WSS"] --> Invoker["Cloud Run public invoker"]
+    Invoker --> JWT["App RS256 JWT\ndevice bind + revoke"]
+  end
+  subgraph Private["Private trust boundary"]
+    JWT --> VPCConn["Serverless VPC connector"]
+    VPCConn --> MTLS["Caddy mTLS :8443\n+ HMAC nonce in Redis"]
+    MTLS --> Infer["/v1/infer CPU YOLO"]
+  end
+```
+
+The architecture is intentionally a freshness pipeline, not a video system. Raw frames are processed in memory, never queued to catch up, and are not retained in normal operation. A consented diagnostic sample is a separate privacy-controlled workflow (GCS bucket when enabled). The repository [`README.md`](README.md) is the short end-to-end map of these code paths; Compose under `infra/` is an alternate local/single-host deploy, not the live pilot edge.
 
 ### Frame-to-ear lifecycle
 
@@ -75,7 +113,11 @@ Reconnect uses exponential backoff with jitter and re-authentication, never a re
 
 ## 4. Wire contract and trust boundary
 
-The production endpoint is `wss://HOST/v1/session`. A short-lived device JWT is sent in the WebSocket upgrade request and is bound to device/session claims. Development may use `ws://` and `dev-device-token` only in debug/local workflows; release builds accept WSS only.
+The production endpoint is `wss://HOST/v1/session`. The live supervised pilot uses
+`wss://akshrava-api-c7d3j4nzdq-uc.a.run.app/v1/session` with a public Cloud Run invoker and
+app-level RS256 JWT (not a private-invoker-only edge). A short-lived device JWT is sent in the
+WebSocket upgrade request and is bound to device/session claims. Development may use `ws://` and
+`dev-device-token` only in debug/local workflows; release builds accept WSS only.
 
 ```json
 {"type":"frame","id":841,"capture_mono_ms":93211455,"capture_epoch_ms":1752883094000,"w":640,"h":480,"jpeg_bytes":61423,"camera_calibration_id":"pilot-phone-r0","pitch_cdeg":-1180,"roll_cdeg":90,"pose_age_ms":12,"mode":"normal"}
@@ -114,9 +156,19 @@ Use short message keys, offline TTS and haptics: `Obstacle ahead`, `Vehicle near
 
 ### Ingest and serving
 
-FastAPI handles the session protocol, but inference must not run in its event loop. The phone-facing control plane runs detectors in a thread executor; local Ultralytics instances still serialise through an inference lock, while `noop` and `remote` adapters do not. Production session admission, frame-rate limits and worker replay protection are Redis-shared so API/worker replicas enforce one fleet-wide decision instead of per-process limits. Bounded JPEG batching (default <=8 / ~12 ms) exists only on the private GPU worker process (`DETECTOR=remote`), not as a control-plane gather queue. Persisted state is small and relational: device configuration, users, calibration/model versions, audit data and consent state in PostgreSQL (SQLite remains acceptable for early development).
+FastAPI handles the session protocol, but inference must not run in its event loop. The phone-facing control plane runs detectors in a thread executor; local Ultralytics instances still serialise through an inference lock, while `noop` and `remote` adapters do not. Production session admission, frame-rate limits and worker replay protection are Redis-shared so API/worker replicas enforce one fleet-wide decision instead of per-process limits. Bounded JPEG batching (default <=8 / ~12 ms) exists only on the private remote worker process (`DETECTOR=remote`), not as a control-plane gather queue. Persisted state is small and relational: device configuration, users, calibration/model versions, audit data and consent state in PostgreSQL (SQLite remains acceptable for early development).
 
-The intended pilot inference path is a pinned, approved detector on a CUDA host (current code path: Ultralytics weights via `DETECTOR=ultralytics` or the HMAC GPU worker). A fixed 640 shape, conservative batch cap and runtime-enforced `YOLO_WEIGHTS_SHA256` are more important than an optimistic benchmark. The control plane sends raw signed JPEG bodies to the private worker, avoiding base64 overhead on the internal link. GPU workers claim HMAC nonces atomically in Redis, enabling replay-safe replica deployment. The static inference registry gives each device stable worker placement and warm-peer fail-through after transport failure; dynamic health re-pointing and capacity management remain operational gates. One GPU is only a scheduled supervised-pilot resource until measured concurrency shows headroom; CPU is suitable for a bench demo, not a claimed sub-500 ms service. An ONNX Runtime / Triton split is a later response to measured multi-model or high-concurrency demand, not what the Compose stack ships today.
+The **live** supervised-pilot inference path is a pinned YOLO weight on the private **CPU**
+HMAC/mTLS worker (`detector=remote`, `worker_use_gpu=false`) because this project’s GPU quota is
+0. A CUDA/L4 worker remains a Terraform option when quota exists — not the current live posture,
+and not a claimed sub-500 ms service on CPU. A fixed 640 shape, conservative batch cap and
+runtime-enforced `YOLO_WEIGHTS_SHA256` are more important than an optimistic benchmark. The
+control plane sends raw signed JPEG bodies to the private worker, avoiding base64 overhead on the
+internal link. Workers claim HMAC nonces atomically in Redis, enabling replay-safe replica
+deployment. The static inference registry gives each device stable worker placement and warm-peer
+fail-through after transport failure; dynamic health re-pointing and capacity management remain
+operational gates. An ONNX Runtime / Triton split is a later response to measured multi-model or
+high-concurrency demand, not what Compose or the current GCP pilot ships today.
 
 ### Detection, association, geometry
 
@@ -167,7 +219,12 @@ Provisioning must verify worn-mount orientation/FOV/focus, encode p95, filtered 
 
 ## 9. Operations, security, privacy, and observability
 
-Deploy the API behind TLS/WSS reverse proxy; bind development API ports privately in production, use `/readyz` for database-aware readiness, encrypt disks/backups, rotate secrets/device tokens and apply least privilege/MFA to operator consoles. Make a tested PostgreSQL backup/restore routine part of releases. Activate models only from an approved read-only directory; the service must not download weights during a live session.
+On GCP, Cloud Run terminates public WSS; the worker stays private (VPC + Caddy mTLS). Compose
+deployments still use a TLS/WSS reverse proxy and bind the API privately. Use `/readyz` for
+database-aware readiness, encrypt disks/backups, rotate secrets/device tokens and apply least
+privilege/MFA to operator consoles (IAP SSH for the worker VM). Make a tested PostgreSQL
+backup/restore routine part of releases. Activate models only from an approved read-only directory;
+the service must not download weights during a live session.
 
 Measure aggregate, non-identifying frame accept/reject/drop counts, queue depth, decode/infer/track latency, frame age, alert rate, reconnects, fallback/state activation, device thermal/battery reports, detector/model version and error states. Prometheus/Grafana support operations; neither logs raw frames by default.
 
@@ -210,8 +267,10 @@ Operator scripts that close the documented working path:
 |---|---|
 | `scripts/upsert_calibration_profile.py` | Insert/update mount geometry; `--confirm-verified` after course sign-off |
 | `scripts/mint_device_token_gcp.sh` | Mint RS256 device JWT from Secret Manager private key |
-| `scripts/build_gcp_images.sh` | Build/push API (with GCP extras) + GPU worker images |
-| `scripts/install_worker_weights.sh` | Copy + SHA-verify YOLO weights onto the GPU VM |
+| `scripts/build_gcp_images.sh` | Build/push API (with GCP extras) + worker images |
+| `scripts/install_worker_weights.sh` | Copy + SHA-verify YOLO weights onto the worker VM |
+| `scripts/gcp_migrate_then_deploy.sh` | `terraform apply` then Cloud Run Job `akshrava-migrate` |
+| `scripts/e2e_gcp_pilot.sh` / `e2e_android_*.sh` | Live WSS + remote-vision E2E (not field gates) |
 | `scripts/gcp_preflight.sh` | `terraform fmt/validate` + remote-detector SHA gate |
 
 The test pyramid is unit policy/state tests; Phase-0 synthetic replay; controlled closed-course
@@ -239,6 +298,6 @@ Before Phase 1, name the NGO safety partner and stop authority; choose one famil
 - [README.md](README.md) — end-to-end architecture map, code paths, local setup and verification.
 - [docs/README.md](docs/README.md) — WebSocket contract, Android policy, privacy, field readiness.
 - [docs/OPERATIONS.md](docs/OPERATIONS.md) — Compose/GCP deploy, model activation, tokens, E2E, failure handling.
-- [gcp/](gcp/) — Terraform for Cloud Run API, SQL, Redis, mTLS worker, secrets, Artifact Registry.
+- [gcp/](gcp/) — Terraform for Cloud Run API, SQL, Redis, mTLS worker, secrets, Artifact Registry, IAP SSH, diagnostics GCS. PKI PEMs: `gcp/pki/` (not TF state).
 - [datasets/phase0/](datasets/phase0/) — synthetic Phase-0 policy replay fixtures (not street evidence).
 - [NOT_NOW.md](NOT_NOW.md) — deferred scope guard.
