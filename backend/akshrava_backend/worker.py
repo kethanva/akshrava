@@ -220,7 +220,7 @@ def create_worker_app(
                     pending_future.set_exception(RuntimeError("worker shutting down"))
             await app.state.nonce_store.close()
 
-    app = FastAPI(title="Akshrava GPU inference worker", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Akshrava GPU inference worker", version="0.2.12", lifespan=lifespan)
 
     @app.get("/healthz")
     async def healthz():

@@ -6,9 +6,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_release_version_script_accepts_the_current_v010_tag():
+def test_release_version_script_accepts_the_current_v0212_tag():
     result = subprocess.run(
-        [sys.executable, str(ROOT / "scripts/check_release_version.py"), "v0.1.0"],
+        [sys.executable, str(ROOT / "scripts/check_release_version.py"), "v0.2.12"],
         cwd=ROOT,
         capture_output=True,
         text=True,
