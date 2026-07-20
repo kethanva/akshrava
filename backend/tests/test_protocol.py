@@ -58,6 +58,9 @@ def test_rejects_invalid_frame_header():
 
 
 def test_quality_sheds_capture_cost_when_server_work_uses_freshness_budget():
-    assert quality_for_inference(100) == {"type": "quality", "max_side": 640, "jpeg_q": 60, "fps": 1.0}
-    assert quality_for_inference(200) == {"type": "quality", "max_side": 512, "jpeg_q": 45, "fps": 0.7}
-    assert quality_for_inference(400) == {"type": "quality", "max_side": 384, "jpeg_q": 35, "fps": 0.5}
+    assert quality_for_inference(100) == {"type": "quality", "max_side": 640, "jpeg_q": 55, "fps": 1.0}
+    assert quality_for_inference(200) == {"type": "quality", "max_side": 512, "jpeg_q": 48, "fps": 0.85}
+    assert quality_for_inference(400) == {"type": "quality", "max_side": 480, "jpeg_q": 42, "fps": 0.7}
+    assert quality_for_inference(800) == {"type": "quality", "max_side": 384, "jpeg_q": 35, "fps": 0.55}
+    assert quality_for_inference(1500) == {"type": "quality", "max_side": 320, "jpeg_q": 32, "fps": 0.45}
+    assert quality_for_inference(3000) == {"type": "quality", "max_side": 320, "jpeg_q": 28, "fps": 0.35}

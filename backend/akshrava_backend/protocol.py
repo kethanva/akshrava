@@ -47,18 +47,34 @@ def parse_frame_header(payload: Dict[str, Any]) -> FrameHeader:
     )
 
 
-def quality_message(max_side=640, jpeg_q=60, fps=1.0):
+def quality_message(max_side=640, jpeg_q=55, fps=1.0):
     return {"type": "quality", "max_side": max_side, "jpeg_q": jpeg_q, "fps": fps}
 
 
 def quality_for_inference(inference_ms: int):
     """Bound capture cost when server work consumes the freshness budget.
 
+    Tuned for CPU remote YOLO (multi-second capable) and constrained 3G/4G uplinks: shed
+    resolution/JPEG quality/FPS early so more frames finish inside the phone freshness window.
     Network staleness remains phone-owned. This response only reacts to server queue/inference
     time and stays within the app's supported quality range.
+
+    Ladder:
+      normal → 640/Q55/1.0
+      >150ms → 512/Q48/0.85
+      >280ms → 480/Q42/0.7
+      >600ms → 384/Q35/0.55
+      >1200ms → 320/Q32/0.45
+      >2500ms → 320/Q28/0.35
     """
-    if inference_ms > 350:
-        return quality_message(max_side=384, jpeg_q=35, fps=0.5)
-    if inference_ms > 180:
-        return quality_message(max_side=512, jpeg_q=45, fps=0.7)
+    if inference_ms > 2500:
+        return quality_message(max_side=320, jpeg_q=28, fps=0.35)
+    if inference_ms > 1200:
+        return quality_message(max_side=320, jpeg_q=32, fps=0.45)
+    if inference_ms > 600:
+        return quality_message(max_side=384, jpeg_q=35, fps=0.55)
+    if inference_ms > 280:
+        return quality_message(max_side=480, jpeg_q=42, fps=0.7)
+    if inference_ms > 150:
+        return quality_message(max_side=512, jpeg_q=48, fps=0.85)
     return quality_message()

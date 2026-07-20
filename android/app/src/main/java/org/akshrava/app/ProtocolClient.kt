@@ -19,12 +19,22 @@ import kotlin.math.min
 import kotlin.math.pow
 import kotlin.random.Random
 
-data class Quality(val maxSide: Int = 640, val jpegQ: Int = 60, val fps: Double = 1.0) {
+data class Quality(val maxSide: Int = 640, val jpegQ: Int = 55, val fps: Double = 1.0) {
+    /** Prefer the cheaper capture of the two (lower side / JPEG q / FPS). */
+    fun moreConservative(other: Quality) = Quality(
+        maxSide = minOf(maxSide, other.maxSide),
+        jpegQ = minOf(jpegQ, other.jpegQ),
+        fps = minOf(fps, other.fps)
+    )
+
     companion object {
-        /** Server guidance is advisory; never let a malformed response raise phone cost. */
+        /**
+         * Server guidance is advisory; never let a malformed response raise phone cost.
+         * Floor matches FrameEncoder's usable JPEG range so 3G ladders can request Q28–Q32.
+         */
         fun fromServer(maxSide: Int, jpegQ: Int, fps: Double) = Quality(
             maxSide = maxSide.coerceIn(320, 640),
-            jpegQ = jpegQ.coerceIn(35, 70),
+            jpegQ = jpegQ.coerceIn(25, 70),
             fps = fps.coerceIn(0.2, 2.0)
         )
     }
@@ -38,6 +48,10 @@ class ProtocolClient(
     private val onFrameSettled: () -> Unit,
     private val onQuality: (Quality) -> Unit,
     private val onHighAlert: () -> Unit = {},
+    /** Observed header→result latency for link-adaptive capture (AssistService / tests). */
+    private val onRoundTripMs: (Long) -> Unit = {},
+    /** Fired when an in-flight frame hits the settle deadline (before optional reconnect). */
+    private val onSettleTimeout: () -> Unit = {},
     private val language: String = "en",
     private val http: OkHttpClient = OkHttpClient.Builder().pingInterval(20, TimeUnit.SECONDS).build()
 ) : WebSocketListener() {
@@ -48,10 +62,15 @@ class ProtocolClient(
         /** Look answers use the full freshness budget even when the hazard is S1. */
         const val LOOK_FRESHNESS_MS = 500L
         const val URGENT_FRESHNESS_MS = 250L
-        /** Every accepted frame must settle or the camera pipeline freezes forever. */
-        const val FRAME_SETTLE_TIMEOUT_MS = 2_500L
+        /**
+         * Must cover CPU remote YOLO (GCP pilot uses up to ~9s inference). A shorter budget
+         * cancels a healthy socket mid-infer and destroys end-to-end frame throughput.
+         */
+        const val FRAME_SETTLE_TIMEOUT_MS = 10_000L
         /** Look answers use the same settle budget; announce failure if unanswered. */
         const val LOOK_TIMEOUT_MS = FRAME_SETTLE_TIMEOUT_MS
+        /** Soft timeouts shed quality first; only repeated hangs tear down the socket. */
+        const val SETTLE_TIMEOUTS_BEFORE_RECONNECT = 2
 
         /** Device revocation is an operator action, not a network condition to retry. */
         fun isPermanentAccessClose(code: Int): Boolean = code == 4401 || code == 4403
@@ -74,6 +93,8 @@ class ProtocolClient(
     @Volatile private var pendingLookTimeout: ScheduledFuture<*>? = null
     @Volatile private var pendingSettleTimeout: ScheduledFuture<*>? = null
     @Volatile private var pendingLook = false
+    @Volatile private var frameSentAtMonoMs = 0L
+    @Volatile private var consecutiveSettleTimeouts = 0
 
     fun connect() {
         if (endpoint.isBlank() || token.isBlank()) {
@@ -151,6 +172,7 @@ class ProtocolClient(
             settleFrame()
             return failSendFrame(look)
         }
+        frameSentAtMonoMs = SystemClock.elapsedRealtime()
         scheduleSettleTimeout(look)
         return true
     }
@@ -174,9 +196,13 @@ class ProtocolClient(
                 val look = pendingLook
                 pendingLook = false
                 if (look) alertManager.announceLookFailed()
+                // Unblock the camera immediately, then shed capture cost. Reconnect only after
+                // repeated hangs so a single slow CPU infer does not reset the WSS session.
+                onSettleTimeout()
                 settleFrame()
-                // A hung reply path leaves the camera stuck; reconnect to clear half-open state.
-                if (!closedByUser) {
+                consecutiveSettleTimeouts += 1
+                if (!closedByUser && consecutiveSettleTimeouts >= SETTLE_TIMEOUTS_BEFORE_RECONNECT) {
+                    consecutiveSettleTimeouts = 0
                     socket?.cancel()
                     scheduleReconnect()
                 }
@@ -244,7 +270,7 @@ class ProtocolClient(
             }
             "quality" -> onQuality(Quality.fromServer(
                 payload.optInt("max_side", 640),
-                payload.optInt("jpeg_q", 60),
+                payload.optInt("jpeg_q", 55),
                 payload.optDouble("fps", 1.0)
             ))
             "result" -> {
@@ -268,6 +294,11 @@ class ProtocolClient(
                 val priority = payload.optBoolean("priority", false)
                 // Any result (including look) settles the in-flight slot; cancel the timeout first.
                 cancelSettleTimeout()
+                consecutiveSettleTimeouts = 0
+                val sentAt = frameSentAtMonoMs
+                if (sentAt > 0L) {
+                    onRoundTripMs(SystemClock.elapsedRealtime() - sentAt)
+                }
                 val hazard = payload.optJSONObject("hazard")
                 val isUrgent = hazard?.optString("level") == "urgent"
                 // Look answers use 500 ms even if the hazard is S1 — a user-pulled query must

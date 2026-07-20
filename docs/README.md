@@ -106,9 +106,12 @@ camera height) plus fresh pose and dual-estimate agreement may set `range_valid=
 calibration ID string alone is never measurement evidence. Never manufacture a spoken distance
 from pose alone.
 
-`quality` is bounded server-pressure guidance. At normal load it requests 640 px/Q60/1 FPS; when
-server queue/inference consumes the freshness budget it requests 512 px/Q45/0.7 FPS, then
-384 px/Q35/0.5 FPS. The phone remains responsible for discarding stale network results.
+`quality` is bounded server-pressure guidance for constrained uplinks (3G/4G) and CPU remote
+YOLO. At normal load it requests 640 px/Q55/1 FPS; as server queue/inference grows it steps
+through 512/Q48/0.85 → 480/Q42/0.7 → 384/Q35/0.55 → 320/Q32/0.45 → 320/Q28/0.35 FPS. The phone
+merges that hint with observed round-trip / settle-timeout stress (never raising cost above the
+server floor) and remains responsible for discarding stale network results. Client settle budget
+is 10 s so a single slow CPU infer does not tear down the WebSocket; repeated hangs still reconnect.
 
 The server also enforces a per-session normal-rate token bucket of 1.2 frames/second with a
 two-frame burst. Priority look frames bypass that bucket. Non-priority excess headers are rejected

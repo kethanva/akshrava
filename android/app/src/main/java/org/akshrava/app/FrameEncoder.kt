@@ -9,22 +9,35 @@ import kotlin.math.roundToInt
 
 data class EncodedFrame(val jpeg: ByteArray, val width: Int, val height: Int)
 
+/** NV21 plane ready for JPEG after rotation/downscale; valid until the next [FrameEncoder.prepare]. */
+data class PreparedFrame(val nv21: ByteArray, val width: Int, val height: Int)
+
 /**
  * CPU-only conversion scoped to one assistance-service lifecycle.
  *
  * FrameEncoder is not thread-safe: AssistService runs analysis on a single-thread executor
- * and must be the only caller of [encode]. Scratch buffers are reused across frames.
+ * and must be the only caller of [encode] / [prepare] / [compressPrepared]. Scratch buffers
+ * are reused across frames.
  *
  * Keeps all orientation and downscale work in NV21 so we never allocate Bitmaps
- * (and the GC pauses that follow) on the analysis thread.
+ * (and the GC pauses that follow) on the analysis thread. Prefer [prepare] then close the
+ * ImageProxy before [compressPrepared] so CameraX can advance while JPEG runs.
  */
 class FrameEncoder {
     // Analysis is single-threaded (AssistService frameExecutor). Do not call encode() from
     // additional threads without external synchronization — scratch buffers would race.
     private var nv21Scratch = ByteArray(0)
     private var transformScratch = ByteArray(0)
+    private val jpegScratch = ByteArrayOutputStream(64 * 1024)
 
-    fun encode(image: ImageProxy, maxSide: Int, quality: Int): EncodedFrame {
+    fun encode(image: ImageProxy, maxSide: Int, quality: Int): EncodedFrame =
+        compressPrepared(prepare(image, maxSide), quality)
+
+    /**
+     * Copy/rotate/downscale from [image] into reusable NV21 scratch. Caller may close the
+     * ImageProxy immediately afterward, then call [compressPrepared].
+     */
+    fun prepare(image: ImageProxy, maxSide: Int): PreparedFrame {
         var width = image.width
         var height = image.height
         var nv21 = toNv21(image)
@@ -62,14 +75,17 @@ class FrameEncoder {
             height = evenHeight
         }
 
-        return EncodedFrame(compress(nv21, width, height, quality), width, height)
+        return PreparedFrame(nv21, width, height)
     }
 
+    fun compressPrepared(prepared: PreparedFrame, quality: Int): EncodedFrame =
+        EncodedFrame(compress(prepared.nv21, prepared.width, prepared.height, quality), prepared.width, prepared.height)
+
     private fun compress(nv21: ByteArray, width: Int, height: Int, quality: Int): ByteArray {
-        val output = ByteArrayOutputStream(width * height / 3)
+        jpegScratch.reset()
         YuvImage(nv21, android.graphics.ImageFormat.NV21, width, height, null)
-            .compressToJpeg(Rect(0, 0, width, height), quality.coerceIn(25, 95), output)
-        return output.toByteArray()
+            .compressToJpeg(Rect(0, 0, width, height), quality.coerceIn(25, 95), jpegScratch)
+        return jpegScratch.toByteArray()
     }
 
     @Synchronized

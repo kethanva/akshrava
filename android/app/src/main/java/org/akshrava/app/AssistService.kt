@@ -74,6 +74,7 @@ class AssistService : LifecycleService() {
     private var consecutiveBlurredFrames = 0
     private var previousThumbnail: IntArray? = null
     private val capturePolicy = CapturePolicy()
+    private val linkQuality = LinkQualityController()
     @Volatile private var thermalThrottled = false
     @Volatile private var batteryLow = false
     @Volatile private var batteryCritical = false
@@ -81,6 +82,8 @@ class AssistService : LifecycleService() {
     @Volatile private var captureSuspendedForFailure = false
     @Volatile private var quality = Quality()
     @Volatile private var stopping = false
+    /** Last analysis target side; rebind when server/link quality crosses a resolution rung. */
+    @Volatile private var boundAnalysisMaxSide = 640
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -114,13 +117,12 @@ class AssistService : LifecycleService() {
             alertManager = alertManager,
             onState = { status -> updateNotification(status) },
             onFrameSettled = { framePending.set(false) },
-            onQuality = { updated ->
-                quality = updated
-                capturePolicy.quality = updated
-            },
+            onQuality = { updated -> applyEffectiveQuality(linkQuality.onServerQuality(updated)) },
             onHighAlert = {
                 capturePolicy.markHighAlert(SystemClock.elapsedRealtime())
             },
+            onRoundTripMs = { rtt -> applyEffectiveQuality(linkQuality.onRoundTrip(rtt)) },
+            onSettleTimeout = { applyEffectiveQuality(linkQuality.onSettleTimeout()) },
             language = config.language,
             http = http
         )
@@ -164,12 +166,14 @@ class AssistService : LifecycleService() {
                     return@addListener
                 }
                 cameraProvider = provider
+                val analysisSide = analysisTargetSide(quality.maxSide)
+                boundAnalysisMaxSide = analysisSide
                 val analysis = ImageAnalysis.Builder()
                     .setResolutionSelector(
                         ResolutionSelector.Builder()
                             .setResolutionStrategy(
                                 ResolutionStrategy(
-                                    Size(640, 480),
+                                    Size(analysisSide, analysisSide * 3 / 4),
                                     ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
                                 )
                             )
@@ -179,6 +183,7 @@ class AssistService : LifecycleService() {
                     // FrameEncoder rotation. This avoids the expensive rotate/decode/re-encode
                     // path on devices whose analysis stream can be delivered already oriented.
                     .setTargetRotation(currentDisplayRotation())
+                    // Continuous capture path: drop oldest, keep latest under backlog.
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .build()
                 if (stopping || generation != bindGeneration.get() || frameExecutor.isShutdown) {
@@ -198,6 +203,7 @@ class AssistService : LifecycleService() {
     }
 
     private fun analyzeImage(image: ImageProxy) {
+        var closed = false
         try {
             val now = SystemClock.elapsedRealtime()
             maybeCheckThermal(now)
@@ -217,6 +223,7 @@ class AssistService : LifecycleService() {
             // this is heat and battery burned on the donated phones that can least afford it.
             if (!client.canStream()) return
 
+            // In-flight: CameraX KEEP_ONLY_LATEST already discards older frames; skip work.
             if (framePending.get()) return
             val priority = lookRequested.getAndSet(false)
             // Headset long-press look or a fresh turn asks for one immediate frame.
@@ -244,7 +251,12 @@ class AssistService : LifecycleService() {
             previousThumbnail = thumbnail
 
             if (!framePending.compareAndSet(false, true)) return
-            val frame = frameEncoder.encode(image, quality.maxSide, quality.jpegQ)
+            // Release the ImageProxy before JPEG compress so CameraX can advance to the latest
+            // frame while we finish encoding on this worker (STRATEGY_KEEP_ONLY_LATEST).
+            val prepared = frameEncoder.prepare(image, quality.maxSide)
+            image.close()
+            closed = true
+            val frame = frameEncoder.compressPrepared(prepared, quality.jpegQ)
             // Fail-closed offline: without licensed TFLite weights, reflex never speaks hazards.
             if (reflexEngine.isArmed()) {
                 reflexEngine.evaluate(frame)
@@ -266,8 +278,30 @@ class AssistService : LifecycleService() {
             framePending.set(false)
             updateNotification("Camera processing error")
         } finally {
-            image.close()
+            if (!closed) image.close()
         }
+    }
+
+    private fun applyEffectiveQuality(updated: Quality) {
+        quality = updated
+        capturePolicy.quality = updated
+        val target = analysisTargetSide(updated.maxSide)
+        if (target != boundAnalysisMaxSide && !stopping && ::client.isInitialized) {
+            // Coalesce: mark the rung before rebind so rapid RTT updates do not stack binds.
+            boundAnalysisMaxSide = target
+            ContextCompat.getMainExecutor(this).execute {
+                if (!stopping) bindCamera()
+            }
+        }
+    }
+
+    /** CameraX analysis ladder aligned with protocol max_side rungs (not every JPEG q step). */
+    private fun analysisTargetSide(maxSide: Int): Int = when {
+        maxSide <= 320 -> 320
+        maxSide <= 384 -> 384
+        maxSide <= 480 -> 480
+        maxSide <= 512 -> 512
+        else -> 640
     }
 
     private fun maybeHeartbeat(now: Long) {

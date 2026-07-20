@@ -21,4 +21,12 @@ class ProtocolClientTest {
         assertEquals("hi", ProtocolClient.wireLanguage("hi-IN"))
         assertEquals("hi", ProtocolClient.wireLanguage("hi"))
     }
+
+    @Test
+    fun settleBudgetCoversCpuRemoteInferenceWithoutImmediateReconnect() {
+        // GCP CPU remote YOLO uses up to ~9s; a 2.5s client settle was cancelling healthy sockets.
+        assertTrue(ProtocolClient.FRAME_SETTLE_TIMEOUT_MS >= 9_000L)
+        assertEquals(2, ProtocolClient.SETTLE_TIMEOUTS_BEFORE_RECONNECT)
+        assertEquals(ProtocolClient.FRAME_SETTLE_TIMEOUT_MS, ProtocolClient.LOOK_TIMEOUT_MS)
+    }
 }

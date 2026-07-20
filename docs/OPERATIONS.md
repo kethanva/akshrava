@@ -317,6 +317,9 @@ fail-closed contract:
   secrets docs — do not paste private keys here).
 - `worker_use_gpu=false` because L4/T4 quota is 0 in this project. CPU remote YOLO is slower; the
   API uses extended worker timeouts on that path. Do not claim GPU inference is live.
+- Phone settle budget is **10 s** (matches CPU remote timeouts); repeated hung settles reconnect.
+  Server `quality` ladder sheds to 320/Q28/0.35 under multi-second inference; the phone may shed
+  further from RTT / settle-timeout stress without raising above the server hint.
 - `manage_pki_in_terraform=false`; load PEMs from `gcp/pki/` via `tls.tf`. Bootstrap-only may set
   `manage_pki_in_terraform=true` (keys land in state — rotate if state is copied).
 - WSS reliability: API service uses `cpu_idle=false` and `min_instance_count=1`.
