@@ -1,7 +1,6 @@
 name: Android compatibility matrix
 
 on:
-  push:
   pull_request:
 
 jobs:

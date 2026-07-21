@@ -1,7 +1,6 @@
 name: CI
 
 on:
-  push:
   pull_request:
 
 jobs:
@@ -11,7 +10,7 @@ jobs:
       postgres:
         image: postgres:15
         env:
-          POSTGRES_PASSWORD: test-password
+          POSTGRES_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
           POSTGRES_DB: akshrava_ci
         ports:
           - 5432:5432
@@ -27,7 +26,7 @@ jobs:
       AKSHRAVA_ENV: development
       DEV_AUTH_BYPASS: "true"
       DETECTOR: noop
-      DATABASE_URL: "postgresql+asyncpg://postgres:test-password@localhost:5432/akshrava_ci"
+      DATABASE_URL: "postgresql+asyncpg://postgres:${{ github.run_id }}-${{ github.run_attempt }}@localhost:5432/akshrava_ci"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -50,28 +49,40 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: >
-          POSTGRES_PASSWORD=test-password-with-at-least-32-characters
-          JWT_SECRET=test-secret-with-at-least-32-characters
-          JWT_ALGORITHM=RS256
-          JWT_PUBLIC_KEY_FILE=/run/secrets/jwt/device-public.pem
-          JWT_KEY_DIR=../secrets/jwt
-          METRICS_SCRAPE_TOKEN=test-metrics-token-with-at-least-32-chars
-          DOMAIN=example.org
-          GRAFANA_PASSWORD=test-grafana-password-with-at-least-32-chars
-          REDIS_PASSWORD=test-redis-password-with-at-least-32-chars
-          ALERT_WEBHOOK_URL=https://hooks.example.com/ci
+      - name: Validate control-plane compose config
+        run: |
+          PG_PASS="$(openssl rand -hex 24)"
+          JWT_SECRET="$(openssl rand -hex 24)"
+          METRICS_TOKEN="$(openssl rand -hex 24)"
+          GF_PASS="$(openssl rand -hex 24)"
+          REDIS_PASS="$(openssl rand -hex 24)"
+          POSTGRES_PASSWORD="$PG_PASS" \
+          JWT_SECRET="$JWT_SECRET" \
+          JWT_ALGORITHM=RS256 \
+          JWT_PUBLIC_KEY_FILE=/run/secrets/jwt/device-public.pem \
+          JWT_KEY_DIR=../secrets/jwt \
+          METRICS_SCRAPE_TOKEN="$METRICS_TOKEN" \
+          DOMAIN=example.org \
+          GRAFANA_PASSWORD="$GF_PASS" \
+          REDIS_PASSWORD="$REDIS_PASS" \
+          ALERT_WEBHOOK_URL=https://hooks.example.com/ci \
           docker compose -f infra/docker-compose.yml --profile control-plane --profile edge --profile monitoring config --quiet
-      - run: >
-          POSTGRES_PASSWORD=test-password-with-at-least-32-characters
-          JWT_SECRET=test-secret-with-at-least-32-characters
-          JWT_ALGORITHM=RS256
-          JWT_PUBLIC_KEY_FILE=/run/secrets/jwt/device-public.pem
-          JWT_KEY_DIR=../secrets/jwt
-          METRICS_SCRAPE_TOKEN=test-metrics-token-with-at-least-32-chars
-          DOMAIN=example.org
-          GRAFANA_PASSWORD=test-grafana-password-with-at-least-32-chars
-          REDIS_PASSWORD=test-redis-password-with-at-least-32-chars
+      - name: Validate gpu-worker compose config
+        run: |
+          PG_PASS="$(openssl rand -hex 24)"
+          JWT_SECRET="$(openssl rand -hex 24)"
+          METRICS_TOKEN="$(openssl rand -hex 24)"
+          GF_PASS="$(openssl rand -hex 24)"
+          REDIS_PASS="$(openssl rand -hex 24)"
+          POSTGRES_PASSWORD="$PG_PASS" \
+          JWT_SECRET="$JWT_SECRET" \
+          JWT_ALGORITHM=RS256 \
+          JWT_PUBLIC_KEY_FILE=/run/secrets/jwt/device-public.pem \
+          JWT_KEY_DIR=../secrets/jwt \
+          METRICS_SCRAPE_TOKEN="$METRICS_TOKEN" \
+          DOMAIN=example.org \
+          GRAFANA_PASSWORD="$GF_PASS" \
+          REDIS_PASSWORD="$REDIS_PASS" \
           docker compose -f infra/docker-compose.yml --profile gpu-worker config --quiet
       - run: ./scripts/test_cloud_preflight.sh
       - run: docker build --build-arg INSTALL_YOLO=false -t akshrava-api-ci backend

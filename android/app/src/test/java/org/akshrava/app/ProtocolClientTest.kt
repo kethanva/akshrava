@@ -74,7 +74,40 @@ class ProtocolClientTest {
         assertTrue(ProtocolClient.isSoftServerError("frame_rate_limited"))
         assertTrue(ProtocolClient.isSoftServerError("jpeg_dimension_mismatch"))
         assertTrue(ProtocolClient.isSoftServerError("non_monotonic_capture"))
+        assertTrue(ProtocolClient.isSoftServerError("invalid_frame_header"))
         assertFalse(ProtocolClient.isSoftServerError("vision_unavailable"))
         assertFalse(ProtocolClient.isSoftServerError("protocol_violation"))
+    }
+
+    @Test
+    fun poseCentidegreesClampToPhysicalWireRange() {
+        assertEquals(-18_000, ProtocolClient.clampPoseCdeg(-20_000))
+        assertEquals(18_000, ProtocolClient.clampPoseCdeg(19_000))
+        assertEquals(-12_500, ProtocolClient.clampPoseCdeg(-12_500))
+        assertEquals(ProtocolClient.POSE_CDEG_MIN, ProtocolClient.clampPoseCdeg(Int.MIN_VALUE))
+        assertEquals(ProtocolClient.POSE_CDEG_MAX, ProtocolClient.clampPoseCdeg(Int.MAX_VALUE))
+    }
+
+    @Test
+    fun wirePoseOmitsValuesThatWouldFatalCloseLegacyApi() {
+        // Proven against live Cloud Run: roll_cdeg=-12500 still closes the socket today.
+        assertEquals(null, ProtocolClient.wirePoseCdeg(-12_500))
+        assertEquals(null, ProtocolClient.wirePoseCdeg(-9_001))
+        assertEquals(-9_000, ProtocolClient.wirePoseCdeg(-9_000))
+        assertEquals(-1_000, ProtocolClient.wirePoseCdeg(-1_000))
+        assertEquals(1_800, ProtocolClient.wirePoseCdeg(1_800))
+        assertEquals(18_000, ProtocolClient.wirePoseCdeg(20_000))
+    }
+
+    @Test
+    fun wedgedSlotThresholdSitsAboveTheTimeoutMeantToPreventIt() {
+        // AssistService flags a held frame slot as wedged only once the send-side settle timeout
+        // has demonstrably failed to release it. If the threshold ever slipped below that
+        // timeout, every ordinary slow inference would be reported as a dead session and the
+        // signal would be worthless for finding the real one.
+        assertTrue(
+            "wedge threshold must outlast the settle timeout that is supposed to clear the slot",
+            AssistService.FRAME_SLOT_WEDGED_MS > ProtocolClient.FRAME_SETTLE_TIMEOUT_MS
+        )
     }
 }

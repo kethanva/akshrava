@@ -524,18 +524,29 @@ def test_transient_inference_failure_sheds_the_frame_and_keeps_the_session(monke
             assert websocket.receive_json()["type"] == "result"
 
 
-def test_circuit_open_still_fails_closed(monkeypatch):
-    """Sustained failure must stop implying the phone can see."""
+def test_circuit_open_sheds_frame_but_keeps_the_session(monkeypatch):
+    """Sustained inference failure must soft-shed, not bounce the phone through reconnect flaps."""
     from akshrava_backend.service import InferenceCircuitOpenError
 
-    class DeadVision:
+    calls = {"n": 0}
+
+    class RecoveringVision:
         async def analyze(self, state, header, jpeg):
-            raise InferenceCircuitOpenError("inference circuit open after repeated failures")
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise InferenceCircuitOpenError("inference circuit open after repeated failures")
+            return {
+                "type": "result", "frame_id": header.frame_id,
+                "capture_mono_ms": header.capture_mono_ms, "server_inference_ms": 5,
+                "server_received_epoch_ms": int(time.time() * 1000), "hazard": None,
+                "detection_count": 0, "detection_labels": [], "priority": False,
+                "look_summary": None, "late_suppressed": False, "pipeline_stage_ms": {},
+            }
 
         async def release_session(self, session_key):
             return None
 
-    monkeypatch.setattr(main, "vision", DeadVision())
+    monkeypatch.setattr(main, "vision", RecoveringVision())
     monkeypatch.setattr(main, "session_application", SessionApplicationService(main.store, main.vision))
     with TestClient(app) as client:
         with client.websocket_connect("/v1/session?token=dev-device-token") as websocket:
@@ -545,6 +556,51 @@ def test_circuit_open_still_fails_closed(monkeypatch):
                 "jpeg_bytes": len(JPEG), "camera_calibration_id": "test-r0",
             })
             websocket.send_bytes(JPEG)
-            assert websocket.receive_json() == {"type": "error", "code": "vision_unavailable"}
-            with pytest.raises(WebSocketDisconnect):
-                websocket.receive_json()
+            assert websocket.receive_json() == {"type": "error", "code": "worker_saturated"}
+
+            websocket.send_json({
+                "type": "frame", "id": 2, "capture_mono_ms": 1400, "w": 1, "h": 1,
+                "jpeg_bytes": len(JPEG), "camera_calibration_id": "test-r0",
+            })
+            websocket.send_bytes(JPEG)
+            assert websocket.receive_json()["type"] == "result"
+
+
+def test_extreme_roll_soft_rejects_without_closing_the_session():
+    """Regression: roll past -90° used to raise ProtocolError and close the walking session."""
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/session?token=dev-device-token") as websocket:
+            websocket.receive_json()
+            websocket.send_json({
+                "type": "frame", "id": 1, "capture_mono_ms": 200, "w": 1, "h": 1,
+                "jpeg_bytes": len(JPEG), "camera_calibration_id": "test-r0",
+                "roll_cdeg": -12_500, "pitch_cdeg": -1_000,
+            })
+            websocket.send_bytes(JPEG)
+            first = websocket.receive_json()
+            assert first["type"] == "result"
+            assert websocket.receive_json()["type"] == "quality"
+
+            # Still on the same socket after an extreme-but-valid pose.
+            websocket.send_json({"type": "ping"})
+            assert websocket.receive_json() == {"type": "pong"}
+
+
+def test_malformed_frame_header_is_soft_rejected(monkeypatch):
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/session?token=dev-device-token") as websocket:
+            websocket.receive_json()
+            websocket.send_json({
+                "type": "frame", "id": 1, "capture_mono_ms": 200, "w": 1, "h": 1,
+                "jpeg_bytes": len(JPEG), "camera_calibration_id": "test-r0",
+                "roll_cdeg": -20_000,
+            })
+            assert websocket.receive_json() == {"type": "error", "code": "invalid_frame_header"}
+            # Paired JPEG is discarded; the session stays up for the next frame.
+            websocket.send_bytes(JPEG)
+            websocket.send_json({
+                "type": "frame", "id": 2, "capture_mono_ms": 1400, "w": 1, "h": 1,
+                "jpeg_bytes": len(JPEG), "camera_calibration_id": "test-r0",
+            })
+            websocket.send_bytes(JPEG)
+            assert websocket.receive_json()["type"] == "result"

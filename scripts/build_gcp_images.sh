@@ -15,6 +15,7 @@ API_TAG="${REPO}/akshrava-api:latest"
 WORKER_TAG="${REPO}/akshrava-worker:latest"
 
 docker build \
+  --platform linux/amd64 \
   --build-arg INSTALL_YOLO=false \
   --build-arg INSTALL_CLOUD_PROVIDER=gcp \
   -t "${API_TAG}" \
@@ -22,6 +23,7 @@ docker build \
   "${ROOT}/backend"
 
 docker build \
+  --platform linux/amd64 \
   -t "${WORKER_TAG}" \
   -f "${ROOT}/backend/Dockerfile.gpu" \
   "${ROOT}/backend"

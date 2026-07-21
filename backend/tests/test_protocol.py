@@ -57,6 +57,56 @@ def test_rejects_invalid_frame_header():
         parse_frame_header({"type": "frame", "id": -1})
 
 
+def test_accepts_full_range_pose_centidegrees():
+    """Chest-mount roll routinely exceeds ±90°; that must parse, not kill the session."""
+    header = parse_frame_header(
+        {
+            "type": "frame",
+            "id": 1,
+            "capture_mono_ms": 42,
+            "w": 640,
+            "h": 480,
+            "jpeg_bytes": 10,
+            "pitch_cdeg": -8_500,
+            "roll_cdeg": -12_500,
+        }
+    )
+    assert header.pitch_cdeg == -8_500
+    assert header.roll_cdeg == -12_500
+
+
+def test_accepts_integral_float_pose_values():
+    header = parse_frame_header(
+        {
+            "type": "frame",
+            "id": 1,
+            "capture_mono_ms": 42,
+            "w": 640,
+            "h": 480,
+            "jpeg_bytes": 10,
+            "pitch_cdeg": -1000.0,
+            "roll_cdeg": -12500.0,
+        }
+    )
+    assert header.pitch_cdeg == -1000
+    assert header.roll_cdeg == -12500
+
+
+def test_rejects_pose_outside_physical_centidegree_range():
+    with pytest.raises(ProtocolError, match="roll_cdeg"):
+        parse_frame_header(
+            {
+                "type": "frame",
+                "id": 1,
+                "capture_mono_ms": 42,
+                "w": 640,
+                "h": 480,
+                "jpeg_bytes": 10,
+                "roll_cdeg": -18_001,
+            }
+        )
+
+
 def test_quality_sheds_capture_cost_when_server_work_uses_freshness_budget():
     assert quality_for_inference(100) == {"type": "quality", "max_side": 640, "jpeg_q": 55, "fps": 1.0}
     assert quality_for_inference(200) == {"type": "quality", "max_side": 512, "jpeg_q": 48, "fps": 0.85}

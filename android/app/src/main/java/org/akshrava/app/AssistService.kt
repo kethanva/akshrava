@@ -57,6 +57,15 @@ class AssistService : LifecycleService() {
         private const val MIN_NOTIFICATION_INTERVAL_MS = 1_000L
         /** Floor between quality-driven camera rebinds. Stall recovery bypasses this. */
         internal const val MIN_QUALITY_REBIND_INTERVAL_MS = 10_000L
+
+        /**
+         * Age at which a held in-flight frame slot is treated as wedged rather than merely busy.
+         *
+         * Comfortably past ProtocolClient.FRAME_SETTLE_TIMEOUT_MS (10 s), which is supposed to
+         * release the slot even when a result never arrives -- so crossing this line means that
+         * safety net did not fire and no further frame will ever be sent.
+         */
+        internal const val FRAME_SLOT_WEDGED_MS = 15_000L
     }
 
     private var frameExecutor: ExecutorService? = null
@@ -77,6 +86,22 @@ class AssistService : LifecycleService() {
     private var lastDarkAnnounceMs = 0L
     private var framesAnalyzed = 0L
     private val framePending = AtomicBoolean(false)
+
+    /**
+     * When the current in-flight slot was claimed, or 0 when free.
+     *
+     * Shedding frames because one is already in flight is the normal steady state -- the camera
+     * analyses at ~30 fps and the server admits 1.2 fps, so ~29 of every 30 frames are dropped
+     * here and the existing "framePending stuck" line fires constantly during perfectly healthy
+     * operation. That makes it useless for spotting the failure that looks identical from the
+     * outside: a slot that is never released, which silently ends the session while the camera
+     * keeps running and the socket stays open (so neither the stall detector nor a drop fires).
+     *
+     * ProtocolClient arms a [ProtocolClient.FRAME_SETTLE_TIMEOUT_MS] timeout on every send, so a
+     * slot older than that plus a margin means the timeout machinery itself failed to fire, which
+     * is the only shape of this bug worth waking anyone up for.
+     */
+    @Volatile private var framePendingSinceMs = 0L
     private val lookRequested = AtomicBoolean(false)
     private val bindGeneration = AtomicInteger(0)
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -155,17 +180,40 @@ class AssistService : LifecycleService() {
     }
 
     private fun startAssistance() {
-        // Cancel a deferred stop from stopAfterCameraFailure, then bump the generation so any
-        // TTS completion callback still in flight (AlertManager.shutdown re-posts them) becomes
-        // a no-op. Without this, Start inside the hard-timeout window rebuilds a clean session
-        // and then the deferred stopAssistance() tears it down — stopping was already reset to
-        // false, so the idempotency guard at the top of stopAssistance cannot catch it.
+        // Cancel a deferred stop from stopAfterCameraFailure so a real Start inside the
+        // hard-timeout window is not immediately torn down by the pending runnable.
         mainHandler.removeCallbacks(stopHardTimeout)
+
+        // Healthy live session: ignore duplicate START (re-taps, OEM intent redelivery,
+        // accidental second presses after the battery/overlay settings screen). Rebuilding
+        // here closed the WSS, reset the cloud tracker, and briefly set canStream=false —
+        // the soak run showed svc_restart at ~96s with client=true while results were still
+        // flowing, which is exactly the mid-walk "assistance died then came back" flap.
+        // A terminally-dead client (device revoked, token rejected — handlePermanentFailure
+        // stops the reconnect executor) is still non-null, so a plain non-null check here would
+        // swallow the Start press that is the user's ONLY way back. Only a session that can
+        // still recover by itself may ignore a duplicate Start; a terminal one must rebuild.
+        val recoverable = client?.isTerminal() != true
+        if (!stopping && recoverable && client != null && alertManager != null) {
+            Log.i("AkshravaDebug", "svc_start ignored; session already active")
+            // #region agent log
+            AgentDebugLog.log(
+                "H1",
+                "AssistService.startAssistance:entry",
+                "svc_start_ignored_active",
+                mapOf("client" to true, "alertManager" to true)
+            )
+            // #endregion
+            return
+        }
+
+        // Bump generation so any TTS completion callback still in flight (AlertManager.shutdown
+        // re-posts them) becomes a no-op against this new session.
         assistanceGeneration.incrementAndGet()
         if (stopping || client != null || alertManager != null) {
-            // stopping: interrupt in-progress Stop. client/alertManager: rebuild a half-dead or
-            // camera-failure leftover session so Start itself is the recovery action (and so we
-            // do not leak the previous socket / wake lock / TTS engine).
+            // stopping: interrupt in-progress Stop. client XOR alertManager: rebuild a half-dead
+            // or camera-failure leftover so Start itself is the recovery action (and so we do
+            // not leak the previous socket / wake lock / TTS engine).
             Log.i(
                 "AkshravaDebug",
                 "svc_restart rebuilding session stopping=$stopping " +
@@ -517,19 +565,34 @@ class AssistService : LifecycleService() {
             // One encode/upload at a time. CameraX KEEP_ONLY_LATEST already sheds older
             // buffers; this flag also stops us from racing the WebSocket in-flight slot.
             if (!framePending.compareAndSet(false, true)) {
+                val heldForMs = framePendingSinceMs.takeIf { it > 0L }?.let { now - it } ?: 0L
+                // A slot held past the send-side settle timeout means nothing is going to release
+                // it: the session is already dead from the user's point of view even though the
+                // camera and socket both still look healthy. Log it loudly and distinctly rather
+                // than as one more line in the routine shed stream above.
+                if (heldForMs > FRAME_SLOT_WEDGED_MS) {
+                    Log.w("AkshravaDebug", "frame_slot_wedged held_ms=$heldForMs n=$framesAnalyzed")
+                    AgentDebugLog.log(
+                        "H4",
+                        "AssistService.analyzeImage:framePending",
+                        "frame_slot_wedged",
+                        mapOf("n" to framesAnalyzed, "heldForMs" to heldForMs)
+                    )
+                }
                 // #region agent log
-                if (framesAnalyzed <= 5L || framesAnalyzed % 60L == 0L) {
-                    Log.i("AkshravaDebug", "frame_drop framePending stuck n=$framesAnalyzed")
+                else if (framesAnalyzed <= 5L || framesAnalyzed % 60L == 0L) {
+                    Log.i("AkshravaDebug", "frame_drop framePending stuck n=$framesAnalyzed held_ms=$heldForMs")
                     AgentDebugLog.log(
                         "H4",
                         "AssistService.analyzeImage:framePending",
                         "frame_drop_pending_stuck",
-                        mapOf("n" to framesAnalyzed)
+                        mapOf("n" to framesAnalyzed, "heldForMs" to heldForMs)
                     )
                 }
                 // #endregion
                 return
             }
+            framePendingSinceMs = now
             val priority = lookRequested.getAndSet(false)
             // Headset long-press look or a fresh turn asks for one immediate frame.
             val turning = poseTracker?.consumeTurn() ?: false
@@ -666,6 +729,7 @@ class AssistService : LifecycleService() {
     }
 
     private fun onFrameSlotSettled() {
+        framePendingSinceMs = 0L
         framePending.set(false)
         val deferred = deferredAnalysisSide ?: return
         if (stopping || client == null) return

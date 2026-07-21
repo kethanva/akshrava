@@ -23,6 +23,33 @@ def _integer(payload: Dict[str, Any], key: str, minimum=0, required=True):
     return value
 
 
+# Sensor orientation is reported in centidegrees. Pitch is roughly ±90° (±9000) and roll is
+# ±180° (±18000). An earlier floor of -9000 rejected ordinary walking rolls past -90° and the
+# session handler treated that ProtocolError as fatal — closing the socket, which made the phone
+# announce "Vision assistance unavailable" / "Connection restored" in a loop.
+_POSE_CDEG_MIN = -18_000
+_POSE_CDEG_MAX = 18_000
+
+
+def _optional_pose_cdeg(payload: Dict[str, Any], key: str):
+    value = payload.get(key)
+    if value is None:
+        return None
+    # JSON numbers are normally int; accept whole-number floats so a serializer quirk cannot
+    # turn a physically valid pose into a session-killing ProtocolError.
+    if isinstance(value, bool):
+        raise ProtocolError("%s must be an integer" % key)
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    if not isinstance(value, int):
+        raise ProtocolError("%s must be an integer" % key)
+    if value < _POSE_CDEG_MIN or value > _POSE_CDEG_MAX:
+        raise ProtocolError(
+            "%s must be an integer in [%s, %s]" % (key, _POSE_CDEG_MIN, _POSE_CDEG_MAX)
+        )
+    return value
+
+
 def parse_frame_header(payload: Dict[str, Any]) -> FrameHeader:
     if payload.get("type") != "frame":
         raise ProtocolError("expected frame header")
@@ -36,8 +63,8 @@ def parse_frame_header(payload: Dict[str, Any]) -> FrameHeader:
         height=height,
         jpeg_bytes=_integer(payload, "jpeg_bytes", 1),
         calibration_id=str(payload.get("camera_calibration_id", ""))[:128],
-        pitch_cdeg=_integer(payload, "pitch_cdeg", -9000, required=False),
-        roll_cdeg=_integer(payload, "roll_cdeg", -9000, required=False),
+        pitch_cdeg=_optional_pose_cdeg(payload, "pitch_cdeg"),
+        roll_cdeg=_optional_pose_cdeg(payload, "roll_cdeg"),
         pose_age_ms=_integer(payload, "pose_age_ms", 0, required=False),
         mode=str(payload.get("mode", "normal"))[:32],
         priority=bool(payload.get("priority", False))

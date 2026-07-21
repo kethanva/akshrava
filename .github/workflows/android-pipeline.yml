@@ -1,0 +1,128 @@
+name: Android build & test pipeline
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    name: Build APKs
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK platforms
+        run: |
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" \
+            "platforms;android-26" "platforms;android-27" "platforms;android-28" \
+            "platforms;android-29" "platforms;android-30" "platforms;android-31" \
+            "platforms;android-32" "platforms;android-33" "platforms;android-34" \
+            "platforms;android-35"
+
+      - name: Run unit tests
+        run: ./gradlew --no-daemon :app:testDebugUnitTest
+
+      - name: Assemble debug APK
+        run: ./gradlew --no-daemon :app:assembleDebug
+
+      - name: Assemble debug AndroidTest APK
+        run: ./gradlew --no-daemon :app:assembleDebugAndroidTest
+
+      - name: Assemble release APK
+        run: ./gradlew --no-daemon :app:assembleRelease
+
+      - name: Upload debug APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: akshrava-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload debug AndroidTest APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: akshrava-debug-androidTest-apk
+          path: android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload release APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: akshrava-release-apk
+          path: android/app/build/outputs/apk/release/app-release.apk
+          retention-days: 7
+          if-no-files-found: error
+
+  test-matrix:
+    name: Android API ${{ matrix.api }} smoke
+    runs-on: ubuntu-latest
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        api: [26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK platform for API ${{ matrix.api }}
+        run: |
+          sdkmanager "platforms;android-${{ matrix.api }}" \
+            "system-images;android-${{ matrix.api }};default;x86_64"
+
+      - name: Download debug APK
+        uses: actions/download-artifact@v4
+        with:
+          name: akshrava-debug-apk
+          path: android/app/build/outputs/apk/debug/
+
+      - name: Download debug AndroidTest APK
+        uses: actions/download-artifact@v4
+        with:
+          name: akshrava-debug-androidTest-apk
+          path: android/app/build/outputs/apk/androidTest/debug/
+
+      - name: Run instrumented tests on API ${{ matrix.api }}
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api }}
+          target: default
+          arch: x86_64
+          profile: Nexus 6
+          disable-animations: true
+          force-avd-creation: false
+          emulator-options: -no-snapshot -no-window -gpu swiftshader_indirect
+          script: |
+            cd android
+            ./gradlew --no-daemon :app:connectedDebugAndroidTest
+
+      - name: Upload test results (API ${{ matrix.api }})
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-api-${{ matrix.api }}
+          path: android/app/build/reports/
+          retention-days: 7
+          if-no-files-found: ignore

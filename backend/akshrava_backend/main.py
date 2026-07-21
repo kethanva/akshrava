@@ -350,21 +350,25 @@ async def session(websocket: WebSocket):
                             metrics.worker_saturated()
                             await websocket.send_json({"type": "error", "code": "worker_saturated"})
                             return
-                        except Exception as exc:
-                            # Circuit open means the streak threshold was reached: stop implying the
-                            # phone can see. Everything else (model/runtime) also fails closed.
-                            if isinstance(exc, InferenceCircuitOpenError):
-                                logger.warning(
-                                    "inference circuit open for device=%s frame_id=%s",
-                                    device_id,
-                                    header.frame_id,
-                                )
-                            else:
-                                logger.exception(
-                                    "vision inference failed for device=%s frame_id=%s",
-                                    device_id,
-                                    header.frame_id,
-                                )
+                        except InferenceCircuitOpenError:
+                            # Breaker open: keep shedding while the cooldown runs, but do not close
+                            # the socket. Closing forced reconnect → "Connection restored" while the
+                            # circuit was still open → the next frame failed closed again, which is
+                            # the unavailable↔restored flap users heard.
+                            logger.warning(
+                                "inference circuit open for device=%s frame_id=%s; shedding frame",
+                                device_id,
+                                header.frame_id,
+                            )
+                            metrics.worker_saturated()
+                            await websocket.send_json({"type": "error", "code": "worker_saturated"})
+                            return
+                        except Exception:
+                            logger.exception(
+                                "vision inference failed for device=%s frame_id=%s",
+                                device_id,
+                                header.frame_id,
+                            )
                             metrics.inference_failed()
                             await websocket.send_json({"type": "error", "code": "vision_unavailable"})
                             await websocket.close(code=1011)

@@ -120,8 +120,31 @@ class ProtocolClient(
             "invalid_jpeg",
             "jpeg_dimension_mismatch",
             "unsupported_frame_size",
+            "invalid_frame_header",
             "unknown_message" -> true
             else -> false
+        }
+
+        /**
+         * Pose is centidegrees of device pitch/roll. The wire allows ±180°; extreme values only
+         * invalidate geometry server-side — they must never tear down the session.
+         */
+        const val POSE_CDEG_MIN = -18_000
+        const val POSE_CDEG_MAX = 18_000
+        /**
+         * Live Cloud Run still runs an older parser that treats pose < -9000 as a fatal
+         * ProtocolError and closes the WebSocket (the unavailable↔restored flap). Until that
+         * revision is replaced, only emit pose values the old floor accepts. Geometry already
+         * treats |roll| > 12° as invalid, so omitting these extremes does not change alerts.
+         */
+        const val LEGACY_POSE_CDEG_FLOOR = -9_000
+
+        fun clampPoseCdeg(value: Int): Int = value.coerceIn(POSE_CDEG_MIN, POSE_CDEG_MAX)
+
+        /** Null means "omit from the frame header" for legacy-API compatibility. */
+        fun wirePoseCdeg(value: Int): Int? {
+            val clamped = clampPoseCdeg(value)
+            return if (clamped < LEGACY_POSE_CDEG_FLOOR) null else clamped
         }
 
         /** Sanitized class for operator logs; neither endpoint nor server body is retained. */
@@ -207,6 +230,17 @@ class ProtocolClient(
     /** True only after ready with a live detector — not transport-only noop bench mode. */
     fun canStream(): Boolean = streamEnabled(sessionReady, visionEnabled)
 
+    /**
+     * True once this client can never recover on its own.
+     *
+     * Set by handlePermanentFailure (device revoked / token rejected: close 4401/4403 or HTTP
+     * 401/403) and by close(); both stop the reconnect executor, so no amount of waiting brings
+     * the session back. AssistService uses this to tell a genuinely dead session apart from one
+     * that is merely mid-reconnect, because pressing Start MUST still rebuild a dead session —
+     * that is the only recovery the user has.
+     */
+    fun isTerminal(): Boolean = closedByUser
+
     fun sendFrame(
         frameId: Long,
         captureMonoMs: Long,
@@ -222,6 +256,41 @@ class ProtocolClient(
         // explicitly confirmed that a real detector, rather than bench-mode NoopDetector, is live.
         if (!canStream()) return failSendFrame(look, "vision_not_ready")
         if (!inFlight.compareAndSet(false, true)) return failSendFrame(look, "frame_in_flight")
+        // From here until scheduleSettleTimeout() below, this call owns the in-flight slot and
+        // nothing is yet armed to release it. An exception escaping that window -- JSON assembly,
+        // or OkHttp throwing on a socket that is closing under us -- used to latch `inFlight`
+        // forever. AssistService's own catch clears its separate framePending flag, so capture
+        // carries on and every later frame reaches this method only to bounce off the CAS above
+        // with "frame_in_flight": a session that never sends another frame again while the
+        // camera, the socket and the foreground notification all still look perfectly healthy.
+        // The stall detector cannot see it (analysis callbacks keep arriving) and no drop fires
+        // (the socket is open), so nothing recovers and the user is never told.
+        return try {
+            sendFrameLocked(ws, look, frameId, captureMonoMs, pose, calibrationId, frame, mode)
+        } catch (ex: Exception) {
+            settleFrame()
+            Log.e("AkshravaVision", "frame_send_threw id=$frameId", ex)
+            AgentDebugLog.log(
+                "H4",
+                "ProtocolClient.sendFrame:threw",
+                "frame_send_threw",
+                mapOf("frameId" to frameId, "error" to (ex::class.simpleName ?: "Exception"))
+            )
+            failSendFrame(look, "send_threw")
+        }
+    }
+
+    /** Body of [sendFrame] once the in-flight slot is held; see the caller for why it is guarded. */
+    private fun sendFrameLocked(
+        ws: WebSocket,
+        look: Boolean,
+        frameId: Long,
+        captureMonoMs: Long,
+        pose: PoseSnapshot?,
+        calibrationId: String,
+        frame: EncodedFrame,
+        mode: String
+    ): Boolean {
         val header = JSONObject()
             .put("type", "frame")
             .put("id", frameId)
@@ -231,13 +300,15 @@ class ProtocolClient(
             .put("h", frame.height)
             .put("jpeg_bytes", frame.jpeg.size)
             .put("camera_calibration_id", calibrationId)
-            .put("pitch_cdeg", pose?.pitchCdeg)
-            .put("roll_cdeg", pose?.rollCdeg)
-            .put("pose_age_ms", pose?.ageMs)
             .put("mode", if (look) "priority" else mode)
             .put("priority", look)
             .put("language", wireLanguage(language))
             .put("trace_id", "frame-$frameId-$captureMonoMs")
+        // Omit absent pose keys rather than sending JSON null. Values below the legacy -9000
+        // floor are omitted so an undeployed/older API cannot fatal-close the walking session.
+        pose?.pitchCdeg?.let { raw -> wirePoseCdeg(raw)?.let { header.put("pitch_cdeg", it) } }
+        pose?.rollCdeg?.let { raw -> wirePoseCdeg(raw)?.let { header.put("roll_cdeg", it) } }
+        pose?.ageMs?.let { header.put("pose_age_ms", it.coerceAtLeast(0L)) }
         
         if (debugTelemetry) {
             header.put("debug_telemetry", true)
@@ -331,10 +402,8 @@ class ProtocolClient(
         connectedAtMonoMs = SystemClock.elapsedRealtime()
         logConnection("transport_open", mapOf("recovered" to recovered))
         Log.i("AkshravaDebug", "ws_open endpoint_class=${EndpointPolicy.classify(endpoint).logValue}")
-        if (outageAnnounced) {
-            outageAnnounced = false
-            alertManager.status("Connection restored")
-        }
+        // Transport alone is not vision. Announcing "Connection restored" here made every
+        // blip/reconnect sound recovered even when the next frame immediately failed closed again.
         onState("Transport connected; checking vision service")
     }
 
@@ -380,13 +449,20 @@ class ProtocolClient(
                 )
                 // #endregion
                 if (visionEnabled) {
+                    if (outageAnnounced) {
+                        outageAnnounced = false
+                        alertManager.status("Connection restored")
+                    }
                     onState("Vision assistance connected")
                     scheduleAppPing()
                 } else {
                     cancelAppPing()
                     val message = "Vision model unavailable. Use cane or guide."
                     onState(message)
-                    alertManager.status(message)
+                    if (!outageAnnounced) {
+                        outageAnnounced = true
+                        alertManager.status(message)
+                    }
                 }
             }
             "error" -> {
@@ -412,7 +488,10 @@ class ProtocolClient(
                         settleFrame()
                         val message = "Vision assistance unavailable. Use cane or guide."
                         onState(message)
-                        alertManager.status(message)
+                        if (!outageAnnounced) {
+                            outageAnnounced = true
+                            alertManager.status(message)
+                        }
                         // The server will close this socket after the error. Closing proactively
                         // also protects older deployments that do not, and starts normal backoff.
                         socket?.close(1011, "vision unavailable")

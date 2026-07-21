@@ -1,0 +1,11 @@
+<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
+<map>
+    <string name="endpoint">wss://akshrava-api-c7d3j4nzdq-uc.a.run.app/v1/session</string>
+    <string name="token_iv">SDeC2qM3aNIQI3kL</string>
+    <boolean name="session_active" value="true" />
+    <string name="encrypted_token">RN0WvqHk8bo5OKU99xT/7laYSRIuM2PbGnVJFHnNoh9XmKe3nKfw20TNdVywW319wy0vu7SW2ehN/nUiD/4spfOZIAqU6PAVMZOJbaDlhHjOGlts2NTZo8aRM3EhC4gvzroSbuM3Ky7fGmazN/IfaduHI9j7/WuRBuT8OZUT/jCevZwXhQM+ia115N6cp1O0IJrYQ1XVR3tb2O1u6eLBOX9w1IkJ3FA/04UiISvetWI8n3jcgJUBpOFUeNaneIoicdkeXuL/jD3sMsu7p/jkcmtxrJe+OAp6ctcq4F+QkopC8a5MU/gADrOVgr4+8tM8pi9b4tYdSYS/FqQqBSVLdIN+QANKcwPrhdhdcZtJWnw/419IS48/aWmUxhQ0tTvu4N4Adj/NPqI5ADtOCCha1Z20cb3xc30/hUFv2hOjpcxFhseY4GzzjZK+OgKtKhgTc3Lh7/xjWtq0xPLV4Xo5/cNcBJBxXLHGZZv+1Tp+ge6Btbh+MHrrTrIqfVz32Z2CFX2dJ00iUyOZS3bbggwHFRTZZ+UcGe8dCpvRY0OZ00UHNWPDoxhr3ZMFw4gLdYQ/ASGxcxmxQBoBGiJ3LqB+SK+lqKfAsxVbXouqbGxaNpqbyuP0xmmBYun4zNelZJVAhvfviuuh+2qvQgDBVBNXZSZBpAWPawVwhqnHOkc+SvZKamNoQOg=</string>
+    <string name="language">en-IN</string>
+    <boolean name="debug_telemetry" value="true" />
+    <string name="calibration">e2e-r0</string>
+    <long name="heartbeat_ms" value="224507745" />
+</map>

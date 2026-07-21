@@ -78,7 +78,21 @@ class FrameStreamHandler:
                     },
                 }
 
-            header = parse_frame_header(payload)
+            try:
+                header = parse_frame_header(payload)
+            except ProtocolError as exc:
+                # A single malformed frame (e.g. an extreme but physically real pose that used to
+                # fail the old ±90° floor) must not tear down the walking session. Soft-shed and
+                # discard the paired JPEG so the next header can bind cleanly.
+                logger.warning(
+                    "rejecting malformed frame header for device=%s: %s",
+                    self.device_id,
+                    exc,
+                )
+                self.metrics.reject_frame()
+                self.discard_next_binary = True
+                return {"type": "error", "code": "invalid_frame_header"}
+
             previous = self.state.last_capture_mono_ms
 
             if previous is not None and header.capture_mono_ms <= previous:
