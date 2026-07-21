@@ -303,6 +303,7 @@ async def session(websocket: WebSocket):
                 "max_in_flight": 1,
                 "detector": settings.detector,
                 "vision_enabled": settings.detector != "noop" or cloud_provider is not None,
+                "alert_max_age_ms": settings.alert_max_age_ms,
             }
         )
         while True:

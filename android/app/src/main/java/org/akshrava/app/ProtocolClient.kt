@@ -321,13 +321,15 @@ class ProtocolClient(
             "ready" -> {
                 sessionReady = true
                 visionEnabled = payload.optBoolean("vision_enabled", false)
+                val serverMaxAge = payload.optLong("alert_max_age_ms", STALE_ALERT_MS)
+                configuredStaleAlertMs = serverMaxAge.coerceAtLeast(STALE_ALERT_MS)
                 // #region agent log
                 val advertised = payload.optInt("max_in_flight", 1).coerceIn(1, 2)
                 maxInFlight = advertised
                 Log.i(
                     "AkshravaDebug",
                     "ws_ready detector=${payload.optString("detector", "unknown")} vision_enabled=$visionEnabled " +
-                        "session_ready=$sessionReady max_in_flight=$advertised"
+                        "session_ready=$sessionReady max_in_flight=$advertised alert_max_age_ms=$configuredStaleAlertMs"
                 )
                 if (visionEnabled) {
                     onState("Vision assistance connected")
@@ -403,9 +405,9 @@ class ProtocolClient(
                 // Look answers use the full freshness budget even if the hazard is S1 —
                 // a user-pulled query must not be dropped by the tighter S1 window on slow links.
                 val maxAge = when {
-                    priority -> LOOK_FRESHNESS_MS
-                    isUrgent -> URGENT_FRESHNESS_MS
-                    else -> STALE_ALERT_MS
+                    priority -> LOOK_FRESHNESS_MS.coerceAtLeast(configuredStaleAlertMs)
+                    isUrgent -> URGENT_FRESHNESS_MS.coerceAtLeast(configuredStaleAlertMs)
+                    else -> configuredStaleAlertMs
                 }
                 val detectionCount = payload.optInt("detection_count", -1)
                 val labels = payload.optJSONArray("detection_labels")
@@ -536,6 +538,8 @@ class ProtocolClient(
             reconnect.schedule({ openSocket() }, delayMs, TimeUnit.MILLISECONDS)
         }.getOrNull()
     }
+
+    @Volatile private var configuredStaleAlertMs: Long = STALE_ALERT_MS
 
     private fun settleFrame() {
         cancelSettleTimeout()
