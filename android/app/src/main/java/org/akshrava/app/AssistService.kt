@@ -571,13 +571,19 @@ class AssistService : LifecycleService() {
                 // camera and socket both still look healthy. Log it loudly and distinctly rather
                 // than as one more line in the routine shed stream above.
                 if (heldForMs > FRAME_SLOT_WEDGED_MS) {
-                    Log.w("AkshravaDebug", "frame_slot_wedged held_ms=$heldForMs n=$framesAnalyzed")
+                    Log.w("AkshravaDebug", "frame_slot_wedged held_ms=$heldForMs n=$framesAnalyzed — recovering")
                     AgentDebugLog.log(
                         "H4",
                         "AssistService.analyzeImage:framePending",
                         "frame_slot_wedged",
                         mapOf("n" to framesAnalyzed, "heldForMs" to heldForMs)
                     )
+                    // Release the wedged slot so frames can resume. Without this, framePending
+                    // stays true forever and no frame is ever sent again — the session is
+                    // silently dead while the camera and socket both still look healthy.
+                    framePendingSinceMs = 0L
+                    framePending.set(false)
+                    alertManager?.status("Assistance stalled. Recovering.")
                 }
                 // #region agent log
                 else if (framesAnalyzed <= 5L || framesAnalyzed % 60L == 0L) {

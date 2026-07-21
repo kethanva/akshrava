@@ -362,7 +362,12 @@ class ProtocolClient(
                     scheduleReconnect("repeated_settle_timeout")
                 }
             }, FRAME_SETTLE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-        }.getOrNull()
+        }.getOrElse {
+            // Executor rejected the task (already shut down). Without this, inFlight stays true
+            // forever because no timeout was armed to release it — the session is silently dead.
+            settleFrame()
+            null
+        }
         if (isLook) {
             // Keep the look-timeout handle alias for cancel paths that still name it.
             pendingLookTimeout = pendingSettleTimeout
