@@ -172,8 +172,8 @@ CALIBRATION_ID="${AKSHRAVA_CALIBRATION_ID:-e2e-r0}"
 # is only a convenience for a machine that has never run terraform.
 TF_WSS_URL=""
 WSS_SOURCE="default"
-if command -v terraform >/dev/null 2>&1 && [ -d "$REPO_ROOT/gcp" ]; then
-  TF_WSS_URL="$(terraform -chdir="$REPO_ROOT/gcp" output -raw websocket_url 2>/dev/null || true)"
+if command -v terraform >/dev/null 2>&1 && [ -d "$REPO_ROOT/cloud/gcp" ]; then
+  TF_WSS_URL="$(terraform -chdir="$REPO_ROOT/cloud/gcp" output -raw websocket_url 2>/dev/null || true)"
 fi
 BASE_URL="${AKSHRAVA_BASE_URL:-https://akshrava-api-c7d3j4nzdq-uc.a.run.app}"
 if [ -n "${AKSHRAVA_WSS_URL:-}" ]; then

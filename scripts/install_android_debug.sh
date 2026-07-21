@@ -30,8 +30,8 @@ APK_PATH="$ANDROID_DIR/app/build/outputs/apk/debug/app-debug.apk"
 # fall back to the known pilot Cloud Run URL used by the other e2e scripts; allow
 # explicit override via AKSHRAVA_BASE_URL / AKSHRAVA_WSS_URL / .env.
 TF_WSS_URL=""
-if command -v terraform &>/dev/null && [ -d "$REPO_ROOT/gcp" ]; then
-    TF_WSS_URL=$(terraform -chdir="$REPO_ROOT/gcp" output -raw websocket_url 2>/dev/null || true)
+if command -v terraform &>/dev/null && [ -d "$REPO_ROOT/cloud/gcp" ]; then
+    TF_WSS_URL=$(terraform -chdir="$REPO_ROOT/cloud/gcp" output -raw websocket_url 2>/dev/null || true)
 fi
 BASE_URL="${AKSHRAVA_BASE_URL:-https://akshrava-api-c7d3j4nzdq-uc.a.run.app}"
 WSS_URL="${AKSHRAVA_WSS_URL:-${TF_WSS_URL:-${BASE_URL/https/wss}/v1/session}}"
