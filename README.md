@@ -9,6 +9,20 @@
 
 The detailed safety, evidence, operating, and release boundary is in [Important Architecture.md](Important%20Architecture.md); this README is the end-to-end implementation map.
 
+## Built with Codex
+
+Akshrava was developed with human direction and iterative assistance from OpenAI Codex Codex helped turn architecture reviews and safety requirements into implementation work across the Android client, FastAPI backend, GCP/Terraform infrastructure, tests, operational scripts, and project documentation.
+
+The collaboration included:
+
+- tracing the physical-phone failure from camera capture through WebSocket readiness and discovering the loopback endpoint misconfiguration;
+- reviewing and hardening endpoint policy, secure device provisioning, freshness gates, reconnect behavior, privacy boundaries, and observability;
+- implementing Android diagnostics, backend detection telemetry, calibration fail-closed behavior, and regression tests;
+- validating builds, backend tests, Terraform configuration, deployment preflight checks, and the live Cloud Run health path;
+- consolidating architecture decisions and explaining the system clearly in this README and `Important Architecture.md`.
+
+Codex was used as an engineering collaborator for code exploration, design critique, test planning, debugging hypotheses, documentation, and careful review of safety-sensitive trade-offs. Human review remained responsible for approving changes, protecting credentials, supervising device testing, and deciding what evidence is sufficient for real-world use. The model did not replace controlled testing, accessibility expertise, or the requirement for a cane, guide, or other established mobility support.
+
 ## Architecture at a glance
 
 ```mermaid
