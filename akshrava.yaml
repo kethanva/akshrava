@@ -11,7 +11,7 @@
 # Enterprise licence is purchased. Resolve licensing before training a shippable model.
 
 # Dataset root, relative to this file. Kept outside the repo tree on purpose.
-path: ../../datasets/akshrava
+path: datasets/akshrava
 
 # Route-disjoint splits (§5.2.6): train/val/test MUST come from different walked routes,
 # or near-duplicate frames leak across splits and produce fictional accuracy.

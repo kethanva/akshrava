@@ -37,4 +37,4 @@ gcloud compute ssh "$INSTANCE" --project="$PROJECT_ID" --zone="$ZONE" --command=
 "
 
 echo "Weights installed and SHA verified on ${INSTANCE}."
-echo "Next: set detector=remote yolo_weights_sha256=${EXPECTED_SHA} in gcp/terraform.tfvars and terraform apply."
+echo "Next: set detector=remote yolo_weights_sha256=${EXPECTED_SHA} in cloud/gcp/terraform.tfvars and terraform apply."

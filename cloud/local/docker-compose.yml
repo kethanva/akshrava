@@ -39,7 +39,7 @@ services:
   migrate:
     profiles: ["control-plane"]
     build:
-      context: ../backend
+      context: ../../backend
       args:
         INSTALL_YOLO: "false"
         INSTALL_CLOUD_PROVIDER: none
@@ -54,7 +54,7 @@ services:
   api:
     profiles: ["control-plane"]
     build:
-      context: ../backend
+      context: ../../backend
       args:
         INSTALL_YOLO: ${INSTALL_YOLO:-false}
         INSTALL_CLOUD_PROVIDER: ${CLOUD_FALLBACK_PROVIDER:-none}
@@ -122,7 +122,7 @@ services:
   api-gpu:
     profiles: ["gpu-worker"]
     build:
-      context: ../backend
+      context: ../../backend
       dockerfile: Dockerfile.gpu
     environment:
       YOLO_WEIGHTS: ${YOLO_WEIGHTS:-/models/yolo11s.pt}

@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   backend:
     runs-on: ubuntu-latest
@@ -34,54 +41,25 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: python -m pip install '.[dev]' pip-audit
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+      - name: Create the verified backend environment
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade 'pip>=26.1.2' 'setuptools>=83'
+          .venv/bin/python -m pip install '.[dev]' pip-audit
       # Apply migrations on a clean DB before tests so pytest does not create tables
       # via SQLAlchemy metadata and then leave alembic unable to upgrade.
-      - run: alembic upgrade head
+      - run: .venv/bin/alembic upgrade head
       - run: ../scripts/verify_phases.sh
-      - run: python -m pip check
-      - run: pip-audit
+      - run: .venv/bin/python -m pip check
+      - run: .venv/bin/pip-audit
 
   deployment-config:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Validate control-plane compose config
-        run: |
-          PG_PASS="$(openssl rand -hex 24)"
-          JWT_SECRET="$(openssl rand -hex 24)"
-          METRICS_TOKEN="$(openssl rand -hex 24)"
-          GF_PASS="$(openssl rand -hex 24)"
-          REDIS_PASS="$(openssl rand -hex 24)"
-          POSTGRES_PASSWORD="$PG_PASS" \
-          JWT_SECRET="$JWT_SECRET" \
-          JWT_ALGORITHM=RS256 \
-          JWT_PUBLIC_KEY_FILE=/run/secrets/jwt/device-public.pem \
-          JWT_KEY_DIR=../secrets/jwt \
-          METRICS_SCRAPE_TOKEN="$METRICS_TOKEN" \
-          DOMAIN=example.org \
-          GRAFANA_PASSWORD="$GF_PASS" \
-          REDIS_PASSWORD="$REDIS_PASS" \
-          ALERT_WEBHOOK_URL=https://hooks.example.com/ci \
-          docker compose -f infra/docker-compose.yml --profile control-plane --profile edge --profile monitoring config --quiet
-      - name: Validate gpu-worker compose config
-        run: |
-          PG_PASS="$(openssl rand -hex 24)"
-          JWT_SECRET="$(openssl rand -hex 24)"
-          METRICS_TOKEN="$(openssl rand -hex 24)"
-          GF_PASS="$(openssl rand -hex 24)"
-          REDIS_PASS="$(openssl rand -hex 24)"
-          POSTGRES_PASSWORD="$PG_PASS" \
-          JWT_SECRET="$JWT_SECRET" \
-          JWT_ALGORITHM=RS256 \
-          JWT_PUBLIC_KEY_FILE=/run/secrets/jwt/device-public.pem \
-          JWT_KEY_DIR=../secrets/jwt \
-          METRICS_SCRAPE_TOKEN="$METRICS_TOKEN" \
-          DOMAIN=example.org \
-          GRAFANA_PASSWORD="$GF_PASS" \
-          REDIS_PASSWORD="$REDIS_PASS" \
-          ALERT_WEBHOOK_URL=https://hooks.example.com/ci \
-          docker compose -f infra/docker-compose.yml --profile gpu-worker config --quiet
+      - run: ./scripts/validate_compose_config.sh
       - run: ./scripts/test_cloud_preflight.sh
       - run: docker build --build-arg INSTALL_YOLO=false -t akshrava-api-ci backend
 
@@ -93,9 +71,10 @@ jobs:
         with:
           terraform_version: "1.5.7"
           terraform_wrapper: false
-      - run: ./scripts/gcp_preflight.sh
+      - run: ./scripts/gcp_preflight.sh --ci
 
   android:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -106,13 +85,7 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+          cache: gradle
       - uses: android-actions/setup-android@v3
       - run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
-      - run: ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug
-
-  release-gate:
-    runs-on: ubuntu-latest
-    needs: [backend, deployment-config, gcp-iac, android]
-    if: startsWith(github.ref, 'refs/tags/v')
-    steps:
-      - run: echo "Automated checks passed. Human safety, model, device and supervised-trial gates remain mandatory."
+      - run: ./gradlew --no-daemon :app:testDebugUnitTest

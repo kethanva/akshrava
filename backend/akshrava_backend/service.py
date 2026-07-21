@@ -250,7 +250,7 @@ class VisionService:
         # Device-level breaker clears on success; disconnect must not wipe another phone's state.
 
     def shutdown(self) -> None:
-        # cancel_futures is Python 3.9+, while the package intentionally supports Python 3.8.
+        # cancel_futures is available on the supported Python 3.10+ runtime.
         # The bounded executor prevents unbounded queued work. Using wait=True ensures
         # all thread pools join during lifecycle teardowns and test runs.
         for tracker in (self._persist_tracker, self._upload_tracker):

@@ -3,6 +3,13 @@ name: Android compatibility matrix
 on:
   pull_request:
 
+concurrency:
+  group: android-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
   api-smoke:
     name: Android API ${{ matrix.api }} smoke
@@ -42,6 +49,7 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+          cache: gradle
       - uses: android-actions/setup-android@v3
       - run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
       - run: ./gradlew --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest
@@ -52,4 +60,6 @@ jobs:
           arch: ${{ matrix.arch }}
           profile: Nexus 6
           disable-animations: true
+          pre-emulator-launch-script: sudo chmod 666 /dev/kvm
+          emulator-options: -no-snapshot -no-window -gpu swiftshader_indirect
           script: cd android && ./gradlew --no-daemon :app:connectedDebugAndroidTest

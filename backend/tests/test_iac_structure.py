@@ -2,7 +2,7 @@ import os
 import glob
 import re
 
-IAC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../gcp"))
+IAC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../cloud/gcp"))
 
 def get_all_tf_content():
     """Reads all .tf files in the IAC_DIR and returns their concatenated content."""

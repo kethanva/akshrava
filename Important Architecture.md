@@ -29,7 +29,7 @@ Silence never means safety. The app must state `Camera view unclear`, `Limited a
 admission → VPC connector → private DNS `worker.akshrava.internal:8443` (Caddy mTLS) → **CPU**
 YOLO worker (`worker_use_gpu=false`; GPU quota 0). Cloud SQL, Memorystore Redis (BASIC), Secret
 Manager, Artifact Registry, diagnostics GCS, COS iptables `:8443`, and IAP SSH firewall are in
-Terraform; PKI PEMs live under `gcp/pki/` (`manage_pki_in_terraform=false`). This is **not**
+Terraform; PKI PEMs live under `cloud/gcp/pki/` (`manage_pki_in_terraform=false`). This is **not**
 unsupervised field production and **not** a live L4 GPU claim. Operator diagrams and release
 procedures are consolidated in this document.
 
@@ -84,7 +84,7 @@ flowchart LR
   end
 ```
 
-The architecture is intentionally a freshness pipeline, not a video system. Raw frames are processed in memory, never queued to catch up, and are not retained in normal operation. A consented diagnostic sample is a separate privacy-controlled workflow (GCS bucket when enabled). The repository [README.md](README.md) is the short end-to-end map of these code paths; Compose under [infra/](infra/) is an alternate local/single-host deploy, not the live pilot edge.
+The architecture is intentionally a freshness pipeline, not a video system. Raw frames are processed in memory, never queued to catch up, and are not retained in normal operation. A consented diagnostic sample is a separate privacy-controlled workflow (GCS bucket when enabled). The repository [README.md](README.md) is the short end-to-end map of these code paths; Compose under [cloud/local/](cloud/local/) is an alternate local/single-host deploy, not the live pilot edge.
 
 ### Frame-to-ear lifecycle
 
@@ -286,7 +286,7 @@ Run the repository verification baseline with:
 ```bash
 ./scripts/verify_phases.sh
 # equivalent first-time setup: ./scripts/test_backend.sh
-./scripts/gcp_preflight.sh   # when changing gcp/
+./scripts/gcp_preflight.sh   # when changing cloud/gcp/
 ```
 
 `verify_phases.sh` creates `backend/.venv` if needed, runs the full pytest suite (including
@@ -338,5 +338,5 @@ Before Phase 1, name the NGO safety partner and stop authority; choose one famil
 ## 12. Primary implementation references
 
 - [README.md](README.md) — end-to-end architecture map, code paths, local setup and verification.
-- [gcp/](gcp/) — Terraform for Cloud Run API, SQL, Redis, mTLS worker, secrets, Artifact Registry, IAP SSH, diagnostics GCS. PKI PEMs: `gcp/pki/` (not TF state).
+- [cloud/gcp/](cloud/gcp/) — Terraform for Cloud Run API, SQL, Redis, mTLS worker, secrets, Artifact Registry, IAP SSH, diagnostics GCS. PKI PEMs: `cloud/gcp/pki/` (not TF state).
 - [datasets/phase0/](datasets/phase0/) — synthetic Phase-0 policy replay fixtures (not street evidence).

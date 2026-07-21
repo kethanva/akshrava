@@ -31,6 +31,7 @@ YOLO_WEIGHTS_SHA256=$approved_sha
 CLOUD_FALLBACK_PROVIDER=none
 REMOTE_WORKER_SECRET=$WORKER_SECRET
 METRICS_SCRAPE_TOKEN=$METRICS_TOKEN
+ALERT_WEBHOOK_URL=https://hooks.pilot.internal/ci
 EOF
 
 bash -n "$repo_root/scripts/cloud_preflight.sh"

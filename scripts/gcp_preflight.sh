@@ -1,20 +1,40 @@
 #!/usr/bin/env bash
-# Preflight for the gcp/ Terraform stack before apply / detector=remote.
+# Preflight for the cloud/gcp/ Terraform stack before apply / detector=remote.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT/gcp"
+cd "$ROOT/cloud/gcp"
+
+CI_MODE=false
+if [[ "${1:-}" == "--ci" ]]; then
+  CI_MODE=true
+  shift
+fi
+if [[ $# -ne 0 ]]; then
+  echo "usage: $0 [--ci]" >&2
+  exit 2
+fi
 
 if ! command -v terraform >/dev/null 2>&1; then
   echo "terraform is required" >&2
   exit 1
 fi
 
+# A clean CI checkout intentionally has neither the ignored tfvars file nor private PKI PEMs.
+# Validate Terraform syntax and provider wiring with an ephemeral bootstrap-PKI configuration;
+# deployment preflight (the default mode) still verifies the operator's real external PKI.
+if [[ "$CI_MODE" == true ]]; then
+  export TF_VAR_project_id="${TF_VAR_project_id:-akshrava-ci-validation}"
+  export TF_VAR_manage_pki_in_terraform=true
+fi
+
 terraform fmt -check -recursive
 terraform init -backend=false -input=false >/dev/null
 terraform validate
 
-if [[ -f terraform.tfvars ]]; then
+if [[ "$CI_MODE" == true ]]; then
+  echo "gcp CI validation ok (ephemeral bootstrap PKI; no deployment credentials or secrets used)"
+elif [[ -f terraform.tfvars ]]; then
   python3 - <<'PY'
 from pathlib import Path
 import sys
@@ -67,7 +87,7 @@ if not manage_pki:
             missing.append(k)
     if missing:
         print(
-            "manage_pki_in_terraform=false requires PEM vars in tfvars or files in gcp/pki/: %s" % ", ".join(missing),
+            "manage_pki_in_terraform=false requires PEM vars in tfvars or files in cloud/gcp/pki/: %s" % ", ".join(missing),
             file=sys.stderr,
         )
         sys.exit(1)

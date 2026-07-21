@@ -8,6 +8,10 @@ permissions:
   contents: read
   actions: read
 
+concurrency:
+  group: android-main-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: Build APKs
@@ -22,6 +26,7 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+          cache: gradle
 
       - uses: android-actions/setup-android@v3
 
@@ -106,6 +111,7 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
+          cache: gradle
 
       - uses: android-actions/setup-android@v3
 
@@ -126,6 +132,7 @@ jobs:
           arch: ${{ matrix.arch }}
           profile: Nexus 6
           disable-animations: true
+          pre-emulator-launch-script: sudo chmod 666 /dev/kvm
           emulator-options: -no-snapshot -no-window -gpu swiftshader_indirect
           script: cd android && ./gradlew --no-daemon :app:connectedDebugAndroidTest
 

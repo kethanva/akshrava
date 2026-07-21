@@ -4,15 +4,25 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT/backend"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+
+if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
+  echo "Python 3.10+ is required (set PYTHON_BIN to a supported interpreter)." >&2
+  exit 1
+fi
 
 if [[ ! -x .venv/bin/python ]]; then
   echo "Creating backend/.venv via scripts/test_backend.sh dependency install path..." >&2
-  python3 -m venv .venv
+  "$PYTHON_BIN" -m venv .venv
   # shellcheck disable=SC1091
   source .venv/bin/activate
-  python -m pip install --upgrade 'pip<25'
+  python -m pip install --upgrade 'pip>=26.1.2' 'setuptools>=83'
   python -m pip install '.[dev]'
 else
+  if ! .venv/bin/python -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
+    echo "backend/.venv uses Python older than 3.10; recreate it with PYTHON_BIN=<python3.10+>." >&2
+    exit 1
+  fi
   # shellcheck disable=SC1091
   source .venv/bin/activate
 fi

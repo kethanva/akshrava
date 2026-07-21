@@ -4,9 +4,9 @@
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "$0")/.." && pwd)
-env_file=${1:-"$repo_root/infra/.env"}
+env_file=${1:-"$repo_root/cloud/local/.env"}
 backup_dir=${2:-"$repo_root/backups"}
-compose_file="$repo_root/infra/docker-compose.yml"
+compose_file="$repo_root/cloud/local/docker-compose.yml"
 
 if [[ ! -f "$env_file" ]]; then
   echo "Missing deployment environment file: $env_file" >&2

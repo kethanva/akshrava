@@ -7,7 +7,9 @@ REGION="${2:-us-central1}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 echo "Applying Terraform (creates/updates migrate job + API revision)..."
-terraform -chdir="${ROOT}/gcp" apply -auto-approve
+"${ROOT}/scripts/gcp_preflight.sh"
+terraform -chdir="${ROOT}/cloud/gcp" init -input=false
+terraform -chdir="${ROOT}/cloud/gcp" apply -input=false -auto-approve
 
 echo "Running Cloud Run migrate job (blocks until Alembic succeeds)..."
 gcloud run jobs execute akshrava-migrate \

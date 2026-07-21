@@ -14,7 +14,7 @@ COPY migrations ./migrations
 COPY alembic.ini ./
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
-RUN pip install --upgrade "pip<25" && \
+RUN pip install --upgrade "pip>=26.1.2" "setuptools>=83" && \
     pip install "gunicorn>=23,<24" && \
     if [ "$INSTALL_YOLO" = "true" ]; then pip install '.[yolo]'; else pip install .; fi && \
     case "$INSTALL_CLOUD_PROVIDER" in \

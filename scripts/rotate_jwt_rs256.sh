@@ -44,7 +44,7 @@ cat <<EOF
 ==> rotation published.
 Next:
   1. Ensure Cloud Run mounts JWT_PUBLIC_KEY_PREVIOUS_FILE from akshrava-jwt-public-previous
-     (see gcp/app.tf / secrets.tf dual-key mount).
+     (see cloud/gcp/app.tf / secrets.tf dual-key mount).
   2. Redeploy API: ./scripts/build_gcp_images.sh && terraform apply (or gcloud run services update).
   3. Mint new device tokens with mint_device_token_gcp.sh for field phones.
   4. After all devices are re-provisioned, disable previous-key mount.

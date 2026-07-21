@@ -10,8 +10,8 @@ DAYS="${2:-1}"
 # The old <your-cloud-run-endpoint> placeholder produced provisioning cards that could never
 # reach GCP, silently stranding volunteer phones.
 TF_WSS_URL=""
-if command -v terraform &>/dev/null && [ -d "$ROOT/gcp" ]; then
-  TF_WSS_URL="$(terraform -chdir="$ROOT/gcp" output -raw websocket_url 2>/dev/null || true)"
+if command -v terraform &>/dev/null && [ -d "$ROOT/cloud/gcp" ]; then
+  TF_WSS_URL="$(terraform -chdir="$ROOT/cloud/gcp" output -raw websocket_url 2>/dev/null || true)"
 fi
 BASE_URL="${AKSHRAVA_BASE_URL:-https://akshrava-api-c7d3j4nzdq-uc.a.run.app}"
 WSS_URL="${AKSHRAVA_WSS_URL:-${TF_WSS_URL:-${BASE_URL/https/wss}/v1/session}}"

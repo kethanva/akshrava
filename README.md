@@ -11,7 +11,7 @@ The detailed safety, evidence, operating, and release boundary is in [Important 
 
 ## Built with Codex
 
-Akshrava was developed with human direction and iterative assistance from OpenAI Codex Codex helped turn architecture reviews and safety requirements into implementation work across the Android client, FastAPI backend, GCP/Terraform infrastructure, tests, operational scripts, and project documentation.
+Akshrava was developed with human direction and iterative assistance from OpenAI Codex. Codex helped turn architecture reviews and safety requirements into implementation work across the Android client, FastAPI backend, GCP/Terraform infrastructure, tests, operational scripts, and project documentation.
 
 The collaboration included:
 
@@ -23,7 +23,7 @@ The collaboration included:
 
 Codex was used as an engineering collaborator for code exploration, design critique, test planning, debugging hypotheses, documentation, and careful review of safety-sensitive trade-offs. Human review remained responsible for approving changes, protecting credentials, supervising device testing, and deciding what evidence is sufficient for real-world use. The model did not replace controlled testing, accessibility expertise, or the requirement for a cane, guide, or other established mobility support.
 
-## Architecture at a glance
+## Cloud Architecture Diagram
 
 ```mermaid
 flowchart TB
@@ -72,9 +72,9 @@ The live supervised-pilot path is:
 
 `Android ProtocolClient` → Cloud Run `wss://<cloud-run-endpoint>/v1/session` → Redis admission → Serverless VPC connector → `worker.akshrava.internal:8443` → Caddy mTLS → remote CPU YOLO worker.
 
-The current worker setting is `worker_use_gpu=false` (CPU pilot with `ALERT_MAX_AGE_MS=8500`); GPU quota is not assumed. Cloud SQL, Memorystore Redis, Secret Manager, Artifact Registry, diagnostics GCS, private networking, COS firewall rules, IAP SSH, Cloud Monitoring, and alert policies are defined under [gcp/](gcp/). The root [infra/](infra/) directory is the local/single-host Compose alternative, not the live pilot edge.
+The current worker setting is `worker_use_gpu=false` (CPU pilot with `ALERT_MAX_AGE_MS=8500`); GPU quota is not assumed. Cloud SQL, Memorystore Redis, Secret Manager, Artifact Registry, diagnostics GCS, private networking, COS firewall rules, IAP SSH, Cloud Monitoring, and alert policies are defined under [cloud/gcp/](cloud/gcp/). The separate [cloud/local/](cloud/local/) directory is the Compose-based local/single-host alternative, not the live pilot edge.
 
-## End-to-end frame lifecycle
+## Data Flow Diagram (DFD)
 
 ```mermaid
 sequenceDiagram
@@ -114,26 +114,35 @@ The system is a **freshness pipeline**, never a video recorder or catch-up queue
 - The backend accepts bounded input, rate-limits before work, and performs alert persistence outside the WebSocket response path via background tasks drained safely on shutdown.
 - Raw images are processed in memory and discarded. Normal operation never stores video or JPEG frames.
 
-### Runtime states and fail-closed behavior
+## State Machine Diagram
 
 ```mermaid
 stateDiagram-v2
   [*] --> STOPPED
   STOPPED --> INITIALIZING: visible Start + camera permission
-  INITIALIZING --> ACTIVE: ready + authenticated WSS
+  INITIALIZING --> CONNECTING: configuration, calibration and device JWT accepted
   INITIALIZING --> STOPPED: invalid config / permission / provisioning
-  ACTIVE --> DEGRADED: stale results / network loss / thermal pressure
+  CONNECTING --> ACTIVE: ready frame + authenticated WSS
+  CONNECTING --> DEGRADED: network or admission unavailable
+  ACTIVE --> PROCESSING: admissible latest frame
+  PROCESSING --> ACTIVE: fresh correlated result processed
+  PROCESSING --> DEGRADED: stale, malformed, rejected or worker-failed result
+  ACTIVE --> DEGRADED: network loss / thermal pressure / camera quality failure
+  DEGRADED --> CONNECTING: bounded retry backoff elapsed
   DEGRADED --> ACTIVE: fresh result and healthy link
-  DEGRADED --> STOPPED: retry budget exhausted or user Stop
+  DEGRADED --> STOPPED: retry budget exhausted / user Stop
   ACTIVE --> STOPPED: user Stop / critical battery / camera failure
+  PROCESSING --> STOPPED: user Stop / critical battery / camera failure
 ```
+
+`ACTIVE` may produce an offline TTS/haptic alert only from a fresh, correlated, policy-admitted result. `DEGRADED` and `STOPPED` suppress hazard claims and expose a limitation state; neither silently restarts camera capture.
 
 Every transition has an explicit user-facing status. A disconnected socket, expired JWT,
 blocked camera, unavailable detector, invalid calibration, stale result, overheated battery, or
 critical battery state suppresses hazard speech and announces the corresponding limitation. The
 watchdog can prompt the user to start again, but must not silently restart camera capture.
 
-## Client architecture: Android 8 through Android 15+
+## Client architecture: Android 8 through Android 16+
 
 The app has `minSdk 26` (Android 8). Android 8/9 are compatibility tiers; the supervised field baseline is Android 10+, 64-bit ARM, 4 GB RAM, reliable rear camera/LTE, and a verified mounted-phone calibration.
 
@@ -174,8 +183,7 @@ The server sends `ready` with payload:
   "type": "ready",
   "max_in_flight": 1,
   "vision_enabled": true,
-  "alert_max_age_ms": 8500,
-  "client_ip": "1.2.3.4"
+  "alert_max_age_ms": 8500
 }
 ```
 
@@ -285,7 +293,7 @@ flowchart TD
   Compose --> Phone["Phone checks frame ID + age\nthen template TTS/haptic"]
 ```
 
-## GCP and local infrastructure
+## Cloud deployment topology
 
 ```mermaid
 flowchart LR
@@ -302,9 +310,9 @@ flowchart LR
   CR -. "optional consented diagnostics" .-> GCS["Diagnostics GCS bucket"]
 ```
 
-Terraform in [gcp/](gcp/) covers Cloud Run and migration job, VPC/subnets/private DNS/serverless connector, Cloud SQL, Redis, a private worker (with optional regional MIG HA using safe `try()` index evaluation for forwarding rules), TLS wiring, Secret Manager, IAM (with explicit `depends_on` bindings preventing provisioning race conditions), Artifact Registry, Cloud Armor (with dynamic uptime check evaluation), Monitoring, diagnostics GCS, and outputs. PKI material is managed outside Terraform state (`manage_pki_in_terraform=false`) under `gcp/pki/`; treat it as sensitive operational material and rotate it through the documented procedure.
+Terraform in [cloud/gcp/](cloud/gcp/) covers Cloud Run and migration job, VPC/subnets/private DNS/serverless connector, Cloud SQL, Redis, a private worker (with optional regional MIG HA using safe `try()` index evaluation for forwarding rules), TLS wiring, Secret Manager, IAM (with explicit `depends_on` bindings preventing provisioning race conditions), Artifact Registry, Cloud Armor (with dynamic uptime check evaluation), Monitoring, diagnostics GCS, and outputs. PKI material is managed outside Terraform state (`manage_pki_in_terraform=false`) under `cloud/gcp/pki/`; treat it as sensitive operational material and rotate it through the documented procedure.
 
-[infra/docker-compose.yml](infra/docker-compose.yml) provides a local/single-host stack with API, worker, PostgreSQL, Redis, Caddy, Prometheus, Grafana, and Alertmanager. It does not replace GCP's public edge, IAM, private VPC, or managed availability controls.
+[cloud/local/docker-compose.yml](cloud/local/docker-compose.yml) provides a local/single-host stack with API, worker, PostgreSQL, Redis, Caddy, Prometheus, Grafana, and Alertmanager. It does not replace GCP's public edge, IAM, private VPC, or managed availability controls.
 
 ## Security, privacy, and observability
 
@@ -366,14 +374,31 @@ Akshrava/
 ├── backend/
 │   ├── akshrava_backend/             FastAPI control plane and worker code
 │   └── tests/                        unit, protocol, integration, and policy tests
-├── gcp/                              Terraform for the managed pilot infrastructure
-├── infra/                            Compose, Caddy, Prometheus, Grafana, Alertmanager
+├── cloud/
+│   ├── gcp/                          Terraform for the managed pilot infrastructure
+│   └── local/                        Compose, Caddy, Prometheus, Grafana, Alertmanager
 ├── scripts/                          build, provisioning, preflight, migration, E2E tools
+├── akshrava.yaml                     model-training dataset configuration
 ├── datasets/phase0/                  synthetic policy replay fixtures; not street evidence
 ├── .github/workflows/                CI, Android compatibility, and release pipelines
 ├── Important Architecture.md         authoritative safety, operations, and release boundary
 └── NOT_NOW.md                        deferred capabilities and scope guard
 ```
+
+## Model training and export
+
+The root [akshrava.yaml](akshrava.yaml) is the fine-tune configuration; this repository contains neither training images nor model weights. Put labelled data in `datasets/akshrava/{images,labels}/{train,val,test}` using route-disjoint splits. Resolve the Ultralytics/weight licence before producing a shippable detector; until then, `noop` remains the fail-closed default.
+
+- Start from the Indian Driving Dataset, then collect 8–10 hours of route-diverse, chest-mounted pilot footage (about 1.35 m high and 12° down), sample at 1 FPS, deduplicate, and label a route-disjoint train/validation/test set.
+- Reserve 20–30% hard negatives—shadows, painted patches, speed breakers, puddles, and wet-road reflections—to prevent false hazard claims.
+- The acceptance bar is recall on held-out walking footage: at least 0.85 for people/vehicles below 8 m and 0.60 for potholes. A retrain that improves mAP while regressing this evidence is rejected.
+
+```bash
+yolo detect train model=yolo11s.pt data=akshrava.yaml imgsz=640 epochs=80 batch=16 mosaic=1.0
+yolo export model=runs/detect/train/weights/best.pt format=tflite int8=True imgsz=320 data=akshrava.yaml
+```
+
+Record each approved export's SHA-256 in the release manifest and deployment configuration. The model may learn all 12 configured classes, but Phase 1 voices only the separately validated, policy-approved outcomes: person, two-wheeler, car/auto-like vehicle, and large central obstruction.
 
 ## Build, verification, provisioning, and release
 
@@ -383,7 +408,7 @@ Run the baseline repository verification from the root:
 ./scripts/verify_phases.sh
 ```
 
-It creates the backend virtual environment when required, runs the backend test suite and Phase-0 policy replay, runs available linting, validates Compose/GCP preflight paths, and exercises the CI-equivalent engineering checks. Build/install the debug Android app on a USB-connected device with:
+It creates the backend virtual environment when required, runs the backend test suite and Phase-0 policy replay, and runs available linting. Compose and GCP preflight validation are separate CI/script stages. Build/install the debug Android app on a USB-connected device with:
 
 ```bash
 ./scripts/install_android_debug.sh
@@ -412,13 +437,14 @@ Useful operational scripts:
 | `scripts/e2e_gcp_pilot.sh`, `scripts/e2e_android_gcp.sh`, `scripts/e2e_android_protocol_gcp.sh` | Exercise live WSS/remote-vision paths; they are engineering checks, not mobility approval. |
 | `scripts/upsert_calibration_profile.py` | Record mount geometry and explicitly mark a profile verified after course sign-off. |
 
-CI is defined in [.github/workflows/ci.yml](.github/workflows/ci.yml), Android compatibility coverage in [.github/workflows/android-compatibility.yml](.github/workflows/android-compatibility.yml), and the release pipeline in [.github/workflows/release.yml](.github/workflows/release.yml).
+CI is defined in [.github/workflows/ci.yml](.github/workflows/ci.yml), Android build and compatibility coverage in [.github/workflows/android-pipeline.yml](.github/workflows/android-pipeline.yml) and [.github/workflows/android-compatibility.yml](.github/workflows/android-compatibility.yml), and the release pipeline in [.github/workflows/release.yml](.github/workflows/release.yml).
 
-The compatibility workflow runs API 28–36 emulator smoke tests (Android 9 through the current
-API level), plus JVM tests and debug APK assembly. `minSdk 26` remains the install floor for
-Android 8; API 26/27 are legacy compatibility targets and require device-specific camera,
-foreground-service, TTS, and locked-screen validation before field use. CI proves build and
-protocol compatibility, not detector recall or mobility safety on a particular donated phone.
+The compatibility workflows run API 26–36 emulator smoke tests (Android 8 through the current
+API level), plus JVM tests and debug APK assembly. API 28–36 (Android 9 through Android 16,
+including Android 12L/API 32) are the release-validation matrix; API 26/27 are legacy build and
+protocol compatibility targets and require device-specific camera, foreground-service, TTS, and
+locked-screen validation before field use. CI proves build and protocol compatibility, not
+detector recall or mobility safety on a particular donated phone.
 
 ### Release sequence
 

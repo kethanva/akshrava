@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build and push Akshrava images to Artifact Registry for the gcp/ Terraform stack.
+# Build and push Akshrava images to Artifact Registry for the cloud/gcp/ Terraform stack.
 # Prints digest-pinned image refs for terraform.tfvars (prefer over :latest).
 set -euo pipefail
 
@@ -38,7 +38,7 @@ echo "Pushed:"
 echo "  ${API_TAG}"
 echo "  ${WORKER_TAG}"
 echo
-echo "Digest-pinned values for gcp/terraform.tfvars:"
+echo "Digest-pinned values for cloud/gcp/terraform.tfvars:"
 echo "  api_image    = \"${API_DIGEST}\""
 echo "  worker_image = \"${WORKER_DIGEST}\""
 echo
