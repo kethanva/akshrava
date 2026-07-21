@@ -9,12 +9,17 @@ trap 'rm -rf "$fixture_dir"' EXIT
 mkdir -p "$fixture_dir/models"
 printf 'approved model fixture\n' >"$fixture_dir/models/approved.pt"
 approved_sha=$(shasum -a 256 "$fixture_dir/models/approved.pt" | awk '{print $1}')
-cat >"$fixture_dir/.env" <<'EOF'
-POSTGRES_PASSWORD=preflight_password_0123456789_abcd
+PG_PASS="$(openssl rand -hex 24)"
+GF_PASS="$(openssl rand -hex 24)"
+REDIS_PASS="$(openssl rand -hex 24)"
+WORKER_SECRET="$(openssl rand -hex 24)"
+METRICS_TOKEN="$(openssl rand -hex 24)"
+cat >"$fixture_dir/.env" <<EOF
+POSTGRES_PASSWORD=$PG_PASS
 JWT_ALGORITHM=RS256
 JWT_PUBLIC_KEY_FILE=/run/secrets/jwt/device-public.pem
-GRAFANA_PASSWORD=preflight_grafana_0123456789_abcd
-REDIS_PASSWORD=preflight_redis_secret_0123456789_abcd
+GRAFANA_PASSWORD=$GF_PASS
+REDIS_PASSWORD=$REDIS_PASS
 DOMAIN=pilot.internal.invalid
 AKSHRAVA_ENV=pilot
 DETECTOR=ultralytics
@@ -22,12 +27,11 @@ DEV_AUTH_BYPASS=false
 INSTALL_YOLO=true
 MODEL_DIR=./models
 YOLO_WEIGHTS=/models/approved.pt
-YOLO_WEIGHTS_SHA256=__APPROVED_SHA__
+YOLO_WEIGHTS_SHA256=$approved_sha
 CLOUD_FALLBACK_PROVIDER=none
-REMOTE_WORKER_SECRET=preflight_remote_worker_secret_012345
-METRICS_SCRAPE_TOKEN=preflight_metrics_scrape_token_012345
+REMOTE_WORKER_SECRET=$WORKER_SECRET
+METRICS_SCRAPE_TOKEN=$METRICS_TOKEN
 EOF
-sed -i.bak "s/__APPROVED_SHA__/$approved_sha/" "$fixture_dir/.env"
 
 bash -n "$repo_root/scripts/cloud_preflight.sh"
 "$repo_root/scripts/cloud_preflight.sh" "$fixture_dir/.env" --field

@@ -26,12 +26,7 @@ jobs:
       - uses: android-actions/setup-android@v3
 
       - name: Install Android SDK platforms
-        run: |
-          sdkmanager "platforms;android-36" "build-tools;36.0.0" \
-            "platforms;android-26" "platforms;android-27" "platforms;android-28" \
-            "platforms;android-29" "platforms;android-30" "platforms;android-31" \
-            "platforms;android-32" "platforms;android-33" "platforms;android-34" \
-            "platforms;android-35"
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
 
       - name: Run unit tests
         run: ./gradlew --no-daemon :app:testDebugUnitTest
@@ -61,11 +56,15 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+      # Without ANDROID_KEYSTORE_* secrets, AGP emits app-release-unsigned.apk.
+      # With secrets present (optional on main), it emits app-release.apk.
       - name: Upload release APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: akshrava-release-apk
-          path: android/app/build/outputs/apk/release/app-release.apk
+          path: |
+            android/app/build/outputs/apk/release/app-release.apk
+            android/app/build/outputs/apk/release/app-release-unsigned.apk
           retention-days: 7
           if-no-files-found: error
 
@@ -76,7 +75,30 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        api: [26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36]
+        include:
+          # API 26/27 only publish 32-bit default images on x86.
+          - api: 26
+            arch: x86
+          - api: 27
+            arch: x86
+          - api: 28
+            arch: x86_64
+          - api: 29
+            arch: x86_64
+          - api: 30
+            arch: x86_64
+          - api: 31
+            arch: x86_64
+          - api: 32
+            arch: x86_64
+          - api: 33
+            arch: x86_64
+          - api: 34
+            arch: x86_64
+          - api: 35
+            arch: x86_64
+          - api: 36
+            arch: x86_64
     steps:
       - uses: actions/checkout@v4
 
@@ -87,36 +109,25 @@ jobs:
 
       - uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK platform for API ${{ matrix.api }}
-        run: |
-          sdkmanager "platforms;android-${{ matrix.api }}" \
-            "system-images;android-${{ matrix.api }};default;x86_64"
+      - name: Install Android SDK platform
+        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
 
-      - name: Download debug APK
-        uses: actions/download-artifact@v4
-        with:
-          name: akshrava-debug-apk
-          path: android/app/build/outputs/apk/debug/
-
-      - name: Download debug AndroidTest APK
-        uses: actions/download-artifact@v4
-        with:
-          name: akshrava-debug-androidTest-apk
-          path: android/app/build/outputs/apk/androidTest/debug/
+      # Rebuild in-job: connectedDebugAndroidTest installs from Gradle outputs,
+      # so downloading prebuilt APKs would be unused and misleading.
+      - name: Assemble APKs for instrumented tests
+        working-directory: android
+        run: ./gradlew --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest
 
       - name: Run instrumented tests on API ${{ matrix.api }}
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: ${{ matrix.api }}
           target: default
-          arch: x86_64
+          arch: ${{ matrix.arch }}
           profile: Nexus 6
           disable-animations: true
-          force-avd-creation: false
           emulator-options: -no-snapshot -no-window -gpu swiftshader_indirect
-          script: |
-            cd android
-            ./gradlew --no-daemon :app:connectedDebugAndroidTest
+          script: cd android && ./gradlew --no-daemon :app:connectedDebugAndroidTest
 
       - name: Upload test results (API ${{ matrix.api }})
         uses: actions/upload-artifact@v4

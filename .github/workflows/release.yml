@@ -15,7 +15,29 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        api: [28, 29, 30, 31, 32, 33, 34, 35, 36]
+        include:
+          - api: 26
+            arch: x86
+          - api: 27
+            arch: x86
+          - api: 28
+            arch: x86_64
+          - api: 29
+            arch: x86_64
+          - api: 30
+            arch: x86_64
+          - api: 31
+            arch: x86_64
+          - api: 32
+            arch: x86_64
+          - api: 33
+            arch: x86_64
+          - api: 34
+            arch: x86_64
+          - api: 35
+            arch: x86_64
+          - api: 36
+            arch: x86_64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -29,7 +51,7 @@ jobs:
         with:
           api-level: ${{ matrix.api }}
           target: default
-          arch: x86_64
+          arch: ${{ matrix.arch }}
           profile: Nexus 6
           disable-animations: true
           script: cd android && ./gradlew --no-daemon :app:connectedDebugAndroidTest
