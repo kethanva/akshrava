@@ -1,9 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">अक्षरव</string>
+    <string name="tagline">छड़ी और गाइड के साथ बोले गए अलर्ट। चुप्पी का मतलब सुरक्षित नहीं।</string>
+    <string name="section_session">सहायता</string>
+    <string name="section_setup">स्वयंसेवक सेटअप</string>
+    <string name="setup_help">स्वयंसेवक के साथ एक बार भरें। टोकन डिवाइस Keystore में सुरक्षित रहता है।</string>
+    <string name="setup_show">स्वयंसेवक सेटअप दिखाएँ</string>
+    <string name="setup_hide">स्वयंसेवक सेटअप छिपाएँ</string>
     <string name="notification_channel_name">सहायता सेवा</string>
     <string name="notification_title">अक्षरव सहायता सक्रिय</string>
-    <string name="notification_text">कैमरा सहायता रोकने के लिए Stop दबाएँ।</string>
-    <string name="action_stop">रोकें</string>
+    <string name="notification_text">कैमरा सहायता रोकने के लिए रोकें दबाएँ।</string>
+    <string name="action_stop">सहायता रोकें</string>
     <string name="action_start">सहायता शुरू करें</string>
     <string name="watchdog_channel_name">सहायता निगरानी</string>
     <string name="watchdog_channel_desc">अगर फोन ने कैमरा सहायता बंद की हो तो सूचित करता है।</string>
@@ -17,6 +24,7 @@
     <string name="language_english">अंग्रेज़ी (भारत)</string>
     <string name="language_hindi">हिन्दी</string>
     <string name="status_configure">स्वयंसेवक के साथ एक बार सेट करें, फिर सहायता शुरू करें दबाएँ।</string>
+    <string name="status_ready">तैयार। जब सहायता चाहिए तब सहायता शुरू करें दबाएँ।</string>
     <string name="status_stopped">सहायता बंद।</string>
     <string name="status_starting">सहायता शुरू हो रही है। अब स्क्रीन लॉक कर सकते हैं।</string>
     <string name="status_need_provisioning">स्वयंसेवक को WSS पता, डिवाइस टोकन और कैलिब्रेशन आईडी भरना होगा।</string>

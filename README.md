@@ -110,7 +110,7 @@ The system is a **freshness pipeline**, never a video recorder or catch-up queue
 
 - CameraX keeps only the latest frame. The phone allows one in-flight request and one replaceable pending frame; old frames are dropped.
 - The default capture envelope is roughly 0.2–1 FPS, with short confirmation sampling up to 2 FPS and never above 3 FPS in this cloud design.
-- `capture_mono_ms` is the phone's elapsed-realtime clock. The server echoes it; both reject results older than the configured speak budget (**CPU remote pilot ~9 s** so YOLO can score; **GPU / noop 2500 ms**). Late inference remains telemetry and is never spoken.
+- `capture_mono_ms` is the phone's elapsed-realtime clock. The server echoes it; both reject results older than the shared **2500 ms safety boundary**. Late inference remains telemetry and is never spoken.
 - The backend accepts bounded input, rate-limits before work, and performs alert persistence outside the WebSocket response path.
 - Raw images are processed in memory and discarded. Normal operation never stores video or JPEG frames.
 

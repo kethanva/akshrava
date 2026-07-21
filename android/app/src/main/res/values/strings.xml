@@ -1,9 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Akshrava</string>
+    <string name="tagline">Spoken alerts that supplement cane and guide. Silence never means clear.</string>
+    <string name="section_session">Assistance</string>
+    <string name="section_setup">Volunteer setup</string>
+    <string name="setup_help">Enter these once with a volunteer. Token is stored in the device Keystore.</string>
+    <string name="setup_show">Show volunteer setup</string>
+    <string name="setup_hide">Hide volunteer setup</string>
     <string name="notification_channel_name">Navigation assistance</string>
     <string name="notification_title">Akshrava assistance active</string>
     <string name="notification_text">Tap Stop to stop camera assistance.</string>
-    <string name="action_stop">Stop</string>
+    <string name="action_stop">Stop assistance</string>
     <string name="action_start">Start assistance</string>
     <string name="watchdog_channel_name">Assistance watchdog</string>
     <string name="watchdog_channel_desc">Alerts you if camera assistance was stopped by the phone.</string>
@@ -17,6 +24,7 @@
     <string name="language_english">English (India)</string>
     <string name="language_hindi">Hindi</string>
     <string name="status_configure">Configure once with a volunteer, then press Start assistance.</string>
+    <string name="status_ready">Ready. Press Start assistance when you want help.</string>
     <string name="status_stopped">Assistance stopped.</string>
     <string name="status_starting">Starting assistance. You can now lock the screen.</string>
     <string name="status_need_provisioning">A volunteer must enter a WSS endpoint, device token, and calibration ID.</string>

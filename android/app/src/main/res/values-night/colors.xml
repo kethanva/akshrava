@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ak_bg">#0D1411</color>
+    <color name="ak_surface">#17211C</color>
+    <color name="ak_ink">#E7F0EA</color>
+    <color name="ak_ink_muted">#9BB0A4</color>
+    <color name="ak_line">#2A3831</color>
+    <color name="ak_primary">#2FBF8A</color>
+    <!--
+      Pressed states stay above 4.5:1 against their own label colour. Darkening a already-dark
+      button for the pressed state is the intuitive move but it drives contrast the wrong way:
+      #B85050 under ak_on_stop measured 3.96:1, below AA, exactly while the user is touching it.
+      These values keep a clearly perceptible press delta AND stay legible.
+    -->
+    <color name="ak_primary_pressed">#26A073</color>
+    <color name="ak_on_primary">#062418</color>
+    <color name="ak_stop">#D96A6A</color>
+    <color name="ak_stop_pressed">#BF6060</color>
+    <color name="ak_on_stop">#1A0909</color>
+    <color name="ak_status_bg">#1C2C25</color>
+    <color name="ak_field_bg">#141E19</color>
+    <color name="ak_brand_accent">#2FBF8A</color>
+</resources>

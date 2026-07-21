@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="icon_background">#EAF6F0</color>
+
+    <!--
+      Light palette. These MUST exist here and not only in values-night/: a resource defined
+      solely under a -night qualifier still links (the id exists), but resolving it on a device
+      in light mode throws Resources$NotFoundException at inflate time, so the app crashed on
+      launch for every user not running dark mode.
+
+      Contrast is tuned for residual-vision users rather than to a bare minimum: body and status
+      text clear WCAG AAA (>=7:1) and every interactive surface clears AA (>=4.5:1). Kept
+      semantically parallel with values-night/colors.xml.
+    -->
+    <color name="ak_bg">#F6FAF8</color>
+    <color name="ak_surface">#FFFFFF</color>
+    <color name="ak_ink">#0E1A14</color>
+    <color name="ak_ink_muted">#41564B</color>
+    <color name="ak_line">#CFDED6</color>
+    <color name="ak_primary">#0B6B49</color>
+    <color name="ak_primary_pressed">#084F36</color>
+    <color name="ak_on_primary">#FFFFFF</color>
+    <color name="ak_stop">#A32018</color>
+    <color name="ak_stop_pressed">#7D1812</color>
+    <color name="ak_on_stop">#FFFFFF</color>
+    <color name="ak_status_bg">#E7F1EB</color>
+    <color name="ak_field_bg">#FFFFFF</color>
+    <color name="ak_brand_accent">#0B6B49</color>
+</resources>

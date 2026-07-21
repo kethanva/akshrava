@@ -31,13 +31,11 @@ class ProtocolClientTest {
     }
 
     @Test
-    fun speakBudgetCoversCpuRemoteAlertAgeWithNetworkHeadroom() {
-        // Server CPU remote ALERT_MAX_AGE_MS is 8500; phone age includes uplink RTT.
-        assertEquals(9_000L, ProtocolClient.STALE_ALERT_MS)
-        assertEquals(9_000L, ProtocolClient.LOOK_FRESHNESS_MS)
-        assertEquals(9_000L, ProtocolClient.URGENT_FRESHNESS_MS)
+    fun speakBudgetPreservesSharedSafetyBoundary() {
+        assertEquals(2_500L, ProtocolClient.STALE_ALERT_MS)
+        assertEquals(2_500L, ProtocolClient.LOOK_FRESHNESS_MS)
+        assertEquals(1_500L, ProtocolClient.URGENT_FRESHNESS_MS)
         assertTrue(ProtocolClient.FRAME_SETTLE_TIMEOUT_MS > ProtocolClient.STALE_ALERT_MS)
-        assertTrue(ProtocolClient.STALE_ALERT_MS >= 8_500L)
     }
 
     @Test

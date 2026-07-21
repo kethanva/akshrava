@@ -1,0 +1,165 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/rootScroll"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/ak_bg"
+    android:fillViewport="true"
+    android:clipToPadding="false">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingLeft="24dp"
+        android:paddingRight="24dp"
+        android:paddingTop="36dp"
+        android:paddingBottom="40dp">
+
+        <!-- Brand first: hero-level name, not nav chrome -->
+        <TextView
+            android:id="@+id/brand"
+            style="@style/Akshrava.Brand"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/app_name"
+            android:contentDescription="@string/app_name" />
+
+        <TextView
+            android:id="@+id/tagline"
+            style="@style/Akshrava.Tagline"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/tagline" />
+
+        <View
+            android:layout_width="48dp"
+            android:layout_height="3dp"
+            android:layout_marginTop="20dp"
+            android:background="@color/ak_brand_accent"
+            android:importantForAccessibility="no" />
+
+        <TextView
+            android:id="@+id/status"
+            style="@style/Akshrava.Status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:background="@drawable/bg_status"
+            android:padding="16dp"
+            android:accessibilityLiveRegion="polite"
+            android:text="@string/status_configure" />
+
+        <TextView
+            style="@style/Akshrava.SectionLabel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="28dp"
+            android:text="@string/section_session" />
+
+        <Button
+            android:id="@+id/btnStart"
+            style="@style/Akshrava.Button.Start"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="@string/action_start"
+            android:contentDescription="@string/action_start" />
+
+        <Button
+            android:id="@+id/btnStop"
+            style="@style/Akshrava.Button.Stop"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="@string/action_stop"
+            android:contentDescription="@string/action_stop" />
+
+        <Button
+            android:id="@+id/btnToggleSetup"
+            style="@style/Akshrava.Button.Ghost"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:gravity="start|center_vertical"
+            android:text="@string/setup_show"
+            android:contentDescription="@string/setup_show" />
+
+        <LinearLayout
+            android:id="@+id/setupPanel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/bg_setup_panel"
+            android:orientation="vertical"
+            android:padding="16dp"
+            android:visibility="gone">
+
+            <TextView
+                style="@style/Akshrava.SectionLabel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/section_setup" />
+
+            <TextView
+                style="@style/Akshrava.Tagline"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:textSize="14sp"
+                android:text="@string/setup_help" />
+
+            <EditText
+                android:id="@+id/endpoint"
+                style="@style/Akshrava.Field"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:hint="@string/hint_endpoint"
+                android:contentDescription="@string/hint_endpoint"
+                android:inputType="textUri"
+                android:importantForAutofill="no" />
+
+            <EditText
+                android:id="@+id/token"
+                style="@style/Akshrava.Field"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:hint="@string/hint_token"
+                android:contentDescription="@string/hint_token"
+                android:inputType="textPassword"
+                android:importantForAutofill="no" />
+
+            <EditText
+                android:id="@+id/calibration"
+                style="@style/Akshrava.Field"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:hint="@string/hint_calibration"
+                android:contentDescription="@string/hint_calibration"
+                android:inputType="text"
+                android:importantForAutofill="no" />
+
+            <TextView
+                style="@style/Akshrava.SectionLabel"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="@string/hint_language" />
+
+            <Spinner
+                android:id="@+id/language"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:minHeight="48dp"
+                android:background="@drawable/bg_field"
+                android:paddingLeft="8dp"
+                android:paddingRight="8dp"
+                android:contentDescription="@string/hint_language" />
+        </LinearLayout>
+    </LinearLayout>
+</ScrollView>

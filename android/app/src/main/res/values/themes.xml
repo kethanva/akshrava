@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Akshrava" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="android:windowBackground">@color/ak_bg</item>
+        <item name="android:statusBarColor">@color/ak_bg</item>
+        <item name="android:navigationBarColor">@color/ak_bg</item>
+        <item name="colorPrimary">@color/ak_primary</item>
+        <item name="colorAccent">@color/ak_primary</item>
+        <item name="android:textColorPrimary">@color/ak_ink</item>
+        <item name="android:textColorSecondary">@color/ak_ink_muted</item>
+        <item name="android:editTextColor">@color/ak_ink</item>
+        <item name="android:textColorHint">@color/ak_ink_muted</item>
+    </style>
+
+    <style name="Akshrava.Brand" parent="TextAppearance.AppCompat.Display1">
+        <item name="android:textColor">@color/ak_ink</item>
+        <item name="android:textSize">40sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:letterSpacing">-0.02</item>
+        <item name="android:lineSpacingMultiplier">0.95</item>
+    </style>
+
+    <style name="Akshrava.Tagline" parent="TextAppearance.AppCompat.Body1">
+        <item name="android:textColor">@color/ak_ink_muted</item>
+        <item name="android:textSize">16sp</item>
+        <item name="android:fontFamily">sans-serif</item>
+        <item name="android:lineSpacingMultiplier">1.25</item>
+    </style>
+
+    <style name="Akshrava.Status" parent="TextAppearance.AppCompat.Medium">
+        <item name="android:textColor">@color/ak_ink</item>
+        <item name="android:textSize">18sp</item>
+        <item name="android:fontFamily">sans-serif</item>
+        <item name="android:lineSpacingMultiplier">1.3</item>
+    </style>
+
+    <style name="Akshrava.SectionLabel" parent="TextAppearance.AppCompat.Caption">
+        <item name="android:textColor">@color/ak_ink_muted</item>
+        <item name="android:textSize">13sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:textAllCaps">true</item>
+        <item name="android:letterSpacing">0.08</item>
+    </style>
+
+    <style name="Akshrava.Field" parent="Widget.AppCompat.EditText">
+        <item name="android:background">@drawable/bg_field</item>
+        <item name="android:paddingLeft">16dp</item>
+        <item name="android:paddingRight">16dp</item>
+        <item name="android:paddingTop">16dp</item>
+        <item name="android:paddingBottom">16dp</item>
+        <item name="android:textSize">17sp</item>
+        <item name="android:textColor">@color/ak_ink</item>
+        <item name="android:textColorHint">@color/ak_ink_muted</item>
+        <item name="android:minHeight">56dp</item>
+    </style>
+
+    <style name="Akshrava.Button.Start" parent="Widget.AppCompat.Button">
+        <item name="android:background">@drawable/bg_btn_start</item>
+        <item name="android:textColor">@color/ak_on_primary</item>
+        <item name="android:textSize">20sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:minHeight">64dp</item>
+        <item name="android:paddingLeft">20dp</item>
+        <item name="android:paddingRight">20dp</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:stateListAnimator">@null</item>
+    </style>
+
+    <style name="Akshrava.Button.Stop" parent="Widget.AppCompat.Button">
+        <item name="android:background">@drawable/bg_btn_stop</item>
+        <item name="android:textColor">@color/ak_on_stop</item>
+        <item name="android:textSize">18sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:minHeight">56dp</item>
+        <item name="android:paddingLeft">20dp</item>
+        <item name="android:paddingRight">20dp</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:stateListAnimator">@null</item>
+    </style>
+
+    <style name="Akshrava.Button.Ghost" parent="Widget.AppCompat.Button.Borderless">
+        <item name="android:textColor">@color/ak_primary</item>
+        <item name="android:textSize">15sp</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="android:minHeight">48dp</item>
+        <item name="android:textAllCaps">false</item>
+    </style>
+</resources>

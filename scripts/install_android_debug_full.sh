@@ -109,9 +109,13 @@ fi
 # ── 1. Preconditions ─────────────────────────────────────────────────────────
 stage "Preconditions"
 
-: "${GOOGLE_APPLICATION_CREDENTIALS:?Set GOOGLE_APPLICATION_CREDENTIALS to deploy SA JSON}"
-[ -f "$GOOGLE_APPLICATION_CREDENTIALS" ] \
-  || die "GOOGLE_APPLICATION_CREDENTIALS not readable: $GOOGLE_APPLICATION_CREDENTIALS"
+if [ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ]; then
+  [ -f "$GOOGLE_APPLICATION_CREDENTIALS" ] \
+    || die "GOOGLE_APPLICATION_CREDENTIALS not readable: $GOOGLE_APPLICATION_CREDENTIALS"
+else
+  gcloud auth print-access-token >/dev/null 2>&1 \
+    || die "Set GOOGLE_APPLICATION_CREDENTIALS or authenticate gcloud before installation"
+fi
 
 ANDROID_SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}}"
 # Append rather than prepend: an adb/gcloud the operator has deliberately put on PATH (a

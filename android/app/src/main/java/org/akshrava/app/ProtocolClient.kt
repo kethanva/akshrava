@@ -73,10 +73,10 @@ class ProtocolClient(
          * Must cover the live CPU remote YOLO path (server ALERT_MAX_AGE_MS=8500 plus uplink).
          * GPU / tight pilots can still shed quality; late results remain diagnostics only.
          */
-        const val STALE_ALERT_MS = 9_000L
+        const val STALE_ALERT_MS = 2_500L
         /** Look answers use the full freshness budget even when the hazard is S1. */
-        const val LOOK_FRESHNESS_MS = 9_000L
-        const val URGENT_FRESHNESS_MS = 9_000L
+        const val LOOK_FRESHNESS_MS = 2_500L
+        const val URGENT_FRESHNESS_MS = 1_500L
         /**
          * Allows a result to settle after slow inference while preserving the speak budget.
          * A late result is diagnosed but never announced.

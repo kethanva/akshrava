@@ -27,16 +27,19 @@ class MainActivity : AppCompatActivity() {
     private lateinit var calibration: EditText
     private lateinit var language: Spinner
     private lateinit var status: TextView
+    private lateinit var setupPanel: LinearLayout
+    private lateinit var toggleSetup: Button
 
     private val languageTags = listOf("en-IN", "hi-IN")
+    private var setupExpanded = false
 
     private val permissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         when {
             !hasPermission(Manifest.permission.CAMERA) -> {
-                status.text = getString(R.string.status_camera_permission)
+                setStatus(getString(R.string.status_camera_permission))
             }
             needsNotificationPermission() && !hasPermission(Manifest.permission.POST_NOTIFICATIONS) -> {
-                status.text = getString(R.string.status_notification_permission)
+                setStatus(getString(R.string.status_notification_permission))
             }
             else -> startServiceIfConfigured()
         }
@@ -45,63 +48,62 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
+        setContentView(R.layout.activity_main)
+
+        endpoint = findViewById(R.id.endpoint)
+        token = findViewById(R.id.token)
+        calibration = findViewById(R.id.calibration)
+        language = findViewById(R.id.language)
+        status = findViewById(R.id.status)
+        setupPanel = findViewById(R.id.setupPanel)
+        toggleSetup = findViewById(R.id.btnToggleSetup)
+
         val config = AppConfigStore.load(this)
-        endpoint = field(getString(R.string.hint_endpoint), config.endpoint)
-        token = field(getString(R.string.hint_token), "").apply {
+        endpoint.setText(config.endpoint)
+        calibration.setText(config.calibrationId)
+        token.apply {
             // Mask bearer tokens; never leave a provisioned secret visible in the form.
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD or
                 InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-            importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
             if (config.deviceToken.isNotBlank()) {
                 hint = getString(R.string.hint_token_saved)
             }
         }
-        calibration = field(getString(R.string.hint_calibration), config.calibrationId)
-        language = Spinner(this).apply {
-            adapter = ArrayAdapter(
-                this@MainActivity,
-                android.R.layout.simple_spinner_dropdown_item,
-                listOf(getString(R.string.language_english), getString(R.string.language_hindi))
-            )
-            contentDescription = getString(R.string.hint_language)
-            setSelection(languageTags.indexOf(config.language).coerceAtLeast(0))
+        language.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            listOf(getString(R.string.language_english), getString(R.string.language_hindi))
+        )
+        language.setSelection(languageTags.indexOf(config.language).coerceAtLeast(0))
+
+        findViewById<Button>(R.id.btnStart).setOnClickListener { requestAndStart() }
+        findViewById<Button>(R.id.btnStop).setOnClickListener {
+            val stopIntent = Intent(this, AssistService::class.java).setAction(AssistService.ACTION_STOP)
+            startService(stopIntent)
+            setStatus(getString(R.string.status_stopped))
         }
-        status = TextView(this).apply {
-            text = getString(R.string.status_configure)
-            textSize = 18f
-        }
-        val start = Button(this).apply {
-            text = getString(R.string.action_start)
-            contentDescription = getString(R.string.action_start)
-            setOnClickListener { requestAndStart() }
-        }
-        val stop = Button(this).apply {
-            text = getString(R.string.action_stop)
-            contentDescription = getString(R.string.action_stop)
-            setOnClickListener {
-                val stopIntent = Intent(this@MainActivity, AssistService::class.java).setAction(AssistService.ACTION_STOP)
-                startService(stopIntent)
-                status.text = getString(R.string.status_stopped)
-            }
-        }
-        setContentView(LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(32, 48, 32, 32)
-            addView(status)
-            addView(endpoint)
-            addView(token)
-            addView(calibration)
-            addView(language)
-            addView(start)
-            addView(stop)
-        })
+        toggleSetup.setOnClickListener { setSetupExpanded(!setupExpanded) }
+
+        val provisioned = config.deviceToken.isNotBlank() &&
+            config.calibrationId.isNotBlank() &&
+            config.endpoint.isNotBlank()
+        setSetupExpanded(!provisioned)
+        setStatus(
+            if (provisioned) getString(R.string.status_ready) else getString(R.string.status_configure)
+        )
     }
 
-    private fun field(hint: String, value: String) = EditText(this).apply {
-        this.hint = hint
-        setText(value)
-        textSize = 18f
-        contentDescription = hint
+    private fun setSetupExpanded(expanded: Boolean) {
+        setupExpanded = expanded
+        setupPanel.visibility = if (expanded) View.VISIBLE else View.GONE
+        val label = if (expanded) R.string.setup_hide else R.string.setup_show
+        toggleSetup.setText(label)
+        toggleSetup.contentDescription = getString(label)
+    }
+
+    private fun setStatus(message: String) {
+        // accessibilityLiveRegion=polite on the status view announces changes for TalkBack.
+        status.text = message
     }
 
     private fun requestAndStart() {
@@ -134,7 +136,8 @@ class MainActivity : AppCompatActivity() {
         )
         if (!saved) {
             token.setText("")
-            status.text = getString(R.string.status_keystore_failed)
+            setStatus(getString(R.string.status_keystore_failed))
+            setSetupExpanded(true)
             return false
         }
         // Clear the bearer from the UI after a successful Keystore write.
@@ -152,17 +155,19 @@ class MainActivity : AppCompatActivity() {
             allowPhysicalLoopbackDevelopment = BuildConfig.ALLOW_PHYSICAL_LOOPBACK_DEV
         )
         if (!endpointDecision.allowed) {
-            status.text = endpointDecision.message ?: getString(R.string.status_need_provisioning)
+            setStatus(endpointDecision.message ?: getString(R.string.status_need_provisioning))
+            setSetupExpanded(true)
             return
         }
         if (config.deviceToken.isBlank() || config.calibrationId.isBlank()) {
-            status.text = getString(R.string.status_need_provisioning)
+            setStatus(getString(R.string.status_need_provisioning))
+            setSetupExpanded(true)
             return
         }
         requestBatteryExemption()
         val intent = Intent(this, AssistService::class.java).setAction(AssistService.ACTION_START)
         ContextCompat.startForegroundService(this, intent)
-        status.text = getString(R.string.status_starting)
+        setStatus(getString(R.string.status_starting))
     }
 
     private fun requestBatteryExemption() {
