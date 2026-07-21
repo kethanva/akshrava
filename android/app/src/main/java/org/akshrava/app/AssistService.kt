@@ -87,6 +87,13 @@ class AssistService : LifecycleService() {
     private var lastNotificationAtMs = 0L
     private var queuedNotificationText: String? = null
     private val notificationFlush = Runnable { flushNotification() }
+    /**
+     * Hard-timeout stop after camera failure. Checks [assistanceGeneration] so a Start that
+     * bumped the generation inside the timeout window is not torn down by this deferred stop.
+     */
+    private val stopHardTimeout = Runnable {
+        if (assistanceGeneration.get() == stopHardTimeoutGeneration) stopAssistance()
+    }
     private var consecutiveBlurredFrames = 0
     private var previousThumbnail: IntArray? = null
     private val capturePolicy = CapturePolicy()
@@ -98,6 +105,9 @@ class AssistService : LifecycleService() {
     @Volatile private var captureSuspendedForFailure = false
     @Volatile private var quality = Quality()
     @Volatile private var stopping = false
+    /** Bumped on every Start so deferred camera-failure stops cannot kill a rebuilt session. */
+    private val assistanceGeneration = AtomicInteger(0)
+    private var stopHardTimeoutGeneration = 0
     /** Last analysis target side; rebind when server/link quality crosses a resolution rung. */
     @Volatile private var boundAnalysisMaxSide = 640
     /** Quality rung requested while a frame was in flight; applied on settle. */
@@ -140,13 +150,42 @@ class AssistService : LifecycleService() {
     }
 
     private fun startAssistance() {
-        if (stopping) {
-            Log.i("AkshravaDebug", "svc_start interrupted active teardown; rebuilding session")
+        // Cancel a deferred stop from stopAfterCameraFailure, then bump the generation so any
+        // TTS completion callback still in flight (AlertManager.shutdown re-posts them) becomes
+        // a no-op. Without this, Start inside the hard-timeout window rebuilds a clean session
+        // and then the deferred stopAssistance() tears it down — stopping was already reset to
+        // false, so the idempotency guard at the top of stopAssistance cannot catch it.
+        mainHandler.removeCallbacks(stopHardTimeout)
+        assistanceGeneration.incrementAndGet()
+        if (stopping || client != null || alertManager != null) {
+            // stopping: interrupt in-progress Stop. client/alertManager: rebuild a half-dead or
+            // camera-failure leftover session so Start itself is the recovery action (and so we
+            // do not leak the previous socket / wake lock / TTS engine).
+            Log.i(
+                "AkshravaDebug",
+                "svc_restart rebuilding session stopping=$stopping " +
+                    "client=${client != null} alertManager=${alertManager != null}"
+            )
             teardownSessionResources(keepForeground = true)
         }
         stopping = false
+        AgentDebugLog.bind(this)
         val config = AppConfigStore.load(this)
         Log.i("AkshravaDebug", "svc_start endpoint=${config.endpoint} calib=${config.calibrationId} lang=${config.language} hasToken=${config.deviceToken.isNotBlank()}")
+        // #region agent log
+        AgentDebugLog.log(
+            "H1",
+            "AssistService.startAssistance:entry",
+            "svc_start",
+            mapOf(
+                "hasToken" to config.deviceToken.isNotBlank(),
+                "overlayAllowed" to (
+                    android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.M ||
+                        android.provider.Settings.canDrawOverlays(this)
+                    )
+            )
+        )
+        // #endregion
         if (!endpointAllowed(config.endpoint)) {
             stopSelf()
             return
@@ -222,12 +261,24 @@ class AssistService : LifecycleService() {
         // overlay is the only thing that guarantees it, and it needs a permission the user must
         // grant by hand, so treat a failure here as a first-class warning rather than a detail.
         val holdingScreenOn = ScreenKeepAlive(this).also { screenKeepAlive = it }.start()
+        // #region agent log
+        AgentDebugLog.log(
+            "H1",
+            "AssistService.startAssistance:screenKeepAlive",
+            "screen_keep_alive",
+            mapOf(
+                "holdingScreenOn" to holdingScreenOn,
+                "mode" to (screenKeepAlive?.mode?.name ?: "null"),
+                "runId" to "post-fix"
+            )
+        )
+        // #endregion
         bindCamera()
         SessionFlags.setActive(this, true)
         Watchdog.schedule(this)
         mainHandler.removeCallbacks(cameraStallCheck)
         mainHandler.postDelayed(cameraStallCheck, CAMERA_STALL_CHECK_MS)
-        Log.i("AkshravaDebug", "svc_started screen_keep_alive=$holdingScreenOn")
+        Log.i("AkshravaDebug", "svc_started screen_keep_alive=$holdingScreenOn mode=${screenKeepAlive?.mode}")
         am.status(
             if (holdingScreenOn) {
                 "Assistance started"
@@ -373,11 +424,40 @@ class AssistService : LifecycleService() {
             // unchanging scene -- every frame legitimately a duplicate -- starves the watchdog
             // and gets a loud false "assistance stopped" alarm despite the service running fine.
             maybeHeartbeat(now)
+            // #region agent log
+            if (framesAnalyzed == 1L || framesAnalyzed % 90L == 0L) {
+                    AgentDebugLog.log(
+                        "H1",
+                        "AssistService.analyzeImage:heartbeat",
+                        "pipeline_alive",
+                        mapOf(
+                            "n" to framesAnalyzed,
+                            "holdingScreenOn" to (screenKeepAlive?.isHoldingScreenOn() == true),
+                            "keepAliveMode" to (screenKeepAlive?.mode?.name ?: "null"),
+                            "canStream" to (client?.canStream() == true),
+                            "framePending" to framePending.get(),
+                            "sessionActive" to SessionFlags.isActive(this),
+                            "sessionStale" to SessionFlags.isStale(this)
+                        )
+                    )
+            }
+            // #endregion
 
             if (batteryCritical || captureSuspendedForBattery || captureSuspendedForFailure) {
                 // #region agent log
                 if (framesAnalyzed <= 5L || framesAnalyzed % 30L == 0L) {
                     Log.i("AkshravaDebug", "frame_drop suspended battCrit=$batteryCritical suspBatt=$captureSuspendedForBattery suspFail=$captureSuspendedForFailure n=$framesAnalyzed")
+                    AgentDebugLog.log(
+                        "H5",
+                        "AssistService.analyzeImage:suspend",
+                        "frame_drop_suspended",
+                        mapOf(
+                            "n" to framesAnalyzed,
+                            "battCrit" to batteryCritical,
+                            "suspBatt" to captureSuspendedForBattery,
+                            "suspFail" to captureSuspendedForFailure
+                        )
+                    )
                 }
                 // #endregion
                 return
@@ -391,6 +471,12 @@ class AssistService : LifecycleService() {
                 // #region agent log
                 if (framesAnalyzed <= 5L || framesAnalyzed % 30L == 0L) {
                     Log.i("AkshravaDebug", "frame_drop canStream=false clientNull=${currentClient == null} n=$framesAnalyzed")
+                    AgentDebugLog.log(
+                        "H2",
+                        "AssistService.analyzeImage:canStream",
+                        "frame_drop_canStream_false",
+                        mapOf("n" to framesAnalyzed, "clientNull" to (currentClient == null))
+                    )
                 }
                 // #endregion
                 return
@@ -400,7 +486,15 @@ class AssistService : LifecycleService() {
             // buffers; this flag also stops us from racing the WebSocket in-flight slot.
             if (!framePending.compareAndSet(false, true)) {
                 // #region agent log
-                if (framesAnalyzed <= 5L) Log.i("AkshravaDebug", "frame_drop framePending stuck n=$framesAnalyzed")
+                if (framesAnalyzed <= 5L || framesAnalyzed % 60L == 0L) {
+                    Log.i("AkshravaDebug", "frame_drop framePending stuck n=$framesAnalyzed")
+                    AgentDebugLog.log(
+                        "H4",
+                        "AssistService.analyzeImage:framePending",
+                        "frame_drop_pending_stuck",
+                        mapOf("n" to framesAnalyzed)
+                    )
+                }
                 // #endregion
                 return
             }
@@ -413,18 +507,38 @@ class AssistService : LifecycleService() {
             }
 
             val thumbnail = FrameGate.luma(image)
+            val avgLuma = if (thumbnail.isNotEmpty()) thumbnail.sum() / thumbnail.size else -1
+            val nearBlack = FrameGate.isNearBlack(thumbnail)
             // #region agent log
-            if (framesAnalyzed <= 5L) {
-                val avgLuma = if (thumbnail.isNotEmpty()) thumbnail.sum() / thumbnail.size else 0
-                Log.i("AkshravaDebug", "frame_luma n=$framesAnalyzed avgLuma=$avgLuma nearBlack=${FrameGate.isNearBlack(thumbnail)}")
+            if (framesAnalyzed <= 5L || framesAnalyzed % 30L == 0L || nearBlack) {
+                Log.i("AkshravaDebug", "frame_luma n=$framesAnalyzed avgLuma=$avgLuma nearBlack=$nearBlack")
+                AgentDebugLog.log(
+                    "H1",
+                    "AssistService.analyzeImage:luma",
+                    if (nearBlack) "frame_near_black" else "frame_luma_ok",
+                    mapOf(
+                        "n" to framesAnalyzed,
+                        "avgLuma" to avgLuma,
+                        "nearBlack" to nearBlack,
+                        "holdingIntervalMs" to (now - lastCaptureMs)
+                    )
+                )
             }
             // #endregion
-            if (FrameGate.isNearBlack(thumbnail)) {
+            if (nearBlack) {
                 framePending.set(false)
                 if (now - lastDarkAnnounceMs > 8_000L) {
                     lastDarkAnnounceMs = now
                     updateNotification("Camera is dark — uncover rear lens")
                     alertManager?.status("Camera is dark. Uncover the rear lens.")
+                    // #region agent log
+                    AgentDebugLog.log(
+                        "H1",
+                        "AssistService.analyzeImage:darkAnnounce",
+                        "dark_announced",
+                        mapOf("n" to framesAnalyzed, "avgLuma" to avgLuma)
+                    )
+                    // #endregion
                 }
                 // Never upload black OEM buffers — YOLO returns empty and burns RTT budget.
                 return
@@ -486,6 +600,12 @@ class AssistService : LifecycleService() {
             // #region agent log
             if (frameId <= 5L || frameId % 10L == 0L) {
                 Log.i("AkshravaDebug", "frame_sent id=$frameId sent=$sent size=${frame.jpeg.size}")
+                AgentDebugLog.log(
+                    "H3",
+                    "AssistService.analyzeImage:send",
+                    if (sent) "frame_sent_ok" else "frame_send_failed",
+                    mapOf("frameId" to frameId, "sent" to sent, "jpegBytes" to frame.jpeg.size)
+                )
             }
             // #endregion
             if (!sent) framePending.set(false)
@@ -621,8 +741,11 @@ class AssistService : LifecycleService() {
         // press did nothing. Stop the whole service cleanly instead, exactly like a camera
         // failure, so the user gets one consistent "press Start again" recovery path.
         captureSuspendedForBattery = true
+        val gen = assistanceGeneration.get()
         alertManager?.status("Battery critical. Vision assistance stopped. Use cane or guide.") {
-            ContextCompat.getMainExecutor(this).execute { stopAssistance() }
+            ContextCompat.getMainExecutor(this).execute {
+                if (assistanceGeneration.get() == gen) stopAssistance()
+            }
         }
     }
 
@@ -641,11 +764,18 @@ class AssistService : LifecycleService() {
         poseTracker?.stop(); poseTracker = null
         frameExecutor?.shutdownNow(); frameExecutor = null
         wakeLock?.let { if (it.isHeld) it.release(); wakeLock = null }
+        // Capture generation before scheduling deferred stops. A Start that bumps
+        // assistanceGeneration makes both the TTS callback and the hard timeout no-ops.
+        val gen = assistanceGeneration.get()
         alertManager?.speakThen("Rear camera unavailable. Use cane or guide.") {
-            ContextCompat.getMainExecutor(this).execute { stopAssistance() }
+            ContextCompat.getMainExecutor(this).execute {
+                if (assistanceGeneration.get() == gen) stopAssistance()
+            }
         }
         // Hard timeout so a stuck TTS callback cannot leave the FGS running forever.
-        mainHandler.postDelayed({ stopAssistance() }, STOP_HARD_TIMEOUT_MS)
+        stopHardTimeoutGeneration = gen
+        mainHandler.removeCallbacks(stopHardTimeout)
+        mainHandler.postDelayed(stopHardTimeout, STOP_HARD_TIMEOUT_MS)
     }
 
     private fun createChannel() {

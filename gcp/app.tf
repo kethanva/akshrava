@@ -339,8 +339,10 @@ resource "google_cloud_run_v2_service" "api" {
       }
       env {
         name = "INFERENCE_TIMEOUT_MS"
-        # CPU remote YOLO is slower than GPU; keep GPU/noop path tight.
-        value = var.worker_use_gpu || var.detector != "remote" ? "800" : "9000"
+        # Cap the outer wait_for at the speak budget. Spending past ALERT_MAX_AGE_MS only
+        # produces late_suppressed frames (service.py), so CPU remote matches 8500 rather than
+        # a wider 9000 that burned inference for results the phone would never speak.
+        value = var.worker_use_gpu || var.detector != "remote" ? "800" : "8500"
       }
       env {
         name  = "REMOTE_INFERENCE_TIMEOUT_MS"

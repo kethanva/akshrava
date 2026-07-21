@@ -125,17 +125,43 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
         val now = SystemClock.elapsedRealtime()
         val cooldownKey = "$messageKey:$bearing"
         val previous = lastSpoken[cooldownKey]
-        if (previous != null && now - previous < OBJECT_COOLDOWN_MS) return
+        if (previous != null && now - previous < OBJECT_COOLDOWN_MS) {
+            // #region agent log
+            AgentDebugLog.log(
+                "H6",
+                "AlertManager.announceLocked:cooldown",
+                "announce_suppressed_cooldown",
+                mapOf("messageKey" to messageKey, "bearing" to bearing, "urgent" to urgent)
+            )
+            // #endregion
+            return
+        }
 
         pruneRecent(now)
         if (!urgent) {
             val deferMs = deferralDelayMs(now, lastUtteranceMs)
             if (deferMs != null) {
+                // #region agent log
+                AgentDebugLog.log(
+                    "H6",
+                    "AlertManager.announceLocked:defer",
+                    "announce_deferred",
+                    mapOf("messageKey" to messageKey, "deferMs" to deferMs)
+                )
+                // #endregion
                 scheduleDeferredCaution(PendingAnnounce(messageKey, bearing, haptic), deferMs)
                 return
             }
             if (recentUtterances.size >= BUSY_COUNT) {
                 cancelDeferredCaution()
+                // #region agent log
+                AgentDebugLog.log(
+                    "H6",
+                    "AlertManager.announceLocked:busy",
+                    "announce_collapsed_busy",
+                    mapOf("messageKey" to messageKey)
+                )
+                // #endregion
                 summarize(now)
                 return
             }
@@ -144,6 +170,14 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
             cancelDeferredCaution()
         }
 
+        // #region agent log
+        AgentDebugLog.log(
+            "H6",
+            "AlertManager.announceLocked:deliver",
+            "announce_delivered",
+            mapOf("messageKey" to messageKey, "bearing" to bearing, "urgent" to urgent)
+        )
+        // #endregion
         deliverAnnounce(messageKey, bearing, urgent, haptic, now, cooldownKey)
     }
 

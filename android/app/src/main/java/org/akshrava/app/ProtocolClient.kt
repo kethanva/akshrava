@@ -328,6 +328,19 @@ class ProtocolClient(
                     "ws_ready detector=${payload.optString("detector", "unknown")} vision_enabled=$visionEnabled " +
                         "session_ready=$sessionReady max_in_flight=$advertised alert_max_age_ms=$configuredStaleAlertMs"
                 )
+                // #region agent log
+                AgentDebugLog.log(
+                    "H2",
+                    "ProtocolClient.handleMessage:ready",
+                    "ws_ready",
+                    mapOf(
+                        "visionEnabled" to visionEnabled,
+                        "detector" to payload.optString("detector", "unknown"),
+                        "alertMaxAgeMs" to configuredStaleAlertMs,
+                        "maxInFlight" to advertised
+                    )
+                )
+                // #endregion
                 if (visionEnabled) {
                     onState("Vision assistance connected")
                     scheduleAppPing()
@@ -344,6 +357,14 @@ class ProtocolClient(
                     isSoftServerError(code) -> {
                         // Soft shed: keep socket, free in-flight slot, let the next frame retry.
                         Log.i("AkshravaDebug", "ws_soft_error code=$code")
+                        // #region agent log
+                        AgentDebugLog.log(
+                            "H4",
+                            "ProtocolClient.handleMessage:softError",
+                            "ws_soft_error",
+                            mapOf("code" to code)
+                        )
+                        // #endregion
                         settleFrame()
                         onState("Server busy; shedding frames")
                     }
@@ -417,6 +438,24 @@ class ProtocolClient(
                     "frame=${payload.optLong("frame_id", -1)} detections=$detectionCount labels=$labelValues " +
                         "late_suppressed=$lateSuppressed result_age_ms=$age priority=$priority"
                 )
+                // #region agent log
+                AgentDebugLog.log(
+                    "H3",
+                    "ProtocolClient.handleMessage:result",
+                    "ws_result",
+                    mapOf(
+                        "frameId" to payload.optLong("frame_id", -1),
+                        "detectionCount" to detectionCount,
+                        "lateSuppressed" to lateSuppressed,
+                        "ageMs" to age,
+                        "maxAgeMs" to maxAge,
+                        "hasHazard" to (hazard != null),
+                        "messageKey" to (hazard?.optString("message_key") ?: ""),
+                        "speakAllowed" to (age <= maxAge),
+                        "priority" to priority
+                    )
+                )
+                // #endregion
                 onResultTelemetry(
                     DetectionTelemetry(
                         frameId = payload.optLong("frame_id", -1),
@@ -491,6 +530,12 @@ class ProtocolClient(
         cancelAppPing()
         // #region agent log
         Log.i("AkshravaDebug", "ws_drop sessionReady=$sessionReady visionEnabled=$visionEnabled")
+        AgentDebugLog.log(
+            "H2",
+            "ProtocolClient.handleDrop",
+            "ws_drop",
+            mapOf("sessionReady" to sessionReady, "visionEnabled" to visionEnabled, "closedByUser" to closedByUser)
+        )
         // #endregion
         sessionReady = false
         visionEnabled = false
