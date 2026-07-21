@@ -1,5 +1,20 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <uses-permission android:name="android.permission.CAMERA" />
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <!--
+      A rear camera is not optional for this app: without it there is nothing to detect and the
+      service refuses to start. Declaring required="true" keeps it off camera-less devices where
+      it could only ever mislead a user who depends on it. Lint's ChromeOS check asks for
+      required="false" to widen device support; that trade is wrong here, so it is suppressed
+      deliberately rather than silenced by weakening the declaration.
+    -->
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="true"
+        tools:ignore="PermissionImpliesUnsupportedChromeOsHardware" />
+
+    <uses-permission
+        android:name="android.permission.CAMERA"
+        tools:ignore="PermissionImpliesUnsupportedChromeOsHardware" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />

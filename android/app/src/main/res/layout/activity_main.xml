@@ -3,7 +3,6 @@
     android:id="@+id/rootScroll"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/ak_bg"
     android:fillViewport="true"
     android:clipToPadding="false">
 
@@ -117,7 +116,6 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="16dp"
                 android:hint="@string/hint_endpoint"
-                android:contentDescription="@string/hint_endpoint"
                 android:inputType="textUri"
                 android:importantForAutofill="no" />
 
@@ -128,7 +126,6 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
                 android:hint="@string/hint_token"
-                android:contentDescription="@string/hint_token"
                 android:inputType="textPassword"
                 android:importantForAutofill="no" />
 
@@ -139,7 +136,6 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
                 android:hint="@string/hint_calibration"
-                android:contentDescription="@string/hint_calibration"
                 android:inputType="text"
                 android:importantForAutofill="no" />
 

@@ -121,6 +121,11 @@ class AssistService : LifecycleService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // LifecycleService dispatches its lifecycle events from super.onStartCommand; skipping it
+        // leaves this service's own LifecycleOwner stuck and silently breaks anything that
+        // observes it. (Camera binding uses the separate CameraLifecycleOwner, which is why the
+        // omission was invisible until lint flagged it.)
+        super.onStartCommand(intent, flags, startId)
         when (intent?.action) {
             ACTION_STOP -> { stopAssistance(); return Service.START_NOT_STICKY }
             ACTION_START -> startAssistance()

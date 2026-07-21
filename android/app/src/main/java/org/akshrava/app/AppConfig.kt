@@ -1,5 +1,6 @@
 package org.akshrava.app
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
@@ -37,6 +38,7 @@ object AppConfigStore {
         )
     }
 
+    @SuppressLint("ApplySharedPref") // commit() is required: see comments below.
     fun save(context: Context, config: AppConfig): Boolean {
         // commit(), not apply(): the returned Boolean must reflect durable persistence.
         // apply() flushes on a background thread, so a short-lived caller (e.g. an
@@ -51,6 +53,7 @@ object AppConfigStore {
         return saveToken(context, config.deviceToken.trim())
     }
 
+    @SuppressLint("ApplySharedPref") // commit() is required: see comments below.
     private fun loadToken(context: Context): String {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val encrypted = prefs.getString(ENCRYPTED_TOKEN, null)
@@ -86,6 +89,7 @@ object AppConfigStore {
     }
 
     /** Returns false when the Android Keystore cannot protect the bearer token. */
+    @SuppressLint("ApplySharedPref") // commit() is required: see comments below.
     private fun saveToken(context: Context, token: String): Boolean {
         val editor = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(TOKEN)
         if (token.isBlank()) {
