@@ -419,12 +419,19 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
         // before this post executes and cannot leak a fresh engine binding after teardown.
         mainHandler.post {
             if (closed) return@post
-            // Assign to `tts` immediately: some OEM ROMs invoke onInit synchronously from the
-            // TextToSpeech constructor, so `tts` must be non-null before onInit reads it on the
-            // api thread. The old order (construct → assign) meant onInit saw null, speak()
-            // returned ERROR, and rebuild-streak exhaustion permanently killed speech.
-            val engine = TextToSpeech(context, this)
-            if (!closed) tts = engine
+            // Assign in one expression so the field is set the instant the constructor returns,
+            // before this main-thread runnable yields. Some OEM ROMs invoke onInit synchronously
+            // from the TextToSpeech constructor; that path only queues work onto `api`, and by
+            // the time that work runs `tts` must already be non-null — otherwise speak() returns
+            // ERROR and rebuild-streak exhaustion permanently kills speech.
+            //
+            // Do NOT split into `val engine = TextToSpeech(...); tts = engine`: that widens the
+            // same race and can leak the engine if `closed` flips between construct and assign.
+            tts = TextToSpeech(context, this)
+            if (closed) {
+                runCatching { tts?.shutdown() }
+                tts = null
+            }
         }
     }
 
