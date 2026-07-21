@@ -86,7 +86,7 @@ jobs:
           disable-animations: false
           pre-emulator-launch-script: sudo chmod 666 /dev/kvm
           emulator-options: -no-snapshot -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: ./scripts/run_android_instrumentation.sh instrumentation-apks/app-debug.apk instrumentation-apks/app-debug-androidTest.apk android-test-results/api-${{ matrix.api }}
+          script: ./scripts/run_android_instrumentation.sh instrumentation-apks/debug/app-debug.apk instrumentation-apks/androidTest/debug/app-debug-androidTest.apk android-test-results/api-${{ matrix.api }}
       - uses: reactivecircus/android-emulator-runner@v2
         if: steps.primary_emulator.outcome == 'failure'
         env:
@@ -102,7 +102,7 @@ jobs:
           disable-animations: false
           pre-emulator-launch-script: sudo chmod 666 /dev/kvm
           emulator-options: -no-snapshot -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: ./scripts/run_android_instrumentation.sh instrumentation-apks/app-debug.apk instrumentation-apks/app-debug-androidTest.apk android-test-results/api-${{ matrix.api }}
+          script: ./scripts/run_android_instrumentation.sh instrumentation-apks/debug/app-debug.apk instrumentation-apks/androidTest/debug/app-debug-androidTest.apk android-test-results/api-${{ matrix.api }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
