@@ -38,6 +38,19 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
         // An urgent phrase's comprehension-critical head must land: a second urgent alert may
         // queue behind it but must not cut it off within its first 350 ms (architecture §5).
         const val URGENT_PROTECT_MS = 350L
+        /**
+         * TTS engine rebind policy. Force-stopping com.google.android.tts logs "Disconnected from TTS engine" and every later
+         * tts.speak() returns ERROR ("speak failed: not bound to TTS engine") — the framework
+         * detection keeps working, exactly the reported "works a few minutes then goes silent
+         * until Stop/Start" failure. Aggressive OEM ROMs kill the engine app's process a few
+         * minutes after the screen locks, which is how this fires mid-walk. On a failed speak we
+         * rebuild the TextToSpeech client (which restarts the engine service); the streak bound
+         * and interval floor keep a genuinely broken engine from becoming a rebuild loop, and a
+         * successful hand-off to the engine resets the streak so recovery works repeatedly over
+         * a long session.
+         */
+        const val ENGINE_REBUILD_MAX_STREAK = 4
+        const val ENGINE_REBUILD_MIN_INTERVAL_MS = 4_000L
 
         /** Remaining wait before a gap-blocked caution may speak; null if it may speak now. */
         fun deferralDelayMs(nowMs: Long, lastUtteranceMs: Long, gapMs: Long = MIN_UTTERANCE_GAP_MS): Long? {
@@ -45,6 +58,11 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
             if (elapsed >= gapMs) return null
             return (gapMs - elapsed).coerceAtLeast(0L)
         }
+
+        /** Pure gate for the engine-rebuild decision so the policy is unit-testable. */
+        fun engineRebuildAllowed(nowMs: Long, lastRebuildMs: Long, streak: Int): Boolean =
+            streak < ENGINE_REBUILD_MAX_STREAK &&
+                (lastRebuildMs == 0L || nowMs - lastRebuildMs >= ENGINE_REBUILD_MIN_INTERVAL_MS)
     }
 
     private data class PendingStatus(val text: String, val onComplete: (() -> Unit)?)
@@ -74,6 +92,9 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
     private var lastUrgentSpokenAtMs = 0L
     private val vibrator = context.getSystemService(Vibrator::class.java)
     @Volatile private var closed = false
+    /** Consecutive engine rebuilds without a successful speak hand-off; see engineRebuildAllowed. */
+    @Volatile private var engineRebuildStreak = 0
+    @Volatile private var lastEngineRebuildMs = 0L
     private var tts: TextToSpeech? = TextToSpeech(context, this)
 
     override fun onInit(status: Int) {
@@ -104,6 +125,22 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
                     // this is a read-then-clear that must not race a concurrent status() write.
                     val toSpeak = synchronized(completionLock) { pendingStatus.also { pendingStatus = null } }
                     toSpeak?.let { speak(it.text, flush = true, id = nextStatusId(), onComplete = it.onComplete) }
+                } else if (engineRebuildAllowed(
+                        SystemClock.elapsedRealtime() + ENGINE_REBUILD_MIN_INTERVAL_MS,
+                        lastEngineRebuildMs,
+                        engineRebuildStreak
+                    )
+                ) {
+                    // Engine failed to initialise (it can be mid-restart right after an OEM
+                    // kill). Retry on the same bounded budget as a dead-connection rebuild,
+                    // keeping pendingStatus so the queued utterance survives into the retry.
+                    runCatching {
+                        api.schedule(
+                            { rebuildEngine(null, null) },
+                            ENGINE_REBUILD_MIN_INTERVAL_MS,
+                            TimeUnit.MILLISECONDS
+                        )
+                    }
                 } else {
                     val toDrop = synchronized(completionLock) { pendingStatus.also { pendingStatus = null } }
                     toDrop?.onComplete?.invoke()
@@ -318,14 +355,71 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
     }
 
     private fun speak(text: String, flush: Boolean, id: String, onComplete: (() -> Unit)? = null) {
-        if (ready) {
-            if (onComplete != null) synchronized(completionLock) { completionCallbacks[id] = onComplete }
-            val result = tts?.speak(
-                text, if (flush) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, null, id
-            ) ?: TextToSpeech.ERROR
-            if (result == TextToSpeech.ERROR) complete(id)
-        } else {
+        if (!ready) {
+            // Engine is (re)connecting. Keep the NEWEST utterance for delivery after init —
+            // onInit speaks pendingStatus on success — instead of dropping it into silence.
+            // For a blind user a late warning still beats no warning.
+            val replaced = synchronized(completionLock) {
+                pendingStatus.also { pendingStatus = PendingStatus(text, onComplete) }
+            }
+            replaced?.onComplete?.invoke()
+            return
+        }
+        if (onComplete != null) synchronized(completionLock) { completionCallbacks[id] = onComplete }
+        val result = tts?.speak(
+            text, if (flush) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, null, id
+        ) ?: TextToSpeech.ERROR
+        if (result == TextToSpeech.SUCCESS) {
+            // The engine accepted the utterance: the binding is alive, so recovery quota refills.
+            engineRebuildStreak = 0
+            return
+        }
+        // speak() returning ERROR after successful init means the engine connection is dead
+        // (verified live: OEM force-stop of com.google.android.tts -> "speak failed: not bound
+        // to TTS engine" on every call, forever). The framework never rebinds; we must.
+        synchronized(completionLock) { completionCallbacks.remove(id) }
+        AgentDebugLog.log(
+            "H7", "AlertManager.speak:engineDead", "tts_speak_failed",
+            mapOf("id" to id, "streak" to engineRebuildStreak)
+        )
+        rebuildEngine(text, onComplete)
+    }
+
+    /**
+     * Tear down the dead TextToSpeech client and bind a fresh one, re-queueing [text] so the
+     * failed utterance is spoken as soon as the new engine initialises. Bounded by
+     * [engineRebuildAllowed]; when the quota is exhausted the callback still runs (teardown
+     * paths depend on it) and haptics remain the surviving alert channel — deliverAnnounce
+     * vibrates before speaking, so S1 buzzes continue even with speech gone.
+     */
+    private fun rebuildEngine(text: String?, onComplete: (() -> Unit)?) {
+        if (closed) {
             onComplete?.invoke()
+            return
+        }
+        ready = false
+        if (text != null) {
+            val replaced = synchronized(completionLock) {
+                pendingStatus.also { pendingStatus = PendingStatus(text, onComplete) }
+            }
+            replaced?.onComplete?.invoke()
+        }
+        val now = SystemClock.elapsedRealtime()
+        if (!engineRebuildAllowed(now, lastEngineRebuildMs, engineRebuildStreak)) return
+        lastEngineRebuildMs = now
+        engineRebuildStreak += 1
+        AgentDebugLog.log(
+            "H7", "AlertManager.rebuildEngine", "tts_engine_rebuild",
+            mapOf("streak" to engineRebuildStreak)
+        )
+        runCatching { tts?.shutdown() }
+        tts = null
+        // Construct on the main thread like the original init so engine callbacks keep their
+        // threading assumptions; shutdown() also runs on main, so closed=true is ordered
+        // before this post executes and cannot leak a fresh engine binding after teardown.
+        mainHandler.post {
+            if (closed) return@post
+            tts = TextToSpeech(context, this)
         }
     }
 

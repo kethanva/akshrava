@@ -7,7 +7,7 @@
 >
 > Akshrava is **not** navigation, collision avoidance, route guidance, a crossing-decision aid, continuous scene description, facial recognition, or a guarantee of detection. It never says that a path is clear, a road is safe to cross, or a vehicle is approaching. Silence never means safety: when the camera, network, model, or service is unavailable, the app explicitly reports a limited/unavailable state.
 
-The detailed safety, evidence, operating, and release boundary is in [Important Architecture.md](Important%20Architecture.md); this README is the end-to-end implementation map.
+The detailed safety, evidence, operating, and release boundary is in [Important Architecture.md](Important%20Architecture.md); this README is the comprehensive end-to-end implementation and architecture map.
 
 ## Built with Codex
 
@@ -19,7 +19,7 @@ The collaboration included:
 - reviewing and hardening endpoint policy, secure device provisioning, freshness gates, reconnect behavior, privacy boundaries, and observability;
 - implementing Android diagnostics, backend detection telemetry, calibration fail-closed behavior, and regression tests;
 - validating builds, backend tests, Terraform configuration, deployment preflight checks, and the live Cloud Run health path;
-- consolidating architecture decisions and explaining the system clearly in this README and `Important Architecture.md`.
+- consolidating architecture decisions, verifying end-to-end code reviews, and explaining the system clearly in this README and `Important Architecture.md`.
 
 Codex was used as an engineering collaborator for code exploration, design critique, test planning, debugging hypotheses, documentation, and careful review of safety-sensitive trade-offs. Human review remained responsible for approving changes, protecting credentials, supervising device testing, and deciding what evidence is sufficient for real-world use. The model did not replace controlled testing, accessibility expertise, or the requirement for a cane, guide, or other established mobility support.
 
@@ -47,7 +47,7 @@ flowchart TB
     Persist["Background alert persistence\nnever blocks WSS reply"]
     Metrics["/metrics · tracing · structured logs"]
     Session --> Admission --> Service --> Persist
-    Service --> Metrics
+    Session --> Metrics
   end
 
   subgraph Private["GCP private VPC"]
@@ -72,7 +72,7 @@ The live supervised-pilot path is:
 
 `Android ProtocolClient` → Cloud Run `wss://<cloud-run-endpoint>/v1/session` → Redis admission → Serverless VPC connector → `worker.akshrava.internal:8443` → Caddy mTLS → remote CPU YOLO worker.
 
-The current worker setting is `worker_use_gpu=false`; GPU quota is not assumed. Cloud SQL, Memorystore Redis, Secret Manager, Artifact Registry, diagnostics GCS, private networking, COS firewall rules, IAP SSH, Cloud Monitoring, and alert policies are defined under [gcp/](gcp/). The root [infra/](infra/) directory is the local/single-host Compose alternative, not the live pilot edge.
+The current worker setting is `worker_use_gpu=false` (CPU pilot with `ALERT_MAX_AGE_MS=8500`); GPU quota is not assumed. Cloud SQL, Memorystore Redis, Secret Manager, Artifact Registry, diagnostics GCS, private networking, COS firewall rules, IAP SSH, Cloud Monitoring, and alert policies are defined under [gcp/](gcp/). The root [infra/](infra/) directory is the local/single-host Compose alternative, not the live pilot edge.
 
 ## End-to-end frame lifecycle
 
@@ -110,8 +110,8 @@ The system is a **freshness pipeline**, never a video recorder or catch-up queue
 
 - CameraX keeps only the latest frame. The phone allows one in-flight request and one replaceable pending frame; old frames are dropped.
 - The default capture envelope is roughly 0.2–1 FPS, with short confirmation sampling up to 2 FPS and never above 3 FPS in this cloud design.
-- `capture_mono_ms` is the phone's elapsed-realtime clock. The server echoes it; both reject results older than the shared **2500 ms safety boundary**. Late inference remains telemetry and is never spoken.
-- The backend accepts bounded input, rate-limits before work, and performs alert persistence outside the WebSocket response path.
+- `capture_mono_ms` is the phone's elapsed-realtime clock. The server echoes it. Both ends synchronize freshness through the WebSocket `ready` frame: the server sends `alert_max_age_ms` (8500 ms for CPU remote, 2500 ms for GPU/noop), and the client sets `configuredStaleAlertMs = serverMaxAge.coerceAtLeast(STALE_ALERT_MS)` using `STALE_ALERT_MS=2500` as a local safety floor. Late inference remains telemetry and is never spoken.
+- The backend accepts bounded input, rate-limits before work, and performs alert persistence outside the WebSocket response path via background tasks drained safely on shutdown.
 - Raw images are processed in memory and discarded. Normal operation never stores video or JPEG frames.
 
 ### Runtime states and fail-closed behavior
@@ -139,21 +139,21 @@ The app has `minSdk 26` (Android 8). Android 8/9 are compatibility tiers; the su
 
 | Component | Responsibility |
 |---|---|
-| `MainActivity` and `AppConfig` | Accessible configuration, provisioning state, explicit Start/Stop, persisted non-secret endpoint settings. |
-| `AssistService` | Visible camera foreground `LifecycleService`; owns camera/socket lifecycle and stops explicitly with `START_NOT_STICKY`. |
+| `MainActivity` and `AppConfig` | Accessible configuration, provisioning state, explicit Start/Stop, persisted non-secret endpoint settings, and `ActivityResultLauncher` for overlay permission requests. |
+| `AssistService` | Visible camera foreground `LifecycleService`; owns camera/socket lifecycle, manages `OkHttpClient` connection pool eviction, and stops explicitly with `START_NOT_STICKY`. |
 | `CameraLifecycleOwner`, `DisplayRotation`, `PreviewSurfaceDrain` | Service-scoped CameraX lifecycle, modern display rotation compatibility, and stable preview/image analysis plumbing. |
 | `CapturePolicy`, `FrameGate`, `PoseTracker` | Cadence, stillness, IMU pose age, thumbnail difference, blur/occlusion gates, and periodic re-sampling. |
 | `FrameEncoder` | Allocation-conscious NV21 rotate/scale and JPEG encoding; no base64 or video stream. |
-| `ProtocolClient`, `LinkQualityController`, `SessionFlags` | WSS protocol, reconnect/backoff, bounded quality adaptation, one-flight backpressure, stale-result rejection. |
-| `AlertManager`, `HeadsetControls`, `StopReceiver` | One speech lane, offline TTS, haptic, mute/repeat/stop controls, and safe notification/headset handling. |
-| `Watchdog`, `WatchdogReceiver`, `ScreenKeepAlive` | Explicit recovery prompt and OEM-specific service-survival support; they never silently restart camera capture. |
-| `AndroidSupportMatrix`, `DeviceCapability`, `ReflexEngine` | Device capability policy and gated compatibility/local-reflex hooks; no unevaluated fallback is presented as vision assistance. |
+| `ProtocolClient`, `LinkQualityController`, `SessionFlags` | WSS protocol, reconnect/backoff, bounded quality adaptation, one-flight backpressure, dynamic `alert_max_age_ms` negotiation, stale-result rejection. |
+| `AlertManager`, `HeadsetControls`, `StopReceiver` | Single speaking lane, locale-aware offline TTS, haptic arbitration, mute expiry (15m), repeat/stop controls, and safe notification/headset handling. |
+| `Watchdog`, `WatchdogReceiver`, `ScreenKeepAlive` | Explicit recovery prompt (matching user locale) and OEM-specific service-survival support; they never silently restart camera capture. |
+| `AndroidSupportMatrix`, `DeviceCapability`, `ReflexEngine` | Device capability policy and gated compatibility/local-reflex native lifecycle management; no unevaluated fallback is presented as vision assistance. |
 
-The app uses CameraX `STRATEGY_KEEP_ONLY_LATEST`, closes every `ImageProxy`, and makes the service—not the activity—the camera owner. On Android 14+, a visible activity and user action start the camera foreground service. Camera, socket, and wake resources are released on Stop and critical safety/power conditions.
+The app uses CameraX `STRATEGY_KEEP_ONLY_LATEST`, closes every `ImageProxy`, and makes the service—not the activity—the camera owner. On Android 14+, a visible activity and user action start the camera foreground service. Camera, socket, native ML resources (`ReflexEngine.release()`), and wake resources are released on Stop and critical safety/power conditions.
 
 ### Audio, haptics, and user-facing states
 
-`AlertManager` is the single owner of speech and haptics. It renders server `message_key` and bearing from offline phone templates, so speech does not depend on cloud audio. It applies per-object cooldowns, a minimum speech gap, burst collapse, priority handling, mute expiry, and last-alert repeat. Haptics still fire while speech is muted.
+`AlertManager` is the single owner of speech and haptics. It renders server `message_key` and bearing from offline phone templates, so speech does not depend on cloud audio. It applies per-object cooldowns (5s), a minimum speech gap (2s), burst collapse (3 in 10s -> "Busy road, careful"), priority handling, mute expiry (15m), and last-alert repeat (<30s old). Haptics still fire while speech is muted.
 
 Examples of permitted language are `Obstacle ahead`, `Vehicle nearby, left`, `Camera view unclear`, and `Vision assistance unavailable. Use cane or guide.` The app never converts a detection into distance, approach speed, a safe route, or a crossing recommendation.
 
@@ -168,7 +168,18 @@ wss://HOST/v1/session
 Authorization: Bearer <short-lived RS256 device JWT>
 ```
 
-The server sends `ready` with `max_in_flight: 1` and `vision_enabled`. The client then sends one JSON header followed immediately by one binary JPEG; the response is a compact JSON `result`, `quality`, status, or rejection message.
+The server sends `ready` with payload:
+```json
+{
+  "type": "ready",
+  "max_in_flight": 1,
+  "vision_enabled": true,
+  "alert_max_age_ms": 8500,
+  "client_ip": "1.2.3.4"
+}
+```
+
+The client configures its freshness budget to `max(8500, 2500) = 8500 ms` and then sends one JSON header followed immediately by one binary JPEG; the response is a compact JSON `result`, `quality`, status, or rejection message.
 
 ```json
 {
@@ -217,9 +228,9 @@ The VPC connector reaches Caddy at `worker.akshrava.internal:8443`. mTLS authent
 
 | Area | Implemented components |
 |---|---|
-| Application/session | `application.py`, `main.py`, `session_handler.py`, `protocol.py`, `config.py`, `logging_util.py`, `tracing.py` establish FastAPI lifecycle, WebSocket framing, settings, structured logs, and traces. |
+| Application/session | `application.py`, `main.py`, `session_handler.py`, `protocol.py`, `config.py`, `logging_util.py`, `tracing.py` establish FastAPI lifecycle, WebSocket framing, settings, structured logs, and traces. Session admission cleanup during disconnect is isolated in try/except blocks so Redis errors never leak in-memory session state. |
 | Identity and admission | `auth.py`, `session_admission.py`, `rate_limit.py`, `coordination.py`, `redis_util.py` validate RS256 device tokens, revoke/device-bind sessions, provide fleet-shared rate/session limits, and coordinate replay-safe state. |
-| Vision | `service.py`, `detector.py`, `worker.py`, `cloud_fallback.py`, `model_integrity.py` choose `noop`, local, or remote detection; enforce model integrity and keep remote inference off the control-plane event loop. |
+| Vision | `service.py`, `detector.py`, `worker.py`, `cloud_fallback.py`, `model_integrity.py` choose `noop`, local, or remote detection; enforce model integrity, properly close Pillow Image resources, and keep remote inference off the control-plane event loop. |
 | Alert decisions | `tracker.py`, `hazards.py`, `alert_policy.py`, `composer.py`, `domain.py` associate detections per session, apply geometry/pose validity and conservative policy, then produce a template key, bearing, tier, haptic hint, and honesty metadata. |
 | Data | `storage.py`, `gcp_storage.py` manage PostgreSQL records for devices, calibration profiles, alerts, audit/consent metadata, and optional consented diagnostic storage. Alert writes are scheduled asynchronously and drained safely on shutdown. |
 | Operations | `metrics.py` exports Prometheus metrics; `/readyz` is database-aware readiness; health, error, timing, and pool signals support rollout and alerting. |
@@ -291,7 +302,7 @@ flowchart LR
   CR -. "optional consented diagnostics" .-> GCS["Diagnostics GCS bucket"]
 ```
 
-Terraform in [gcp/](gcp/) covers Cloud Run and migration job, VPC/subnets/private DNS/serverless connector, Cloud SQL, Redis, a private worker (with optional regional MIG HA), TLS wiring, Secret Manager, IAM, Artifact Registry, Cloud Armor, Monitoring, diagnostics GCS, and outputs. PKI material is managed outside Terraform state (`manage_pki_in_terraform=false`) under `gcp/pki/`; treat it as sensitive operational material and rotate it through the documented procedure.
+Terraform in [gcp/](gcp/) covers Cloud Run and migration job, VPC/subnets/private DNS/serverless connector, Cloud SQL, Redis, a private worker (with optional regional MIG HA using safe `try()` index evaluation for forwarding rules), TLS wiring, Secret Manager, IAM (with explicit `depends_on` bindings preventing provisioning race conditions), Artifact Registry, Cloud Armor (with dynamic uptime check evaluation), Monitoring, diagnostics GCS, and outputs. PKI material is managed outside Terraform state (`manage_pki_in_terraform=false`) under `gcp/pki/`; treat it as sensitive operational material and rotate it through the documented procedure.
 
 [infra/docker-compose.yml](infra/docker-compose.yml) provides a local/single-host stack with API, worker, PostgreSQL, Redis, Caddy, Prometheus, Grafana, and Alertmanager. It does not replace GCP's public edge, IAM, private VPC, or managed availability controls.
 

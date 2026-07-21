@@ -54,6 +54,8 @@ class AssistService : LifecycleService() {
         internal const val CAMERA_STALL_CHECK_MS = 5_000L
         /** Floor between notification re-posts; results arrive far faster than this is useful. */
         private const val MIN_NOTIFICATION_INTERVAL_MS = 1_000L
+        /** Floor between quality-driven camera rebinds. Stall recovery bypasses this. */
+        internal const val MIN_QUALITY_REBIND_INTERVAL_MS = 10_000L
     }
 
     private var frameExecutor: ExecutorService? = null
@@ -83,6 +85,7 @@ class AssistService : LifecycleService() {
     private var lastCameraUnclearMs = 0L
     private var lastHeartbeatMs = 0L
     private var lastAnalyzeAtMs = 0L
+    private var lastQualityRebindAtMs = 0L
     private var lastNotificationText: String? = null
     private var lastNotificationAtMs = 0L
     private var queuedNotificationText: String? = null
@@ -310,7 +313,11 @@ class AssistService : LifecycleService() {
         frameExecutor?.shutdownNow(); frameExecutor = null
         frameEncoder = null
         wakeLock?.let { if (it.isHeld) it.release(); wakeLock = null }
+        http?.connectionPool?.evictAll()
+        http?.dispatcher?.executorService?.shutdown()
         http = null
+        reflexEngine.release()
+        reflexEngine = DisabledReflexEngine()
         framePending.set(false)
         deferredAnalysisSide = null
         if (!keepForeground) {
@@ -350,7 +357,7 @@ class AssistService : LifecycleService() {
                 val analysisSide = analysisTargetSide(quality.maxSide)
                 boundAnalysisMaxSide = analysisSide
                 val rotation = currentDisplayRotation()
-                // Some OEMs (incl. OnePlus) deliver black / zero ImageAnalysis frames unless a
+                // Some OEMs deliver black / zero ImageAnalysis frames unless a
                 // Preview use-case is also bound. Drain Preview via ImageReader so the capture
                 // session is not stalled by an undrained SurfaceTexture buffer queue.
                 previewDrain?.release()
@@ -527,6 +534,19 @@ class AssistService : LifecycleService() {
             // #endregion
             if (nearBlack) {
                 framePending.set(false)
+                // lastCaptureMs gates the capture interval above (`now - lastCaptureMs <
+                // captureIntervalMs()`), and every OTHER exit path in this function that reaches
+                // this point updates it. This branch did not, so once the scene went dark
+                // lastCaptureMs froze and the interval gate could never engage again: every
+                // single raw sensor callback (~30 fps on this hardware) fell through to
+                // FrameGate.luma() and re-ran this whole branch, indefinitely, for as long as the
+                // camera stayed dark. A covered lens or a phone carried lens-down in a pocket —
+                // an ordinary way for this user population to carry a phone — turned into an
+                // unthrottled busy loop burning CPU/battery/heat on the exact hardware that can
+                // least afford it, which is a very plausible route to "detection stops working
+                // after a few minutes" that would never show up on a bench test with the phone
+                // sitting lens-up on a desk.
+                lastCaptureMs = now
                 if (now - lastDarkAnnounceMs > 8_000L) {
                     lastDarkAnnounceMs = now
                     updateNotification("Camera is dark — uncover rear lens")
@@ -646,7 +666,30 @@ class AssistService : LifecycleService() {
         scheduleCameraRebind(target)
     }
 
+    /**
+     * Rebind the camera for a new analysis resolution, but not more often than
+     * [MIN_QUALITY_REBIND_INTERVAL_MS].
+     *
+     * The server's quality ladder steps at 150 ms of inference and measured inference on the
+     * live deployment is 129-324 ms, so it sits right on that boundary and the advised max_side
+     * flips between rungs continuously. Every flip used to unbind and rebind CameraX, which
+     * costs 1-2 s of frames each time — observed live as 640 -> 512 -> 640 inside three seconds.
+     * That is a detection blackout the user experiences as intermittent failure, and repeated
+     * rebinds are also how OEM camera HALs get wedged.
+     *
+     * Running one rung off the server's advice for a few seconds is far cheaper than a rebind,
+     * so a too-soon change is simply skipped; quality hints arrive about once a second, so the
+     * next one re-evaluates as soon as the cooldown has passed. Stall recovery deliberately does
+     * NOT come through here — it calls bindCamera() directly and must never be delayed.
+     */
     private fun scheduleCameraRebind(target: Int) {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastQualityRebindAtMs < MIN_QUALITY_REBIND_INTERVAL_MS) {
+            Log.i("AkshravaDebug", "camera_rebind_suppressed target=$target bound=$boundAnalysisMaxSide")
+            deferredAnalysisSide = null
+            return
+        }
+        lastQualityRebindAtMs = now
         boundAnalysisMaxSide = target
         deferredAnalysisSide = null
         ContextCompat.getMainExecutor(this).execute {

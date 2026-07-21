@@ -98,4 +98,23 @@ class SessionDurationTest {
                 < SessionFlags.STALE_AFTER_MS
         )
     }
+
+    @Test
+    fun qualityDrivenCameraRebindsAreRateLimited() {
+        // The backend quality ladder steps at 150 ms of inference and the live deployment runs
+        // 129-324 ms, so the advised max_side flips across that rung constantly. Each flip is a
+        // full CameraX unbind/rebind costing 1-2 s of frames — observed live as 640 -> 512 -> 640
+        // within three seconds. The cooldown must be long enough that oscillation across one
+        // rung boundary cannot translate into repeated camera restarts.
+        assertTrue(
+            "quality rebinds must be spaced further apart than the frame cadence",
+            AssistService.MIN_QUALITY_REBIND_INTERVAL_MS >= 5_000L
+        )
+        // ...but never so long that it delays genuine stall recovery, which bypasses the
+        // cooldown entirely and must still act inside the stale window.
+        assertTrue(
+            "stall recovery must remain far faster than the rebind cooldown allows for quality",
+            AssistService.CAMERA_STALL_REBIND_MS < SessionFlags.STALE_AFTER_MS
+        )
+    }
 }

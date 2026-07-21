@@ -338,63 +338,66 @@ async def session(websocket: WebSocket):
                     decode_ms = resp["decode_ms"]
                     jpeg = message["bytes"]
 
-                    try:
-                        result = await session_application.analyze_frame(state, header, jpeg)
-                    except TransientInferenceError:
-                        # One frame produced nothing usable (slow inference, worker 5xx, queue
-                        # full). Shed it and keep the socket: tearing the session down here made
-                        # a routine CPU-path hiccup cost a full reconnect, and the phone stopped
-                        # streaming until the user pressed Stop/Start. Sustained failure is
-                        # escalated by InferenceCircuitOpenError below, not by this branch.
-                        metrics.worker_saturated()
-                        await websocket.send_json({"type": "error", "code": "worker_saturated"})
-                        continue
-                    except Exception as exc:
-                        # Circuit open means the streak threshold was reached: stop implying the
-                        # phone can see. Everything else (model/runtime) also fails closed.
-                        if isinstance(exc, InferenceCircuitOpenError):
-                            logger.warning(
-                                "inference circuit open for device=%s frame_id=%s",
-                                device_id,
-                                header.frame_id,
-                            )
-                        else:
-                            logger.exception(
-                                "vision inference failed for device=%s frame_id=%s",
-                                device_id,
-                                header.frame_id,
-                            )
-                        metrics.inference_failed()
-                        await websocket.send_json({"type": "error", "code": "vision_unavailable"})
-                        await websocket.close(code=1011)
-                        return
-                    stages = dict(result.get("pipeline_stage_ms", {}))
-                    stages["decode"] = decode_ms
-                    metrics.observe_result(result["server_inference_ms"], result["hazard"] is not None, stages)
-                    if header.capture_epoch_ms is not None:
-                        frame_age_ms = int(result["server_received_epoch_ms"]) - header.capture_epoch_ms
-                        if 0 <= frame_age_ms <= 60_000:
-                            metrics.observe_frame_age(frame_age_ms)
-                    if result.get("late_suppressed"):
-                        metrics.late_suppressed()
-                    await websocket.send_json(result)
-                    # Fail-closed: JWT consent + bucket are not enough until blur exists (Important Architecture.md, privacy).
-                    if (
-                        settings.diagnostic_uploads_enabled
-                        and state.diagnostic_consent
-                        and settings.gcp_diagnostics_bucket
-                    ):
-                        file_name = f"{device_id}/{header.frame_id}_{header.capture_mono_ms}.jpg"
-
-                        async def _upload_diagnostic(name=file_name, payload=jpeg):
-                            try:
-                                await gcp_storage.upload_frame(name, payload)
-                            except Exception:
-                                logger.exception("diagnostic upload failed device=%s", device_id)
-
-                        vision.schedule_diagnostic_upload(_upload_diagnostic())
-
-                    await websocket.send_json(quality_for_inference(result["server_inference_ms"]))
+                    async def process_frame():
+                        try:
+                            result = await session_application.analyze_frame(state, header, jpeg)
+                        except TransientInferenceError:
+                            # One frame produced nothing usable (slow inference, worker 5xx, queue
+                            # full). Shed it and keep the socket: tearing the session down here made
+                            # a routine CPU-path hiccup cost a full reconnect, and the phone stopped
+                            # streaming until the user pressed Stop/Start. Sustained failure is
+                            # escalated by InferenceCircuitOpenError below, not by this branch.
+                            metrics.worker_saturated()
+                            await websocket.send_json({"type": "error", "code": "worker_saturated"})
+                            return
+                        except Exception as exc:
+                            # Circuit open means the streak threshold was reached: stop implying the
+                            # phone can see. Everything else (model/runtime) also fails closed.
+                            if isinstance(exc, InferenceCircuitOpenError):
+                                logger.warning(
+                                    "inference circuit open for device=%s frame_id=%s",
+                                    device_id,
+                                    header.frame_id,
+                                )
+                            else:
+                                logger.exception(
+                                    "vision inference failed for device=%s frame_id=%s",
+                                    device_id,
+                                    header.frame_id,
+                                )
+                            metrics.inference_failed()
+                            await websocket.send_json({"type": "error", "code": "vision_unavailable"})
+                            await websocket.close(code=1011)
+                            return
+                        stages = dict(result.get("pipeline_stage_ms", {}))
+                        stages["decode"] = decode_ms
+                        metrics.observe_result(result["server_inference_ms"], result["hazard"] is not None, stages)
+                        if header.capture_epoch_ms is not None:
+                            frame_age_ms = int(result["server_received_epoch_ms"]) - header.capture_epoch_ms
+                            if 0 <= frame_age_ms <= 60_000:
+                                metrics.observe_frame_age(frame_age_ms)
+                        if result.get("late_suppressed"):
+                            metrics.late_suppressed()
+                        await websocket.send_json(result)
+                        # Fail-closed: JWT consent + bucket are not enough until blur exists (Important Architecture.md, privacy).
+                        if (
+                            settings.diagnostic_uploads_enabled
+                            and state.diagnostic_consent
+                            and settings.gcp_diagnostics_bucket
+                        ):
+                            file_name = f"{device_id}/{header.frame_id}_{header.capture_mono_ms}.jpg"
+    
+                            async def _upload_diagnostic(name=file_name, payload=jpeg):
+                                try:
+                                    await gcp_storage.upload_frame(name, payload)
+                                except Exception:
+                                    logger.exception("diagnostic upload failed device=%s", device_id)
+    
+                            vision.schedule_diagnostic_upload(_upload_diagnostic())
+    
+                        await websocket.send_json(quality_for_inference(result["server_inference_ms"]))
+                        
+                    asyncio.create_task(process_frame())
                 else:
                     await websocket.send_json(resp)
             else:
@@ -417,6 +420,9 @@ async def session(websocket: WebSocket):
             await websocket.close(code=4400)
     finally:
         if session_opened:
-            await session_admission.close(session_id)
+            try:
+                await session_admission.close(session_id)
+            except Exception as e:
+                logger.error(f"Failed to close admission for {session_id}: {e}")
             metrics.session_closed()
         await session_application.close_session(state)

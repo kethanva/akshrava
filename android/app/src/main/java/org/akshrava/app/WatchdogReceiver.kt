@@ -68,6 +68,7 @@ class WatchdogReceiver : BroadcastReceiver() {
                 pendingResult?.finish()
                 return@TextToSpeech
             }
+            tts.language = java.util.Locale(AppConfigStore.load(context).language)
             tts.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
                 override fun onStart(utteranceId: String?) = Unit
                 override fun onDone(utteranceId: String?) {

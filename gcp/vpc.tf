@@ -79,7 +79,7 @@ resource "google_dns_record_set" "worker" {
   # point the same internal DNS name at whichever backend is actually deployed.
   rrdatas = [
     local.worker_ha_enabled
-    ? google_compute_forwarding_rule.worker_ilb[0].ip_address
-    : google_compute_instance.worker[0].network_interface[0].network_ip
+    ? try(google_compute_forwarding_rule.worker_ilb[0].ip_address, "")
+    : try(google_compute_instance.worker[0].network_interface[0].network_ip, "")
   ]
 }

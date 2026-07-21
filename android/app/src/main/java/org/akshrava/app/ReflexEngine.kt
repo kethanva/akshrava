@@ -10,6 +10,9 @@ import java.io.File
 interface ReflexEngine {
     fun evaluate(frame: EncodedFrame): String?
     fun isArmed(): Boolean
+
+    /** Release model/interpreter resources on session teardown. No-op for the disabled engine. */
+    fun release() {}
 }
 
 class DisabledReflexEngine : ReflexEngine {

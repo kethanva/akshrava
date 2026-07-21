@@ -40,17 +40,36 @@ resource "google_secret_manager_secret_iam_member" "api_secret_accessor" {
   member    = "serviceAccount:${google_service_account.api_sa.email}"
   # Secret Manager can 404 briefly after create; pin IAM after secrets exist.
   depends_on = [
-    google_secret_manager_secret.redis_ca,
+    google_secret_manager_secret.jwt_public,
     google_secret_manager_secret.jwt_public_previous,
+    google_secret_manager_secret.jwt_private,
+    google_secret_manager_secret.worker_shared,
+    google_secret_manager_secret.db_password,
+    google_secret_manager_secret.database_url,
+    google_secret_manager_secret.database_url_sync,
+    google_secret_manager_secret.redis_url,
+    google_secret_manager_secret.nonce_redis_url,
+    google_secret_manager_secret.redis_ca,
+    google_secret_manager_secret.worker_tls_ca,
+    google_secret_manager_secret.worker_tls_client_cert,
+    google_secret_manager_secret.worker_tls_client_key,
+    google_secret_manager_secret.metrics_scrape_token
   ]
 }
 
 resource "google_secret_manager_secret_iam_member" "worker_secret_accessor" {
-  for_each   = local.worker_secret_ids
-  secret_id  = each.value
-  role       = "roles/secretmanager.secretAccessor"
-  member     = "serviceAccount:${google_service_account.worker_sa.email}"
-  depends_on = [google_secret_manager_secret.redis_ca]
+  for_each  = local.worker_secret_ids
+  secret_id = each.value
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.worker_sa.email}"
+  depends_on = [
+    google_secret_manager_secret.worker_shared,
+    google_secret_manager_secret.redis_ca,
+    google_secret_manager_secret.worker_tls_ca,
+    google_secret_manager_secret.worker_tls_server_cert,
+    google_secret_manager_secret.worker_tls_server_key,
+    google_secret_manager_secret.metrics_scrape_token
+  ]
 }
 
 resource "google_storage_bucket_iam_member" "api_storage_creator" {

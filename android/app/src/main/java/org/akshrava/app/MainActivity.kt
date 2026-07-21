@@ -170,7 +170,10 @@ class MainActivity : AppCompatActivity() {
             return
         }
         requestBatteryExemption()
-        requestOverlayPermissionIfNeeded()
+        if (requestOverlayPermissionIfNeeded()) {
+            setStatus("Please grant overlay permission and press Start again")
+            return
+        }
         val intent = Intent(this, AssistService::class.java).setAction(AssistService.ACTION_START)
         ContextCompat.startForegroundService(this, intent)
         setStatus(getString(R.string.status_starting))
@@ -193,13 +196,14 @@ class MainActivity : AppCompatActivity() {
      * Without this permission ScreenKeepAlive cannot hold the display awake, the screen sleeps
      * on its normal timeout, OEM ROMs stop CameraX, and the session dies with no visible cause.
      */
-    private fun requestOverlayPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
-        if (Settings.canDrawOverlays(this)) return
+    private fun requestOverlayPermissionIfNeeded(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return false
+        if (Settings.canDrawOverlays(this)) return false
         runCatching {
             startActivity(
                 Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
             )
         }
+        return true
     }
 }

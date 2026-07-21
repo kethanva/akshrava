@@ -13,7 +13,7 @@ import java.util.concurrent.atomic.AtomicInteger
 /**
  * Headless Preview consumer for CameraX.
  *
- * Binding Preview alongside ImageAnalysis is required on some OEMs (incl. OnePlus) or analysis
+ * Binding Preview alongside ImageAnalysis is required on some OEMs or analysis
  * buffers stay black / never arrive. A [android.graphics.SurfaceTexture] that is never drained
  * fills its buffer queue and stalls the whole capture session — including ImageAnalysis.
  * [ImageReader] drains frames without needing an EGL context or on-screen view.
