@@ -6,10 +6,12 @@ storage, making it reusable from a future WebTransport or broker gateway.
 """
 
 import hashlib
+import logging
 
 from .protocol import SUPPORTED_LANGUAGES
 from .domain import FrameHeader, SessionState
 
+logger = logging.getLogger(__name__)
 
 class SessionApplicationService:
     def __init__(self, store, vision):
@@ -26,6 +28,11 @@ class SessionApplicationService:
         # the session so a malformed/absent value on one frame never erases a good prior one.
         if header.language in SUPPORTED_LANGUAGES:
             state.language = header.language
+        
+        if header.debug_telemetry:
+            logger.info("Debug telemetry frame received (id=%s, priority=%s, device=%s)", 
+                        header.frame_id, header.priority, state.device_id)
+
         state.last_capture_mono_ms = header.capture_mono_ms
         result = await self.vision.analyze(state, header, jpeg)
         # Correlates phone/API/GPU logs without exposing a device ID in telemetry or results.

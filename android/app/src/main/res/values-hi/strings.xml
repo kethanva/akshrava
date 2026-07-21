@@ -21,6 +21,7 @@
     <string name="hint_token_saved">डिवाइस टोकन सुरक्षित (बदलने के लिए नया मान लिखें)</string>
     <string name="hint_calibration">कैलिब्रेशन आईडी</string>
     <string name="hint_language">अलर्ट भाषा</string>
+    <string name="debug_telemetry_label">स्थानीय डीबग टेलीमेट्री सक्षम करें</string>
     <string name="language_english">अंग्रेज़ी (भारत)</string>
     <string name="language_hindi">हिन्दी</string>
     <string name="language_tamil">तमिल</string>

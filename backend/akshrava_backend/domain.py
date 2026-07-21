@@ -18,6 +18,7 @@ class FrameHeader:
     priority: bool = False
     trace_id: str = ""
     language: str = ""
+    debug_telemetry: bool = False
 
 
 @dataclass(frozen=True)

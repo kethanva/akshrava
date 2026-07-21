@@ -15,7 +15,8 @@ data class AppConfig(
     val endpoint: String,
     val deviceToken: String,
     val language: String,
-    val calibrationId: String
+    val calibrationId: String,
+    val debugTelemetry: Boolean
 )
 
 object AppConfigStore {
@@ -27,6 +28,7 @@ object AppConfigStore {
     private const val TOKEN_KEY_ALIAS = "akshrava-device-token-v1"
     private const val LANGUAGE = "language"
     private const val CALIBRATION = "calibration"
+    private const val DEBUG_TELEMETRY = "debug_telemetry"
 
     fun load(context: Context): AppConfig {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -34,7 +36,8 @@ object AppConfigStore {
             endpoint = prefs.getString(ENDPOINT, BuildConfig.DEFAULT_WSS_ENDPOINT)!!,
             deviceToken = loadToken(context),
             language = prefs.getString(LANGUAGE, "en-IN")!!,
-            calibrationId = prefs.getString(CALIBRATION, "unprovisioned")!!
+            calibrationId = prefs.getString(CALIBRATION, "unprovisioned")!!,
+            debugTelemetry = prefs.getBoolean(DEBUG_TELEMETRY, false)
         )
     }
 
@@ -48,6 +51,7 @@ object AppConfigStore {
             .putString(ENDPOINT, config.endpoint.trim())
             .putString(LANGUAGE, config.language)
             .putString(CALIBRATION, config.calibrationId.trim())
+            .putBoolean(DEBUG_TELEMETRY, config.debugTelemetry)
             .commit()
         if (!committed) return false
         return saveToken(context, config.deviceToken.trim())

@@ -44,6 +44,7 @@ def parse_frame_header(payload: Dict[str, Any]) -> FrameHeader:
         or str(payload.get("mode", "")) == "priority",
         trace_id=str(payload.get("trace_id", ""))[:64],
         language=str(payload.get("language", ""))[:2].lower(),
+        debug_telemetry=bool(payload.get("debug_telemetry", False)),
     )
 
 

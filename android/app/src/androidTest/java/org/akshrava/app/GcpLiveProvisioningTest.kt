@@ -26,7 +26,7 @@ class GcpLiveProvisioningTest {
         val decision = EndpointPolicy.evaluate(endpoint, debugBuild = true, isEmulator = false)
         assertTrue("Target provisioning must use a live secure WSS endpoint", decision.allowed)
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        assertTrue(AppConfigStore.save(context, AppConfig(endpoint, token, "en-IN", calibrationId)))
+        assertTrue(AppConfigStore.save(context, AppConfig(endpoint, token, "en-IN", calibrationId, false)))
         val saved = AppConfigStore.load(context)
         assertEquals(endpoint, saved.endpoint)
         assertEquals(calibrationId, saved.calibrationId)

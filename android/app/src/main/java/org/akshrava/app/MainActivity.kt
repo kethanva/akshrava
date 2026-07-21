@@ -13,6 +13,7 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.Spinner
@@ -29,6 +30,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var status: TextView
     private lateinit var setupPanel: LinearLayout
     private lateinit var toggleSetup: Button
+    private lateinit var debugTelemetry: CheckBox
 
     private val languageTags = SupportedLanguages.all.map { it.tag }
     private var setupExpanded = false
@@ -62,10 +64,12 @@ class MainActivity : AppCompatActivity() {
         status = findViewById(R.id.status)
         setupPanel = findViewById(R.id.setupPanel)
         toggleSetup = findViewById(R.id.btnToggleSetup)
+        debugTelemetry = findViewById(R.id.debug_telemetry)
 
         val config = AppConfigStore.load(this)
         endpoint.setText(config.endpoint)
         calibration.setText(config.calibrationId)
+        debugTelemetry.isChecked = config.debugTelemetry
         token.apply {
             // Mask bearer tokens; never leave a provisioned secret visible in the form.
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD or
@@ -137,6 +141,7 @@ class MainActivity : AppCompatActivity() {
                 deviceToken = deviceToken,
                 calibrationId = calibration.text.toString(),
                 language = selectedLanguage,
+                debugTelemetry = debugTelemetry.isChecked,
             )
         )
         if (!saved) {

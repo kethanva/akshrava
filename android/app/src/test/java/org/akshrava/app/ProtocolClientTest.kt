@@ -60,6 +60,15 @@ class ProtocolClientTest {
     }
 
     @Test
+    fun closeClassesAreStableAndDoNotNeedServerReasons() {
+        assertEquals("normal", ProtocolClient.closeClass(1000))
+        assertEquals("server_error", ProtocolClient.closeClass(1011))
+        assertEquals("temporary_overload", ProtocolClient.closeClass(1013))
+        assertEquals("authentication", ProtocolClient.closeClass(4401))
+        assertEquals("other", ProtocolClient.closeClass(1006))
+    }
+
+    @Test
     fun softServerErrorsKeepTheSocketAndFreeTheInFlightSlot() {
         assertTrue(ProtocolClient.isSoftServerError("worker_saturated"))
         assertTrue(ProtocolClient.isSoftServerError("frame_rate_limited"))

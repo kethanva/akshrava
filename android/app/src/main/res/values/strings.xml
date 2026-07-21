@@ -21,6 +21,7 @@
     <string name="hint_token_saved">Device token saved (enter a new value to replace)</string>
     <string name="hint_calibration">Calibration ID</string>
     <string name="hint_language">Alert language</string>
+    <string name="debug_telemetry_label">Enable local debug telemetry</string>
     <string name="language_english">English (India)</string>
     <string name="language_hindi">Hindi</string>
     <string name="language_tamil">Tamil</string>

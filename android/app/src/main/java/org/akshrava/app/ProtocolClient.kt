@@ -63,7 +63,8 @@ class ProtocolClient(
     private val onSettleTimeout: () -> Unit = {},
     private val onResultTelemetry: (DetectionTelemetry) -> Unit = {},
     private val language: String = "en",
-    private val http: OkHttpClient = OkHttpClient.Builder().pingInterval(20, TimeUnit.SECONDS).build()
+    private val http: OkHttpClient = OkHttpClient.Builder().pingInterval(20, TimeUnit.SECONDS).build(),
+    private val debugTelemetry: Boolean = false
 ) : WebSocketListener() {
     internal companion object {
         const val MAX_BACKOFF_ATTEMPT = 4          // 2^4 = 16 s, capped to 10 s
@@ -130,6 +131,16 @@ class ProtocolClient(
             else -> "http"
         }
 
+        /** Stable, reason-free class for close diagnostics. */
+        fun closeClass(code: Int): String = when (code) {
+            1000 -> "normal"
+            1001 -> "peer_going_away"
+            1011 -> "server_error"
+            1013 -> "temporary_overload"
+            4401, 4403 -> "authentication"
+            else -> "other"
+        }
+
         /** App-level ping keeps the Redis admission lease warm when capture is briefly quiet. */
         const val APP_PING_INTERVAL_MS = 60_000L
     }
@@ -151,17 +162,19 @@ class ProtocolClient(
     @Volatile private var pendingLook = false
     @Volatile private var frameSentAtMonoMs = 0L
     @Volatile private var consecutiveSettleTimeouts = 0
+    @Volatile private var connectedAtMonoMs = 0L
 
     fun connect() {
         if (endpoint.isBlank() || token.isBlank()) {
+            logConnection("connect_rejected", mapOf("reason" to "missing_provisioning"))
             onState("Provisioning required")
             return
         }
         closedByUser = false
-        openSocket()
+        openSocket("initial")
     }
 
-    private fun openSocket() {
+    private fun openSocket(origin: String) {
         if (closedByUser) return
         pendingReconnect?.cancel(false)
         pendingReconnect = null
@@ -169,6 +182,15 @@ class ProtocolClient(
         socket = null
         previous?.cancel()
         val generation = connectionGeneration.incrementAndGet()
+        logConnection(
+            "connect_attempt",
+            mapOf(
+                "origin" to origin,
+                "generation" to generation,
+                "reconnectAttempt" to reconnectAttempt,
+                "replacedSocket" to (previous != null)
+            )
+        )
         val opened = http.newWebSocket(
             Request.Builder().url(endpoint).header("Authorization", "Bearer $token").build(),
             GenerationGuard(generation)
@@ -216,6 +238,10 @@ class ProtocolClient(
             .put("priority", look)
             .put("language", wireLanguage(language))
             .put("trace_id", "frame-$frameId-$captureMonoMs")
+        
+        if (debugTelemetry) {
+            header.put("debug_telemetry", true)
+        }
         // Header and JPEG are a pair in the server protocol.  OkHttp queues WebSocket messages
         // independently, so if it accepts the header but rejects the JPEG we must tear down the
         // socket rather than let the next JPEG attach to this header.
@@ -262,7 +288,7 @@ class ProtocolClient(
                 if (!closedByUser && consecutiveSettleTimeouts >= SETTLE_TIMEOUTS_BEFORE_RECONNECT) {
                     consecutiveSettleTimeouts = 0
                     socket?.cancel()
-                    scheduleReconnect()
+                    scheduleReconnect("repeated_settle_timeout")
                 }
             }, FRAME_SETTLE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         }.getOrNull()
@@ -297,10 +323,13 @@ class ProtocolClient(
     override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = Unit
 
     private fun handleOpen() {
+        val recovered = outageAnnounced
         reconnectAttempt = 0
         sessionReady = false
         visionEnabled = false
         cloudFallbackWarningAnnounced = false
+        connectedAtMonoMs = SystemClock.elapsedRealtime()
+        logConnection("transport_open", mapOf("recovered" to recovered))
         Log.i("AkshravaDebug", "ws_open endpoint_class=${EndpointPolicy.classify(endpoint).logValue}")
         if (outageAnnounced) {
             outageAnnounced = false
@@ -327,6 +356,15 @@ class ProtocolClient(
                     "AkshravaDebug",
                     "ws_ready detector=${payload.optString("detector", "unknown")} vision_enabled=$visionEnabled " +
                         "session_ready=$sessionReady max_in_flight=$advertised alert_max_age_ms=$configuredStaleAlertMs"
+                )
+                logConnection(
+                    "vision_ready",
+                    mapOf(
+                        "detector" to payload.optString("detector", "unknown"),
+                        "visionEnabled" to visionEnabled,
+                        "maxInFlight" to advertised,
+                        "alertMaxAgeMs" to configuredStaleAlertMs
+                    )
                 )
                 // #region agent log
                 AgentDebugLog.log(
@@ -524,10 +562,12 @@ class ProtocolClient(
         reconnect.shutdownNow()
     }
 
-    private fun handleDrop() {
+    private fun handleDrop(cause: String) {
         settleFrame()
         cancelSettleTimeout()
         cancelAppPing()
+        val wasReady = sessionReady
+        val wasVisionEnabled = visionEnabled
         // #region agent log
         Log.i("AkshravaDebug", "ws_drop sessionReady=$sessionReady visionEnabled=$visionEnabled")
         AgentDebugLog.log(
@@ -539,6 +579,15 @@ class ProtocolClient(
         // #endregion
         sessionReady = false
         visionEnabled = false
+        logConnection(
+            "transport_drop",
+            mapOf(
+                "cause" to cause,
+                "wasReady" to wasReady,
+                "wasVisionEnabled" to wasVisionEnabled,
+                "connectedForMs" to connectedDurationMs()
+            )
+        )
         if (closedByUser) return
         if (!outageAnnounced) {
             outageAnnounced = true
@@ -548,7 +597,7 @@ class ProtocolClient(
             onState(message)
             alertManager.status(message)
         }
-        scheduleReconnect()
+        scheduleReconnect(cause)
     }
 
     private fun scheduleAppPing() {
@@ -560,6 +609,7 @@ class ProtocolClient(
                 // OkHttp protocol pings do not reach FastAPI; this JSON ping renews admission.
                 if (!ws.send(JSONObject().put("type", "ping").toString())) {
                     Log.i("AkshravaDebug", "ws_app_ping_failed")
+                    logConnection("app_ping_send_failed")
                 }
             }, APP_PING_INTERVAL_MS, APP_PING_INTERVAL_MS, TimeUnit.MILLISECONDS)
         }.getOrNull()
@@ -570,14 +620,22 @@ class ProtocolClient(
         pendingAppPing = null
     }
 
-    private fun scheduleReconnect() {
+    private fun scheduleReconnect(cause: String) {
         if (closedByUser) return
         pendingReconnect?.cancel(false)
         val backoffSeconds = min(MAX_BACKOFF_SECONDS, 2.0.pow(reconnectAttempt.toDouble()))
-        reconnectAttempt = (reconnectAttempt + 1).coerceAtMost(MAX_BACKOFF_ATTEMPT)
+        val attempt = reconnectAttempt + 1
+        reconnectAttempt = attempt.coerceAtMost(MAX_BACKOFF_ATTEMPT)
         val delayMs = ((backoffSeconds + Random.nextDouble(0.0, 0.5)) * 1000).toLong()
+        logConnection(
+            "reconnect_scheduled",
+            mapOf("cause" to cause, "attempt" to attempt, "delayMs" to delayMs)
+        )
         pendingReconnect = runCatching {
-            reconnect.schedule({ openSocket() }, delayMs, TimeUnit.MILLISECONDS)
+            reconnect.schedule({
+                logConnection("reconnect_executing", mapOf("attempt" to attempt))
+                openSocket("reconnect")
+            }, delayMs, TimeUnit.MILLISECONDS)
         }.getOrNull()
     }
 
@@ -588,7 +646,24 @@ class ProtocolClient(
         if (inFlight.getAndSet(false)) onFrameSettled()
     }
 
+    private fun connectedDurationMs(): Long =
+        connectedAtMonoMs.takeIf { it > 0L }?.let { SystemClock.elapsedRealtime() - it } ?: -1L
+
+    /** Fields are deliberately limited to state and timing; never pass tokens, URLs, images, or IDs. */
+    private fun logConnection(event: String, data: Map<String, Any?> = emptyMap()) {
+        val details = data.entries.joinToString(" ") { "${it.key}=${it.value}" }
+        Log.i(
+            "AkshravaConnection",
+            "event=$event endpoint_class=${EndpointPolicy.classify(endpoint).logValue}" +
+                if (details.isBlank()) "" else " $details"
+        )
+        if (debugTelemetry) {
+            AgentDebugLog.log("H2", "ProtocolClient.connection", event, data)
+        }
+    }
+
     fun close() {
+        logConnection("client_close", mapOf("connectedForMs" to connectedDurationMs()))
         closedByUser = true
         connectionGeneration.incrementAndGet()
         pendingReconnect?.cancel(false)
@@ -619,12 +694,25 @@ class ProtocolClient(
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
             if (!isCurrentGeneration(generation)) return
+            logConnection(
+                "server_closing",
+                mapOf("generation" to generation, "code" to code, "closeClass" to closeClass(code))
+            )
             settleFrame()
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             if (!isCurrentGeneration(generation)) return
             Log.i("AkshravaDebug", "ws_closed code=$code endpoint_class=${EndpointPolicy.classify(endpoint).logValue}")
+            logConnection(
+                "server_closed",
+                mapOf(
+                    "generation" to generation,
+                    "code" to code,
+                    "closeClass" to closeClass(code),
+                    "connectedForMs" to connectedDurationMs()
+                )
+            )
             if (isPermanentAccessClose(code)) {
                 val message = if (code == 4403) {
                     "Device access has been revoked. Ask a volunteer to provision this phone."
@@ -633,7 +721,7 @@ class ProtocolClient(
                 }
                 handlePermanentFailure(message)
             } else {
-                handleDrop()
+                handleDrop("closed_${closeClass(code)}")
             }
         }
 
@@ -645,10 +733,20 @@ class ProtocolClient(
                     "http_status=${response?.code ?: "none"} failure_class=${transportFailureClass(response?.code)} " +
                     "error_type=${t.javaClass.simpleName}"
             )
+            logConnection(
+                "transport_failure",
+                mapOf(
+                    "generation" to generation,
+                    "httpStatus" to (response?.code ?: "none"),
+                    "failureClass" to transportFailureClass(response?.code),
+                    "errorType" to t.javaClass.simpleName,
+                    "connectedForMs" to connectedDurationMs()
+                )
+            )
             if (response?.code == 401 || response?.code == 403) {
                 handlePermanentFailure("Device authentication failed. Ask a volunteer to provision a new token.")
             } else {
-                handleDrop()
+                handleDrop("failure_${transportFailureClass(response?.code)}")
             }
         }
     }

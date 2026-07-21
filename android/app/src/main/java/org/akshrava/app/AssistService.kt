@@ -13,6 +13,7 @@ import android.graphics.Color
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Handler
+import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
@@ -72,6 +73,7 @@ class AssistService : LifecycleService() {
     private var cameraLifecycleOwner: CameraLifecycleOwner? = null
     private var previewDrain: PreviewSurfaceDrain? = null
     private var screenKeepAlive: ScreenKeepAlive? = null
+    private var osLifecycleReceiver: android.content.BroadcastReceiver? = null
     private var lastDarkAnnounceMs = 0L
     private var framesAnalyzed = 0L
     private val framePending = AtomicBoolean(false)
@@ -172,8 +174,8 @@ class AssistService : LifecycleService() {
             teardownSessionResources(keepForeground = true)
         }
         stopping = false
-        AgentDebugLog.bind(this)
         val config = AppConfigStore.load(this)
+        AgentDebugLog.bind(this, config.debugTelemetry)
         Log.i("AkshravaDebug", "svc_start endpoint=${config.endpoint} calib=${config.calibrationId} lang=${config.language} hasToken=${config.deviceToken.isNotBlank()}")
         // #region agent log
         AgentDebugLog.log(
@@ -249,7 +251,8 @@ class AssistService : LifecycleService() {
                 }
             },
             language = config.language,
-            http = httpClient
+            http = httpClient,
+            debugTelemetry = config.debugTelemetry
         ).also { client = it }
         pc.connect()
         reflexEngine = ReflexFactory.create(this)
@@ -276,6 +279,24 @@ class AssistService : LifecycleService() {
             )
         )
         // #endregion
+        if (config.debugTelemetry) {
+            osLifecycleReceiver = object : android.content.BroadcastReceiver() {
+                override fun onReceive(context: Context?, intent: Intent?) {
+                    AgentDebugLog.log(
+                        "H6",
+                        "AssistService.osLifecycleReceiver",
+                        "os_event",
+                        mapOf("action" to intent?.action)
+                    )
+                }
+            }
+            val filter = IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_OFF)
+                addAction(Intent.ACTION_SCREEN_ON)
+                addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED)
+            }
+            registerReceiver(osLifecycleReceiver, filter)
+        }
         bindCamera()
         SessionFlags.setActive(this, true)
         Watchdog.schedule(this)
@@ -304,6 +325,10 @@ class AssistService : LifecycleService() {
         headsetControls?.stop()
         headsetControls = null
         screenKeepAlive?.stop(); screenKeepAlive = null
+        osLifecycleReceiver?.let {
+            try { unregisterReceiver(it) } catch (e: Exception) {}
+            osLifecycleReceiver = null
+        }
         cameraProvider?.unbindAll()
         previewDrain?.release(); previewDrain = null
         cameraLifecycleOwner?.destroy(); cameraLifecycleOwner = null
@@ -906,5 +931,22 @@ class AssistService : LifecycleService() {
         stopSelf()
     }
 
-    override fun onDestroy() { stopAssistance(); super.onDestroy() }
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        AgentDebugLog.log("H7", "AssistService.onTrimMemory", "memory_pressure", mapOf("level" to level))
+        Log.w("AkshravaDebug", "onTrimMemory level=$level")
+    }
+
+    override fun onLowMemory() {
+        super.onLowMemory()
+        AgentDebugLog.log("H7", "AssistService.onLowMemory", "memory_pressure", mapOf("state" to "low"))
+        Log.w("AkshravaDebug", "onLowMemory")
+    }
+
+    override fun onDestroy() { 
+        AgentDebugLog.log("H7", "AssistService.onDestroy", "service_destroyed", mapOf("stopping" to stopping))
+        Log.w("AkshravaDebug", "AssistService onDestroy stopping=$stopping")
+        stopAssistance()
+        super.onDestroy() 
+    }
 }
