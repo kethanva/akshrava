@@ -61,6 +61,16 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+      - name: Upload reusable instrumentation APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: akshrava-instrumentation-apks
+          path: |
+            android/app/build/outputs/apk/debug/app-debug.apk
+            android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+          retention-days: 7
+          if-no-files-found: error
+
       # Without ANDROID_KEYSTORE_* secrets, AGP emits app-release-unsigned.apk.
       # With secrets present (optional on main), it emits app-release.apk.
       - name: Upload release APK artifact
@@ -79,6 +89,7 @@ jobs:
     needs: build
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
         include:
           # API 26/27 only publish 32-bit default images on x86.
@@ -107,22 +118,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
+      - name: Download instrumentation APKs
+        uses: actions/download-artifact@v4
         with:
-          distribution: temurin
-          java-version: "17"
-          cache: gradle
-
-      - uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK platform
-        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
-
-      # Rebuild in-job: connectedDebugAndroidTest installs from Gradle outputs,
-      # so downloading prebuilt APKs would be unused and misleading.
-      - name: Assemble APKs for instrumented tests
-        working-directory: android
-        run: ./gradlew --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest
+          name: akshrava-instrumentation-apks
+          path: instrumentation-apks
 
       - name: Run instrumented tests on API ${{ matrix.api }}
         uses: reactivecircus/android-emulator-runner@v2
@@ -131,16 +131,17 @@ jobs:
           target: default
           arch: ${{ matrix.arch }}
           profile: Nexus 6
-          disable-animations: true
+          emulator-boot-timeout: 1200
+          disable-animations: false
           pre-emulator-launch-script: sudo chmod 666 /dev/kvm
-          emulator-options: -no-snapshot -no-window -gpu swiftshader_indirect
-          script: cd android && ./gradlew --no-daemon :app:connectedDebugAndroidTest
+          emulator-options: -no-snapshot -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: ./scripts/run_android_instrumentation.sh instrumentation-apks/app-debug.apk instrumentation-apks/app-debug-androidTest.apk android-test-results/api-${{ matrix.api }}
 
       - name: Upload test results (API ${{ matrix.api }})
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: test-results-api-${{ matrix.api }}
-          path: android/app/build/reports/
+          path: android-test-results/api-${{ matrix.api }}/
           retention-days: 7
-          if-no-files-found: ignore
+          if-no-files-found: warn
