@@ -186,13 +186,16 @@ class Store:
                         await retry_session.commit()
 
     async def geometry_profile(self, calibration_id: str):
-        """Return a profile; uses a fallback for unprovisioned testing."""
+        """Return only a verified profile; unverified or unknown IDs fail closed.
+
+        A generic fallback is explicitly rejected: both range estimates built from the same
+        assumed constants will artificially agree, satisfying _range_valid() and allowing a
+        single-frame S1 urgent alert from fabricated geometry on any unprovisioned phone.
+        Verified calibration requires a controlled-course sign-off.
+        """
         async with self.sessions() as session:
             record = await session.get(CalibrationProfileRecord, calibration_id)
             if record is None or not record.verified:
-                if calibration_id in ("unprovisioned", ""):
-                    logger.warning(f"Using generic fallback geometry profile for {calibration_id}")
-                    return GeometryProfile(calibration_id, 480.0, 1.2, 480)
                 return None
             return GeometryProfile(
                 record.calibration_id,

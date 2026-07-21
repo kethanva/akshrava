@@ -192,6 +192,12 @@ class HazardScorer:
         for track in state.tracks:
             if track.confidence < MIN_CONFIDENCE:
                 continue
+            # A track that was not matched in the current frame has drifted from what the
+            # detector actually saw now. Scoring a missed track produces a phantom alert from a
+            # box that may belong to an object that already left the scene; at 0.2 FPS stationary
+            # rate that ghost can persist for ~25 s. Only score tracks matched in this frame.
+            if track.missed > 0:
+                continue
 
             is_vehicle = track.label in VEHICLE_LABELS
             is_obstacle = track.label in OBSTACLE_LABELS
