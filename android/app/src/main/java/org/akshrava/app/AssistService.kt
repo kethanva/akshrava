@@ -44,14 +44,14 @@ class AssistService : LifecycleService() {
         private const val THERMAL_CHECK_INTERVAL_MS = 30_000L
         private const val THERMAL_THROTTLE_C = 43f
         private const val THERMAL_CLEAR_C = 41f
-        private const val HEARTBEAT_INTERVAL_MS = 30_000L
+        internal const val HEARTBEAT_INTERVAL_MS = 30_000L
         /** Partial wake lock is timed so a hung teardown cannot hold the CPU forever. */
-        private const val WAKE_LOCK_TIMEOUT_MS = 60 * 60_000L
+        internal const val WAKE_LOCK_TIMEOUT_MS = 60 * 60_000L
         /** Hard upper bound on FGS teardown even if TTS never completes. */
         private const val STOP_HARD_TIMEOUT_MS = 3_000L
         /** Rebind CameraX when analysis callbacks go silent while the session is meant to be live. */
-        private const val CAMERA_STALL_REBIND_MS = 15_000L
-        private const val CAMERA_STALL_CHECK_MS = 5_000L
+        internal const val CAMERA_STALL_REBIND_MS = 15_000L
+        internal const val CAMERA_STALL_CHECK_MS = 5_000L
         /** Floor between notification re-posts; results arrive far faster than this is useful. */
         private const val MIN_NOTIFICATION_INTERVAL_MS = 1_000L
     }
@@ -105,16 +105,22 @@ class AssistService : LifecycleService() {
 
     private val cameraStallCheck = object : Runnable {
         override fun run() {
-            if (stopping || client == null) return
-            val now = SystemClock.elapsedRealtime()
-            val last = lastAnalyzeAtMs
-            if (last > 0L && now - last > CAMERA_STALL_REBIND_MS) {
-                Log.w("AkshravaDebug", "camera_stall rebind after=${now - last}ms")
-                lastAnalyzeAtMs = now
-                framePending.set(false)
-                deferredAnalysisSide = null
-                alertManager?.status("Camera stalled. Recovering.")
-                bindCamera()
+            // Only `stopping` ends the loop. Returning early on a transient `client == null`
+            // skipped the re-post at the bottom, so the stall detector died permanently the
+            // first time it happened to run mid-teardown — and from then on a camera that went
+            // silent was never rebound and the session was over until a manual Stop/Start.
+            if (stopping) return
+            if (client != null) {
+                val now = SystemClock.elapsedRealtime()
+                val last = lastAnalyzeAtMs
+                if (last > 0L && now - last > CAMERA_STALL_REBIND_MS) {
+                    Log.w("AkshravaDebug", "camera_stall rebind after=${now - last}ms")
+                    lastAnalyzeAtMs = now
+                    framePending.set(false)
+                    deferredAnalysisSide = null
+                    alertManager?.status("Camera stalled. Recovering.")
+                    bindCamera()
+                }
             }
             mainHandler.postDelayed(this, CAMERA_STALL_CHECK_MS)
         }
@@ -216,20 +222,25 @@ class AssistService : LifecycleService() {
             onMute = { am.muteFor(15 * 60_000L) },
             onLook = { lookRequested.set(true); am.acknowledgeLook() }
         ).also { it.start() }
-        screenKeepAlive = ScreenKeepAlive(this).also { it.start() }
+        // A session only survives a long walk if the display stays awake: many OEM ROMs stop
+        // delivering CameraX frames once the screen sleeps, which ends the walk silently. The
+        // overlay is the only thing that guarantees it, and it needs a permission the user must
+        // grant by hand, so treat a failure here as a first-class warning rather than a detail.
+        val holdingScreenOn = ScreenKeepAlive(this).also { screenKeepAlive = it }.start()
         bindCamera()
         SessionFlags.setActive(this, true)
         Watchdog.schedule(this)
         mainHandler.removeCallbacks(cameraStallCheck)
         mainHandler.postDelayed(cameraStallCheck, CAMERA_STALL_CHECK_MS)
-        val keepScreenHint = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
-            !android.provider.Settings.canDrawOverlays(this)
-        // Without overlay keep-alive, OEM ROMs often kill CameraX after the display sleeps.
+        Log.i("AkshravaDebug", "svc_started screen_keep_alive=$holdingScreenOn")
         am.status(
-            if (keepScreenHint) {
-                "Assistance started. Keep the screen on so the camera can see."
-            } else {
+            if (holdingScreenOn) {
                 "Assistance started"
+            } else {
+                // Say what to do, not just that something is missing: this user cannot see the
+                // screen time out and will otherwise experience it as the app dying by itself.
+                "Assistance started. Keep the screen on, or assistance will stop when it sleeps. " +
+                    "Ask a volunteer to allow Display over other apps."
             }
         )
     }

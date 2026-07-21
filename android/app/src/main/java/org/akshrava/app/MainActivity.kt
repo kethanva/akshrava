@@ -48,6 +48,11 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE)
+        // Needs no permission and costs nothing: while this screen is in front, the display will
+        // not sleep. That covers the window between pressing Start and the service taking over,
+        // which is exactly when a screen timeout would otherwise stop CameraX before the first
+        // frame. ScreenKeepAlive's overlay is still what protects the rest of the walk.
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContentView(R.layout.activity_main)
 
         endpoint = findViewById(R.id.endpoint)
@@ -165,6 +170,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         requestBatteryExemption()
+        requestOverlayPermissionOnce()
         val intent = Intent(this, AssistService::class.java).setAction(AssistService.ACTION_START)
         ContextCompat.startForegroundService(this, intent)
         setStatus(getString(R.string.status_starting))
@@ -179,5 +185,31 @@ class MainActivity : AppCompatActivity() {
                 )
             }
         }
+    }
+
+    /**
+     * Send a sighted helper to the overlay-permission screen, once, before the first walk.
+     *
+     * Without this permission ScreenKeepAlive cannot hold the display awake, the screen sleeps
+     * on its normal timeout, OEM ROMs stop CameraX, and the session dies a couple of minutes in
+     * with no visible cause. It is not a runtime permission, so it can only be granted from
+     * Settings — the app has to send the user there or it will never be on.
+     */
+    private fun requestOverlayPermissionOnce() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        if (Settings.canDrawOverlays(this)) return
+        val prefs = getSharedPreferences("akshrava", MODE_PRIVATE)
+        if (prefs.getBoolean(OVERLAY_PROMPTED, false)) return
+        // Ask at most once so a user who deliberately declined is not re-interrupted every Start.
+        prefs.edit().putBoolean(OVERLAY_PROMPTED, true).apply()
+        runCatching {
+            startActivity(
+                Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+            )
+        }
+    }
+
+    private companion object {
+        const val OVERLAY_PROMPTED = "overlay_permission_prompted"
     }
 }

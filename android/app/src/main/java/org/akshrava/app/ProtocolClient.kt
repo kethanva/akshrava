@@ -70,8 +70,18 @@ class ProtocolClient(
         const val MAX_BACKOFF_SECONDS = 10.0
         /**
          * End-to-end phone freshness budget: age = elapsedRealtime() - capture_mono_ms.
-         * Must cover the live CPU remote YOLO path (server ALERT_MAX_AGE_MS=8500 plus uplink).
-         * GPU / tight pilots can still shed quality; late results remain diagnostics only.
+         *
+         * A hazard older than this is never spoken — the user has already walked past it. Keep
+         * this tight; it is a safety boundary, not a tuning knob.
+         *
+         * Measured against the live remote deployment with realistic 640x480 q55 frames
+         * (scripts/soak_session.py): RTT median 498 ms, p90 618 ms, max 752 ms, of which server
+         * inference was 129-324 ms. That is roughly 4x headroom, so 2500 ms suppresses nothing
+         * in practice today. An earlier note here claimed this had to cover a worst-case
+         * ALERT_MAX_AGE_MS=8500 CPU path and should therefore be 9000 ms; the deployment is far
+         * faster than that assumption, and widening the budget to 9 s would licence speaking
+         * about an obstacle the user passed nine seconds ago. If the backend is ever moved to a
+         * genuinely slow inference path, fix the latency rather than widening this.
          */
         const val STALE_ALERT_MS = 2_500L
         /** Look answers use the full freshness budget even when the hazard is S1. */
