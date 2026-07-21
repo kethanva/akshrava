@@ -439,6 +439,8 @@ Useful operational scripts:
 
 CI is defined in [.github/workflows/ci.yml](.github/workflows/ci.yml), Android build and compatibility coverage in [.github/workflows/android-pipeline.yml](.github/workflows/android-pipeline.yml) and [.github/workflows/android-compatibility.yml](.github/workflows/android-compatibility.yml), and the release pipeline in [.github/workflows/release.yml](.github/workflows/release.yml).
 
+Pushing a version tag (`vX.Y.Z`) runs the release matrix, signs and publishes one universal Android APK, generates `SHA256SUMS.txt`, and deploys a GitHub Pages download site. The download page lists Android API 26–36 and points every supported version to that same signed APK; API 26/27 are legacy release-smoke-tested compatibility targets that still require device-specific qualification, while API 28–36 are the primary release-validation matrix. Enable **Settings → Pages → Source → GitHub Actions** once to allow the deployment job to publish the site.
+
 The compatibility workflows run API 26–36 emulator smoke tests (Android 8 through the current
 API level), plus JVM tests and debug APK assembly. API 28–36 (Android 9 through Android 16,
 including Android 12L/API 32) are the release-validation matrix; API 26/27 are legacy build and
