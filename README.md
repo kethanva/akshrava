@@ -146,7 +146,7 @@ The app has `minSdk 26` (Android 8). Android 8/9 are compatibility tiers; the su
 | `FrameEncoder` | Allocation-conscious NV21 rotate/scale and JPEG encoding; no base64 or video stream. |
 | `ProtocolClient`, `LinkQualityController`, `SessionFlags` | WSS protocol, reconnect/backoff, bounded quality adaptation, one-flight backpressure, dynamic `alert_max_age_ms` negotiation, stale-result rejection. |
 | `AlertManager`, `HeadsetControls`, `StopReceiver` | Single speaking lane, locale-aware offline TTS, haptic arbitration, mute expiry (15m), repeat/stop controls, and safe notification/headset handling. |
-| `Watchdog`, `WatchdogReceiver`, `ScreenKeepAlive` | Explicit recovery prompt (matching user locale) and OEM-specific service-survival support; they never silently restart camera capture. |
+| `Watchdog`, `WatchdogReceiver`, `ScreenKeepAlive`, `AgentDebugLog` | Explicit recovery prompt (matching user locale), OEM-specific service-survival support (wake-locks/overlays), and NDJSON debug telemetry; they never silently restart camera capture. |
 | `AndroidSupportMatrix`, `DeviceCapability`, `ReflexEngine` | Device capability policy and gated compatibility/local-reflex native lifecycle management; no unevaluated fallback is presented as vision assistance. |
 
 The app uses CameraX `STRATEGY_KEEP_ONLY_LATEST`, closes every `ImageProxy`, and makes the service—not the activity—the camera owner. On Android 14+, a visible activity and user action start the camera foreground service. Camera, socket, native ML resources (`ReflexEngine.release()`), and wake resources are released on Stop and critical safety/power conditions.
@@ -389,10 +389,17 @@ It creates the backend virtual environment when required, runs the backend test 
 ./scripts/install_android_debug.sh
 ```
 
+For a complete end-to-end setup that also provisions the Keystore and verifies the live GCP connection, use:
+
+```bash
+./scripts/install_android_debug_full.sh
+```
+
 Useful operational scripts:
 
 | Script | Purpose |
 |---|---|
+| `scripts/install_android_debug_full.sh` | End-to-end build, Keystore provisioning, and live WSS verification on a device. |
 | `scripts/run_backend_dev.sh` | Start the local backend; check `/readyz`. |
 | `scripts/test_backend.sh` | Run backend tests directly. |
 | `scripts/gcp_preflight.sh` | Format/validate Terraform and verify remote-detector prerequisites. |
