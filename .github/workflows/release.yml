@@ -75,11 +75,29 @@ jobs:
           name: release-instrumentation-apks
           path: instrumentation-apks
       - uses: reactivecircus/android-emulator-runner@v2
+        id: primary_emulator
+        continue-on-error: true
         with:
           api-level: ${{ matrix.api }}
           target: default
           arch: ${{ matrix.arch }}
           profile: Nexus 6
+          emulator-boot-timeout: 1200
+          disable-animations: false
+          pre-emulator-launch-script: sudo chmod 666 /dev/kvm
+          emulator-options: -no-snapshot -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: ./scripts/run_android_instrumentation.sh instrumentation-apks/app-debug.apk instrumentation-apks/app-debug-androidTest.apk android-test-results/api-${{ matrix.api }}
+      - uses: reactivecircus/android-emulator-runner@v2
+        if: steps.primary_emulator.outcome == 'failure'
+        env:
+          ANDROID_SERIAL: emulator-5556
+        with:
+          api-level: ${{ matrix.api }}
+          target: default
+          arch: ${{ matrix.arch }}
+          profile: Nexus 6
+          avd-name: retry-${{ matrix.api }}
+          emulator-port: 5556
           emulator-boot-timeout: 1200
           disable-animations: false
           pre-emulator-launch-script: sudo chmod 666 /dev/kvm
