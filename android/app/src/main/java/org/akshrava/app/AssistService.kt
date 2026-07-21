@@ -140,18 +140,13 @@ class AssistService : LifecycleService() {
     }
 
     private fun startAssistance() {
-        if (stopping) return
-        // Pressing Start while a half-dead session is still up used to no-op (client != null),
-        // forcing Stop→Start. Rebuild in place so Start itself is the recovery action.
-        if (client != null) {
-            Log.i("AkshravaDebug", "svc_restart rebuilding live session")
+        if (stopping) {
+            Log.i("AkshravaDebug", "svc_start interrupted active teardown; rebuilding session")
             teardownSessionResources(keepForeground = true)
         }
         stopping = false
         val config = AppConfigStore.load(this)
-        // #region agent log
         Log.i("AkshravaDebug", "svc_start endpoint=${config.endpoint} calib=${config.calibrationId} lang=${config.language} hasToken=${config.deviceToken.isNotBlank()}")
-        // #endregion
         if (!endpointAllowed(config.endpoint)) {
             stopSelf()
             return

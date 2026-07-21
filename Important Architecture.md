@@ -222,7 +222,7 @@ Ground-plane geometry may derive a rough band from a verified mount height, pitc
 
 ### Conservative hazard decision
 
-The scorer considers class, detector confidence, valid proximity, central path corridor and multi-frame stability. S1 urgent output is reserved for a validated nearby central obstruction (`range_valid` plus confidence); S2/caution requires repeated evidence. Vehicle language is awareness-only. On-demand **priority look** (`FrameHeader.priority` or `mode=priority`) skips alert cooldowns / device rate limits and returns a `look_summary` for that frame; the phone speaks it only within the configured speak budget (CPU pilot ~9 s; GPU target 2500 ms). Look never invents approach or crossing advice. MediaSession long-press can request a priority frame after device-specific testing.
+The scorer considers class, detector confidence, valid proximity, central path corridor and multi-frame stability. S1 urgent output is reserved for a validated nearby central obstruction (`range_valid` plus confidence); S2/caution requires repeated evidence. Vehicle language is awareness-only. On-demand **priority look** (`FrameHeader.priority` or `mode=priority`) skips alert cooldowns / device rate limits and returns a `look_summary` for that frame; the phone speaks it only within the configured speak budget (`ALERT_MAX_AGE_MS=8500` for CPU remote pilot, `2500` for GPU/noop, advertised in the WebSocket `ready` payload). Look never invents approach or crossing advice. MediaSession long-press can request a priority frame after device-specific testing.
 
 | Condition | Permitted response | Never infer |
 |---|---|---|

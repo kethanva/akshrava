@@ -301,9 +301,7 @@ class ProtocolClient(
         sessionReady = false
         visionEnabled = false
         cloudFallbackWarningAnnounced = false
-        // #region agent log
         Log.i("AkshravaDebug", "ws_open endpoint_class=${EndpointPolicy.classify(endpoint).logValue}")
-        // #endregion
         if (outageAnnounced) {
             outageAnnounced = false
             alertManager.status("Connection restored")
@@ -323,7 +321,6 @@ class ProtocolClient(
                 visionEnabled = payload.optBoolean("vision_enabled", false)
                 val serverMaxAge = payload.optLong("alert_max_age_ms", STALE_ALERT_MS)
                 configuredStaleAlertMs = serverMaxAge.coerceAtLeast(STALE_ALERT_MS)
-                // #region agent log
                 val advertised = payload.optInt("max_in_flight", 1).coerceIn(1, 2)
                 maxInFlight = advertised
                 Log.i(

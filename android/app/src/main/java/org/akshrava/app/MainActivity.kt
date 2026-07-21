@@ -170,7 +170,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         requestBatteryExemption()
-        requestOverlayPermissionOnce()
+        requestOverlayPermissionIfNeeded()
         val intent = Intent(this, AssistService::class.java).setAction(AssistService.ACTION_START)
         ContextCompat.startForegroundService(this, intent)
         setStatus(getString(R.string.status_starting))
@@ -188,28 +188,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Send a sighted helper to the overlay-permission screen, once, before the first walk.
+     * Open the overlay-permission screen if permission is missing when Start is pressed.
      *
      * Without this permission ScreenKeepAlive cannot hold the display awake, the screen sleeps
-     * on its normal timeout, OEM ROMs stop CameraX, and the session dies a couple of minutes in
-     * with no visible cause. It is not a runtime permission, so it can only be granted from
-     * Settings — the app has to send the user there or it will never be on.
+     * on its normal timeout, OEM ROMs stop CameraX, and the session dies with no visible cause.
      */
-    private fun requestOverlayPermissionOnce() {
+    private fun requestOverlayPermissionIfNeeded() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
         if (Settings.canDrawOverlays(this)) return
-        val prefs = getSharedPreferences("akshrava", MODE_PRIVATE)
-        if (prefs.getBoolean(OVERLAY_PROMPTED, false)) return
-        // Ask at most once so a user who deliberately declined is not re-interrupted every Start.
-        prefs.edit().putBoolean(OVERLAY_PROMPTED, true).apply()
         runCatching {
             startActivity(
                 Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
             )
         }
-    }
-
-    private companion object {
-        const val OVERLAY_PROMPTED = "overlay_permission_prompted"
     }
 }
