@@ -30,7 +30,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var setupPanel: LinearLayout
     private lateinit var toggleSetup: Button
 
-    private val languageTags = listOf("en-IN", "hi-IN", "ta-IN", "kn-IN", "ml-IN", "te-IN")
+    private val languageTags = SupportedLanguages.all.map { it.tag }
     private var setupExpanded = false
 
     private val permissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
@@ -72,14 +72,7 @@ class MainActivity : AppCompatActivity() {
         language.adapter = ArrayAdapter(
             this,
             android.R.layout.simple_spinner_dropdown_item,
-            listOf(
-                getString(R.string.language_english),
-                getString(R.string.language_hindi),
-                getString(R.string.language_tamil),
-                getString(R.string.language_kannada),
-                getString(R.string.language_malayalam),
-                getString(R.string.language_telugu),
-            )
+            SupportedLanguages.all.map { getString(it.labelRes) }
         )
         language.setSelection(languageTags.indexOf(config.language).coerceAtLeast(0))
 

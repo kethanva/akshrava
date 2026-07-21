@@ -24,6 +24,7 @@ class ProtocolClientTest {
         assertEquals("kn", ProtocolClient.wireLanguage("kn-IN"))
         assertEquals("ml", ProtocolClient.wireLanguage("ml-IN"))
         assertEquals("te", ProtocolClient.wireLanguage("te-IN"))
+        assertEquals("en", ProtocolClient.wireLanguage("unknown"))
     }
 
     @Test
