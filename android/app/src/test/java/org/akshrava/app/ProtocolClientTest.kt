@@ -20,6 +20,10 @@ class ProtocolClientTest {
         assertEquals("en", ProtocolClient.wireLanguage("en"))
         assertEquals("hi", ProtocolClient.wireLanguage("hi-IN"))
         assertEquals("hi", ProtocolClient.wireLanguage("hi"))
+        assertEquals("ta", ProtocolClient.wireLanguage("ta-IN"))
+        assertEquals("kn", ProtocolClient.wireLanguage("kn-IN"))
+        assertEquals("ml", ProtocolClient.wireLanguage("ml-IN"))
+        assertEquals("te", ProtocolClient.wireLanguage("te-IN"))
     }
 
     @Test

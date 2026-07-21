@@ -11,7 +11,7 @@ class ProtocolError(ValueError):
 # language (plan §6.2 — language is a per-device setting), not a fleet-wide server default.
 # Allowlisted rather than free text: an unrecognised value silently falls back to English in
 # composer.render() rather than ever being used to build a lookup key or format string.
-SUPPORTED_LANGUAGES = {"en", "hi"}
+SUPPORTED_LANGUAGES = {"en", "hi", "ta", "kn", "ml", "te"}
 
 
 def _integer(payload: Dict[str, Any], key: str, minimum=0, required=True):

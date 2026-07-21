@@ -29,6 +29,19 @@ def test_hindi_look_clear_language():
     assert "अलर्ट" in text or "बेंत" in text or "गाइड" in text
 
 
+def test_additional_indian_language_templates_render():
+    expected = {
+        "ta": "முன்னே நபர் உள்ளார்",
+        "kn": "ಮುಂದೆ ವ್ಯಕ್ತಿ ಇದ್ದಾರೆ",
+        "ml": "മുന്നിൽ വ്യക്തിയുണ്ട്",
+        "te": "ముందు వ్యక్తి ఉన్నారు",
+    }
+    for language, phrase in expected.items():
+        assert phrase in render("person_ahead", language, "ahead")
+        assert render("vehicle_nearby", language, "left")
+        assert render("look_unavailable", language)
+
+
 def test_unchecked_look_never_claims_the_view_was_clear():
     # Regression test: hazard=None from a late-suppressed frame means "we never scored it", not
     # "we scored it and it was clear". Confidently reporting "no hazard" from unchecked evidence

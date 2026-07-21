@@ -23,6 +23,10 @@
     <string name="hint_language">अलर्ट भाषा</string>
     <string name="language_english">अंग्रेज़ी (भारत)</string>
     <string name="language_hindi">हिन्दी</string>
+    <string name="language_tamil">तमिल</string>
+    <string name="language_kannada">कन्नड़</string>
+    <string name="language_malayalam">मलयालम</string>
+    <string name="language_telugu">तेलुगु</string>
     <string name="status_configure">स्वयंसेवक के साथ एक बार सेट करें, फिर सहायता शुरू करें दबाएँ।</string>
     <string name="status_ready">तैयार। जब सहायता चाहिए तब सहायता शुरू करें दबाएँ।</string>
     <string name="status_stopped">सहायता बंद।</string>

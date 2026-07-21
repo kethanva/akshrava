@@ -67,6 +67,7 @@ object AppConfigStore {
             }.getOrElse {
                 // Do not fall back to a possibly copied plaintext token after keystore failure.
                 // commit() so the scrub is durable even if the process exits right after.
+                invalidateTokenKey()
                 prefs.edit().remove(ENCRYPTED_TOKEN).remove(TOKEN_IV).remove(TOKEN).commit()
                 ""
             }
@@ -103,26 +104,47 @@ object AppConfigStore {
         } catch (_: Exception) {
             // An unavailable Android Keystore is a provisioning failure, not a reason to retain
             // a bearer token in plaintext storage.
+            invalidateTokenKey()
             editor.remove(ENCRYPTED_TOKEN).remove(TOKEN_IV).commit()
             false
         }
     }
 
+    // KeyStore.getInstance().load(null) and getKey() are binder round trips to the keystore
+    // daemon. load() runs on the main thread from MainActivity.onCreate, and pressing Start
+    // re-reads three more times (saveConfig, startServiceIfConfigured, then AssistService), so
+    // this was paid repeatedly on the UI thread of a low-end phone. The value cached here is a
+    // non-extractable Keystore handle, not key material, so holding it adds no exposure.
+    // Cleared whenever a crypto operation fails, so a key that was invalidated or regenerated
+    // out from under us is re-fetched instead of failing forever.
+    @Volatile
+    private var cachedTokenKey: SecretKey? = null
+
+    @Synchronized
+    private fun invalidateTokenKey() {
+        cachedTokenKey = null
+    }
+
     @Synchronized
     private fun tokenKey(): SecretKey {
+        cachedTokenKey?.let { return it }
         val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        (keyStore.getKey(TOKEN_KEY_ALIAS, null) as? SecretKey)?.let { return it }
-        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
-        generator.init(
-            KeyGenParameterSpec.Builder(
-                TOKEN_KEY_ALIAS,
-                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+        val existing = keyStore.getKey(TOKEN_KEY_ALIAS, null) as? SecretKey
+        val key = existing ?: run {
+            val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
+            generator.init(
+                KeyGenParameterSpec.Builder(
+                    TOKEN_KEY_ALIAS,
+                    KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+                )
+                    .setKeySize(256)
+                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                    .build()
             )
-                .setKeySize(256)
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .build()
-        )
-        return generator.generateKey()
+            generator.generateKey()
+        }
+        cachedTokenKey = key
+        return key
     }
 }

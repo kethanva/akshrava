@@ -52,6 +52,8 @@ class AssistService : LifecycleService() {
         /** Rebind CameraX when analysis callbacks go silent while the session is meant to be live. */
         private const val CAMERA_STALL_REBIND_MS = 15_000L
         private const val CAMERA_STALL_CHECK_MS = 5_000L
+        /** Floor between notification re-posts; results arrive far faster than this is useful. */
+        private const val MIN_NOTIFICATION_INTERVAL_MS = 1_000L
     }
 
     private var frameExecutor: ExecutorService? = null
@@ -81,6 +83,10 @@ class AssistService : LifecycleService() {
     private var lastCameraUnclearMs = 0L
     private var lastHeartbeatMs = 0L
     private var lastAnalyzeAtMs = 0L
+    private var lastNotificationText: String? = null
+    private var lastNotificationAtMs = 0L
+    private var queuedNotificationText: String? = null
+    private val notificationFlush = Runnable { flushNotification() }
     private var consecutiveBlurredFrames = 0
     private var previousThumbnail: IntArray? = null
     private val capturePolicy = CapturePolicy()
@@ -142,6 +148,10 @@ class AssistService : LifecycleService() {
         calibrationId = config.calibrationId
         createChannel()
         startForegroundCompat(notification())
+        // Fresh session: never let the previous run's text suppress the first real status.
+        lastNotificationText = null
+        lastNotificationAtMs = 0L
+        queuedNotificationText = null
         frameExecutor = Executors.newSingleThreadExecutor()
         frameEncoder = FrameEncoder()
         poseTracker = PoseTracker(this).also { it.start() }
@@ -630,13 +640,23 @@ class AssistService : LifecycleService() {
     private fun createChannel() {
         val channel = NotificationChannel(CHANNEL_ID, getString(R.string.notification_channel_name), NotificationManager.IMPORTANCE_LOW)
         channel.description = "Visible while camera assistance is active"
-        getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+        notificationManager.createNotificationChannel(channel)
+    }
+
+    // The stop action and the manager handle never change for the life of the service, but they
+    // were re-derived on every notification rebuild — and rebuilds happen on every server result
+    // (~1.2/s for the whole walk). PendingIntent.getBroadcast is a round trip to system_server,
+    // so this was two binder calls per frame on exactly the donated low-end phones that can
+    // least afford them, on top of camera, JPEG encode and upload.
+    private val notificationManager by lazy { getSystemService(NotificationManager::class.java) }
+    private val stopActionIntent by lazy {
+        PendingIntent.getBroadcast(
+            this, 0, Intent(this, StopReceiver::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
     }
 
     private fun notification(status: String = getString(R.string.notification_text)): Notification {
-        val stopIntent = PendingIntent.getBroadcast(
-            this, 0, Intent(this, StopReceiver::class.java), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setColor(Color.BLUE)
@@ -644,7 +664,7 @@ class AssistService : LifecycleService() {
             .setContentText(status)
             .setOngoing(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .addAction(0, getString(R.string.action_stop), stopIntent)
+            .addAction(0, getString(R.string.action_stop), stopActionIntent)
             .build()
     }
 
@@ -657,8 +677,35 @@ class AssistService : LifecycleService() {
         ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, serviceType)
     }
 
+    /**
+     * Post a status to the ongoing notification, dropping no-op and burst updates.
+     *
+     * Successive results usually carry identical text ("Live · person"), so most calls are pure
+     * cost. This surface is diagnostic — speech is the channel the user actually relies on — so
+     * capping it at [MIN_NOTIFICATION_INTERVAL_MS] is safe. Suppressed updates are coalesced
+     * rather than dropped: the newest text is always flushed once the window closes, so the
+     * notification never ends up stuck showing a stale state.
+     */
     private fun updateNotification(status: String) {
-        if (client != null) getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(status))
+        if (client == null || stopping) return
+        if (status == lastNotificationText) return
+        queuedNotificationText = status
+        val sinceLast = SystemClock.elapsedRealtime() - lastNotificationAtMs
+        mainHandler.removeCallbacks(notificationFlush)
+        if (sinceLast >= MIN_NOTIFICATION_INTERVAL_MS) {
+            flushNotification()
+        } else {
+            mainHandler.postDelayed(notificationFlush, MIN_NOTIFICATION_INTERVAL_MS - sinceLast)
+        }
+    }
+
+    private fun flushNotification() {
+        val text = queuedNotificationText ?: return
+        queuedNotificationText = null
+        if (client == null || stopping) return
+        lastNotificationText = text
+        lastNotificationAtMs = SystemClock.elapsedRealtime()
+        notificationManager.notify(NOTIFICATION_ID, notification(text))
     }
 
     private fun stopAssistance() {

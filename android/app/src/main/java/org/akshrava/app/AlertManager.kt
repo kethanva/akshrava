@@ -53,7 +53,8 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
     private val api = Executors.newSingleThreadScheduledExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val language = Locale.forLanguageTag(languageTag)
-    private val isHindi = language.language == "hi"
+    private val languageCode = language.language.lowercase()
+    private val isHindi = languageCode == "hi"
     // Must be initialized before TextToSpeech: older APIs (and some emulators) invoke
     // onInit synchronously from the TTS constructor.
     private val completionLock = Any()
@@ -193,7 +194,14 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
         runApi {
             mutedUntilMs = SystemClock.elapsedRealtime() + durationMs
             speak(
-                if (isHindi) "पंद्रह मिनट के लिए म्यूट" else "Muted for fifteen minutes",
+                when (languageCode) {
+                    "hi" -> "पंद्रह मिनट के लिए म्यूट"
+                    "ta" -> "பதினைந்து நிமிடங்களுக்கு ஒலி நிறுத்தப்பட்டது"
+                    "kn" -> "ಹದಿನೈದು ನಿಮಿಷಗಳ ಕಾಲ ಮ್ಯೂಟ್ ಮಾಡಲಾಗಿದೆ"
+                    "ml" -> "പതിനഞ്ച് മിനിറ്റിലേക്ക് മ്യൂട്ട് ചെയ്തു"
+                    "te" -> "పదిహేను నిమిషాల పాటు మ్యూట్ చేయబడింది"
+                    else -> "Muted for fifteen minutes"
+                },
                 flush = true, id = nextStatusId()
             )
         }
@@ -295,14 +303,36 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
     }
 
     private fun template(key: String, bearing: String): String = when (key) {
-        "obstacle_ahead" -> if (isHindi) "आगे रुकावट" else "Obstacle ahead"
-        "person_ahead" -> if (isHindi) "आगे व्यक्ति" else "Person ahead"
-        "vehicle_nearby" -> if (isHindi) {
-            when (bearing) { "left" -> "वाहन बाईं ओर है"; "right" -> "वाहन दाईं ओर है"; else -> "वाहन आगे है" }
-        } else "Vehicle nearby, $bearing"
-        "busy_road" -> if (isHindi) "व्यस्त सड़क, सावधान" else "Busy road, careful"
-        else -> if (isHindi) "सहायता सीमित है" else "Assistance is limited"
+        "obstacle_ahead" -> when (languageCode) {
+            "hi" -> "आगे रुकावट"; "ta" -> "முன்னே தடையுள்ளது"; "kn" -> "ಮುಂದೆ ಅಡಚಣೆ ಇದೆ"
+            "ml" -> "മുന്നിൽ തടസ്സമുണ്ട്"; "te" -> "ముందు అడ్డంకి ఉంది"; else -> "Obstacle ahead"
+        }
+        "person_ahead" -> when (languageCode) {
+            "hi" -> "आगे व्यक्ति"; "ta" -> "முன்னே நபர் உள்ளார்"; "kn" -> "ಮುಂದೆ ವ್ಯಕ್ತಿ ಇದ್ದಾರೆ"
+            "ml" -> "മുന്നിൽ വ്യക്തിയുണ്ട്"; "te" -> "ముందు వ్యక్తి ఉన్నారు"; else -> "Person ahead"
+        }
+        "vehicle_nearby" -> when (languageCode) {
+            "hi" -> when (bearing) { "left" -> "वाहन बाईं ओर है"; "right" -> "वाहन दाईं ओर है"; else -> "वाहन आगे है" }
+            "ta" -> "அருகில் வாகனம் ${bearingTa[bearing] ?: bearingTa["ahead"]}"
+            "kn" -> "ಹತ್ತಿರ ವಾಹನ ${bearingKn[bearing] ?: bearingKn["ahead"]}"
+            "ml" -> "അടുത്ത് വാഹനം ${bearingMl[bearing] ?: bearingMl["ahead"]}"
+            "te" -> "సమీపంలో వాహనం ${bearingTe[bearing] ?: bearingTe["ahead"]}"
+            else -> "Vehicle nearby, $bearing"
+        }
+        "busy_road" -> when (languageCode) {
+            "hi" -> "व्यस्त सड़क, सावधान"; "ta" -> "பரபரப்பான சாலை, கவனம்"; "kn" -> "ಗಿಜಿಗುಡಿದ ರಸ್ತೆ, ಎಚ್ಚರಿಕೆ"
+            "ml" -> "തിരക്കേറിയ റോഡ്, ശ്രദ്ധിക്കുക"; "te" -> "రద్దీగా ఉన్న రహదారి, జాగ్రత్త"; else -> "Busy road, careful"
+        }
+        else -> when (languageCode) {
+            "hi" -> "सहायता सीमित है"; "ta" -> "உதவி வரம்புக்குட்பட்டது"; "kn" -> "ಸಹಾಯ ಸೀಮಿತವಾಗಿದೆ"
+            "ml" -> "സഹായം പരിമിതമാണ്"; "te" -> "సహాయం పరిమితంగా ఉంది"; else -> "Assistance is limited"
+        }
     }
+
+    private val bearingTa = mapOf("left" to "இடப்புறம் உள்ளது", "right" to "வலப்புறம் உள்ளது", "ahead" to "முன்னே உள்ளது")
+    private val bearingKn = mapOf("left" to "ಎಡಭಾಗದಲ್ಲಿದೆ", "right" to "ಬಲಭಾಗದಲ್ಲಿದೆ", "ahead" to "ಮುಂದೆ ಇದೆ")
+    private val bearingMl = mapOf("left" to "ഇടതുവശത്തുണ്ട്", "right" to "വലതുവശത്തുണ്ട്", "ahead" to "മുന്നിലുണ്ട്")
+    private val bearingTe = mapOf("left" to "ఎడమ వైపున ఉంది", "right" to "కుడి వైపున ఉంది", "ahead" to "ముందు ఉంది")
 
     private fun vibrate(pattern: String) {
         val timings = when (pattern) {

@@ -91,8 +91,14 @@ class ProtocolClient(
         fun isPermanentAccessClose(code: Int): Boolean = code == 4401 || code == 4403
 
         /** Wire contract uses en|hi; AppConfig stores BCP-47 tags like en-IN / hi-IN. */
-        fun wireLanguage(tag: String): String =
-            if (tag.lowercase().startsWith("hi")) "hi" else "en"
+        fun wireLanguage(tag: String): String = when {
+            tag.lowercase().startsWith("hi") -> "hi"
+            tag.lowercase().startsWith("ta") -> "ta"
+            tag.lowercase().startsWith("kn") -> "kn"
+            tag.lowercase().startsWith("ml") -> "ml"
+            tag.lowercase().startsWith("te") -> "te"
+            else -> "en"
+        }
 
         /** Keeps the stream gate independently testable: a transport-only socket is not vision. */
         fun streamEnabled(sessionReady: Boolean, visionEnabled: Boolean): Boolean =
