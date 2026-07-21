@@ -438,7 +438,7 @@ class AssistService : LifecycleService() {
             val encoder = frameEncoder
             if (encoder == null) {
                 framePending.set(false)
-                image.close()
+                // Leave the close to `finally` — closing here as well double-closed the ImageProxy.
                 return
             }
             val prepared = encoder.prepare(image, quality.maxSide)

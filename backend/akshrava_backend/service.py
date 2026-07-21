@@ -6,12 +6,26 @@ from typing import Callable, Dict, Set
 
 from .composer import hazard_payload, look_summary
 from .alert_policy import AlertPolicy
-from .detector import Detector, RegistryRemoteWorkerDetector, RemoteWorkerDetector
+from .detector import (
+    Detector,
+    RegistryRemoteWorkerDetector,
+    RemoteWorkerDetector,
+    TransientInferenceError,
+)
 from .domain import FrameHeader, SessionState
 from .hazards import HazardScorer
 from .tracker import SimpleTracker
 
 logger = logging.getLogger(__name__)
+
+
+class InferenceCircuitOpenError(RuntimeError):
+    """Sustained inference failure for one device: the vision path is not usable right now.
+
+    Distinct from TransientInferenceError. A single slow or failed frame is shed and the
+    session continues; only a streak (_CIRCUIT_OPEN_AFTER) trips this, which is the point at
+    which the phone must stop implying it can see and tell the user to use the cane or guide.
+    """
 
 
 class BackgroundTaskTracker:
@@ -279,12 +293,19 @@ class VisionService:
             self._timeout_streak.pop(key, None)
 
     def _circuit_allows(self, device_id: str) -> None:
-        """Raise RuntimeError if this device's circuit breaker is currently open."""
+        """Raise if this device's circuit breaker is currently open."""
         until = self._circuit_open_until.get(device_id, 0.0)
         if time.monotonic() < until:
-            raise RuntimeError("inference circuit open after repeated timeouts")
+            raise InferenceCircuitOpenError("inference circuit open after repeated failures")
 
-    def _note_timeout(self, device_id: str) -> None:
+    def _note_failure(self, device_id: str, reason: str) -> None:
+        """Count one failed frame, and open the breaker once the streak is sustained.
+
+        Both deadlines and transient detector errors (worker unavailable, 5xx, malformed
+        response) feed the same streak: from the phone's point of view they are the same
+        condition — this frame produced nothing usable. Counting only timeouts would let a
+        worker that fails fast every time shed frames forever without ever escalating.
+        """
         streak = self._timeout_streak.get(device_id, 0) + 1
         self._timeout_streak[device_id] = streak
         if streak >= self._CIRCUIT_OPEN_AFTER:
@@ -292,14 +313,34 @@ class VisionService:
             self._timeout_streak[device_id] = 0
             self._prune_circuit_state()
             logger.warning(
-                "inference circuit opened for device=%s for %.1fs after repeated timeouts",
+                "inference circuit opened for device=%s for %.1fs after %d consecutive failures (last=%s)",
                 device_id,
                 self._CIRCUIT_COOLDOWN_SECONDS,
+                self._CIRCUIT_OPEN_AFTER,
+                reason,
             )
 
     def _note_success(self, device_id: str) -> None:
         self._timeout_streak.pop(device_id, None)
         self._circuit_open_until.pop(device_id, None)
+
+    async def _await_inference(self, device_id: str, awaitable):
+        """Apply the inference deadline and keep the per-device breaker in step.
+
+        A deadline or a transient detector error is re-raised as TransientInferenceError so the
+        transport sheds just this frame. Either way the failure is counted, so a sustained
+        outage still trips the breaker and escalates to a hard 'use cane or guide'.
+        """
+        try:
+            result = await asyncio.wait_for(awaitable, timeout=self.inference_timeout_seconds)
+        except asyncio.TimeoutError as exc:
+            self._note_failure(device_id, "deadline")
+            raise TransientInferenceError("inference deadline exceeded") from exc
+        except TransientInferenceError as exc:
+            self._note_failure(device_id, type(exc).__name__)
+            raise
+        self._note_success(device_id)
+        return result
 
     async def _detect(self, device_id: str, jpeg: bytes):
         """Run detection with timeout + per-device circuit break.
@@ -314,36 +355,18 @@ class VisionService:
         # Remote workers: async HTTP with follow_redirects=False; timeout is meaningful.
         if self._uses_remote_path():
             async_for_device = getattr(self.detector, "detect_async_for_device", None)
-            try:
-                if async_for_device is not None:
-                    result = await asyncio.wait_for(
-                        async_for_device(device_id, jpeg),
-                        timeout=self.inference_timeout_seconds,
-                    )
-                    self._note_success(device_id)
-                    return result, None
-                result = await asyncio.wait_for(
-                    self.detector.detect_async(jpeg),
-                    timeout=self.inference_timeout_seconds,
-                )
-                self._note_success(device_id)
-                return result, None
-            except asyncio.TimeoutError as exc:
-                self._note_timeout(device_id)
-                raise RuntimeError("inference deadline exceeded") from exc
+            call = (
+                async_for_device(device_id, jpeg)
+                if async_for_device is not None
+                else self.detector.detect_async(jpeg)
+            )
+            return await self._await_inference(device_id, call), None
 
         # CloudFallbackDetector exposes provider + local; keep async for the availability bit.
         if getattr(self.detector, "provider", None) is not None and getattr(self.detector, "local", None) is not None:
-            try:
-                result = await asyncio.wait_for(
-                    self.detector.detect_async_with_status_for_device(device_id, jpeg),
-                    timeout=self.inference_timeout_seconds,
-                )
-                self._note_success(device_id)
-                return result
-            except asyncio.TimeoutError as exc:
-                self._note_timeout(device_id)
-                raise RuntimeError("inference deadline exceeded") from exc
+            return await self._await_inference(
+                device_id, self.detector.detect_async_with_status_for_device(device_id, jpeg)
+            )
 
         # Local YOLO / noop: sync detect on the isolated local pool (not the default executor).
         device_method = getattr(self.detector, "detect_with_status_for_device", None)
@@ -356,16 +379,10 @@ class VisionService:
         else:
             def function(frame):
                 return self.detector.detect_for_device(device_id, frame)
-        try:
-            result = await asyncio.wait_for(
-                loop.run_in_executor(self._local_executor, function, jpeg),
-                timeout=self.inference_timeout_seconds,
-            )
-            self._note_success(device_id)
-            return result if method is not None else (result, None)
-        except asyncio.TimeoutError as exc:
-            self._note_timeout(device_id)
-            raise RuntimeError("inference deadline exceeded") from exc
+        result = await self._await_inference(
+            device_id, loop.run_in_executor(self._local_executor, function, jpeg)
+        )
+        return result if method is not None else (result, None)
 
     def _pose_discontinuity(self, state: SessionState, header: FrameHeader) -> bool:
         if header.pose_age_ms is None or header.pose_age_ms > 100:

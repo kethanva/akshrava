@@ -472,3 +472,79 @@ def test_capacity_exhaustion_after_lease_lapse_still_closes(monkeypatch):
             websocket.send_json({"type": "ping"})
             with pytest.raises(WebSocketDisconnect):
                 websocket.receive_json()
+
+
+def test_transient_inference_failure_sheds_the_frame_and_keeps_the_session(monkeypatch):
+    """A slow/failed single frame must not tear down the WebSocket.
+
+    Regression: the transport classified failures by matching the exception's *message*, so
+    only WorkerSaturatedError and "circuit open" were soft-shed. A remote-worker deadline
+    (RuntimeError("inference deadline exceeded")) fell through to the hard branch and closed
+    the socket with 1011 — on the CPU remote path that happens routinely, so the phone lost
+    its session every few minutes and only recovered on a manual Stop/Start.
+    """
+    from akshrava_backend.detector import TransientInferenceError
+
+    calls = {"n": 0}
+
+    class FlakyVision:
+        async def analyze(self, state, header, jpeg):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise TransientInferenceError("inference deadline exceeded")
+            return {
+                "type": "result", "frame_id": header.frame_id,
+                "capture_mono_ms": header.capture_mono_ms, "server_inference_ms": 5,
+                "server_received_epoch_ms": int(time.time() * 1000), "hazard": None,
+                "detection_count": 0, "detection_labels": [], "priority": False,
+                "look_summary": None, "late_suppressed": False, "pipeline_stage_ms": {},
+            }
+
+        async def release_session(self, session_key):
+            return None
+
+    monkeypatch.setattr(main, "vision", FlakyVision())
+    monkeypatch.setattr(main, "session_application", SessionApplicationService(main.store, main.vision))
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/session?token=dev-device-token") as websocket:
+            websocket.receive_json()
+            websocket.send_json({
+                "type": "frame", "id": 1, "capture_mono_ms": 200, "w": 1, "h": 1,
+                "jpeg_bytes": len(JPEG), "camera_calibration_id": "test-r0",
+            })
+            websocket.send_bytes(JPEG)
+            assert websocket.receive_json() == {"type": "error", "code": "worker_saturated"}
+
+            # The socket is still usable: the very next frame succeeds.
+            websocket.send_json({
+                "type": "frame", "id": 2, "capture_mono_ms": 1400, "w": 1, "h": 1,
+                "jpeg_bytes": len(JPEG), "camera_calibration_id": "test-r0",
+            })
+            websocket.send_bytes(JPEG)
+            assert websocket.receive_json()["type"] == "result"
+
+
+def test_circuit_open_still_fails_closed(monkeypatch):
+    """Sustained failure must stop implying the phone can see."""
+    from akshrava_backend.service import InferenceCircuitOpenError
+
+    class DeadVision:
+        async def analyze(self, state, header, jpeg):
+            raise InferenceCircuitOpenError("inference circuit open after repeated failures")
+
+        async def release_session(self, session_key):
+            return None
+
+    monkeypatch.setattr(main, "vision", DeadVision())
+    monkeypatch.setattr(main, "session_application", SessionApplicationService(main.store, main.vision))
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/session?token=dev-device-token") as websocket:
+            websocket.receive_json()
+            websocket.send_json({
+                "type": "frame", "id": 1, "capture_mono_ms": 200, "w": 1, "h": 1,
+                "jpeg_bytes": len(JPEG), "camera_calibration_id": "test-r0",
+            })
+            websocket.send_bytes(JPEG)
+            assert websocket.receive_json() == {"type": "error", "code": "vision_unavailable"}
+            with pytest.raises(WebSocketDisconnect):
+                websocket.receive_json()

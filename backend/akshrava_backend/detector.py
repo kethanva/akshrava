@@ -87,8 +87,19 @@ class NoopDetector(Detector):
         return False
 
 
-class RemoteInferenceError(RuntimeError):
-    """The trusted GPU worker cannot produce a safely usable result."""
+class TransientInferenceError(RuntimeError):
+    """A single frame could not be analysed, but the session is still viable.
+
+    The transport layer sheds this frame and keeps the WebSocket open so the phone retries
+    with the next capture. Sustained failure is escalated separately by the per-device
+    circuit breaker (see service.InferenceCircuitOpenError), which is what actually tells
+    the user to fall back to the cane. Tearing the socket down on a single slow inference
+    would turn a routine CPU-path hiccup into a full reconnect cycle.
+    """
+
+
+class RemoteInferenceError(TransientInferenceError):
+    """The trusted GPU worker cannot produce a safely usable result for this frame."""
 
 
 class WorkerSaturatedError(RemoteInferenceError):

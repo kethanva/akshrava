@@ -15,11 +15,11 @@ from .domain import SessionState
 from .protocol import ProtocolError, quality_for_inference
 from .cloud_fallback import make_cloud_provider
 from .coordination import device_rate_limiter_for
-from .detector import make_detector
+from .detector import TransientInferenceError, make_detector
 from .logging_util import configure_json_logging
 from .metrics import Metrics
 from .rate_limit import FrameRateLimiter
-from .service import VisionService
+from .service import InferenceCircuitOpenError, VisionService
 from .session_admission import session_admission_for
 from .storage import Store
 from .gcp_storage import GcpDiagnosticStorage
@@ -339,21 +339,30 @@ async def session(websocket: WebSocket):
 
                     try:
                         result = await session_application.analyze_frame(state, header, jpeg)
+                    except TransientInferenceError:
+                        # One frame produced nothing usable (slow inference, worker 5xx, queue
+                        # full). Shed it and keep the socket: tearing the session down here made
+                        # a routine CPU-path hiccup cost a full reconnect, and the phone stopped
+                        # streaming until the user pressed Stop/Start. Sustained failure is
+                        # escalated by InferenceCircuitOpenError below, not by this branch.
+                        metrics.worker_saturated()
+                        await websocket.send_json({"type": "error", "code": "worker_saturated"})
+                        continue
                     except Exception as exc:
-                        from .detector import WorkerSaturatedError
-
-                        # Soft-shed under worker overload: keep the socket open so the phone
-                        # can retry the next frame instead of believing vision is permanently dead.
-                        if isinstance(exc, WorkerSaturatedError) or "circuit open" in str(exc):
-                            metrics.worker_saturated()
-                            await websocket.send_json({"type": "error", "code": "worker_saturated"})
-                            continue
-                        # Hard failures (model/runtime) still fail closed.
-                        logger.exception(
-                            "vision inference failed for device=%s frame_id=%s",
-                            device_id,
-                            header.frame_id,
-                        )
+                        # Circuit open means the streak threshold was reached: stop implying the
+                        # phone can see. Everything else (model/runtime) also fails closed.
+                        if isinstance(exc, InferenceCircuitOpenError):
+                            logger.warning(
+                                "inference circuit open for device=%s frame_id=%s",
+                                device_id,
+                                header.frame_id,
+                            )
+                        else:
+                            logger.exception(
+                                "vision inference failed for device=%s frame_id=%s",
+                                device_id,
+                                header.frame_id,
+                            )
                         metrics.inference_failed()
                         await websocket.send_json({"type": "error", "code": "vision_unavailable"})
                         await websocket.close(code=1011)
@@ -389,8 +398,14 @@ async def session(websocket: WebSocket):
                     await websocket.send_json(resp)
             else:
                 await websocket.send_json({"type": "error", "code": "unsupported_message"})
-    except (WebSocketDisconnect, RuntimeError):
+    except WebSocketDisconnect:
         logger.info("session closed for device=%s", device_id)
+    except RuntimeError as exc:
+        # Starlette raises RuntimeError when the peer vanishes mid-send ("Cannot call send once a
+        # close message has been sent"), which is an ordinary disconnect. Anything else reaching
+        # here is a real bug, and logging it as a plain "session closed" hid it completely — keep
+        # the message so the two are distinguishable in production logs.
+        logger.info("session closed for device=%s (%s)", device_id, exc)
     except (ProtocolError, JSONDecodeError) as exc:
         logger.warning("protocol error for device=%s: %s", device_id, exc)
         # The socket may already be broken by the same condition that raised ProtocolError

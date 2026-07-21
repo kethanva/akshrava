@@ -3,7 +3,7 @@ import asyncio
 
 import pytest
 
-from akshrava_backend.detector import Detector
+from akshrava_backend.detector import Detector, TransientInferenceError
 from akshrava_backend.domain import Detection, FrameHeader, SessionState
 from akshrava_backend.service import VisionService
 
@@ -367,9 +367,71 @@ async def test_circuit_breaker_state_is_bounded_against_device_rotation(monkeypa
     for index in range(20):
         service._circuit_open_until["dead-%d" % index] = 0.0  # already expired
     service._timeout_streak["live"] = service._CIRCUIT_OPEN_AFTER - 1
-    service._note_timeout("live")  # crosses threshold -> opens + prunes
+    service._note_failure("live", "deadline")  # crosses threshold -> opens + prunes
     try:
         assert len(service._circuit_open_until) <= 6  # <= cap + the freshly opened "live"
         assert "live" in service._circuit_open_until  # active circuit preserved
+    finally:
+        service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_transient_detector_error_is_shed_but_still_trips_the_breaker():
+    """A worker that fails fast must escalate, not shed frames forever.
+
+    Only timeouts used to feed the breaker, so a worker returning 5xx on every frame stayed
+    "transient" indefinitely and the phone kept streaming into a vision path that never
+    produced a result.
+    """
+    from akshrava_backend.detector import RemoteInferenceError
+    from akshrava_backend.service import InferenceCircuitOpenError
+
+    class FailingDetector(Detector):
+        def requires_serial_execution(self):
+            return False
+
+        def detect(self, jpeg):
+            raise RemoteInferenceError("remote worker unavailable")
+
+        def detect_for_device(self, device_id, jpeg):
+            return self.detect(jpeg)
+
+    service = VisionService(FailingDetector(), RecordingStore(), inference_executor_workers=1)
+    service._CIRCUIT_OPEN_AFTER = 2
+    service._CIRCUIT_COOLDOWN_SECONDS = 30.0
+    try:
+        for _ in range(2):
+            with pytest.raises(TransientInferenceError):
+                await service._detect("bad-phone", b"jpeg")
+        # Streak reached: the breaker escalates to a distinct, non-transient failure.
+        with pytest.raises(InferenceCircuitOpenError):
+            await service._detect("bad-phone", b"jpeg")
+    finally:
+        service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_inference_deadline_is_transient_not_a_session_ending_failure():
+    from akshrava_backend.service import InferenceCircuitOpenError
+
+    class SlowDetector(Detector):
+        def requires_serial_execution(self):
+            return False
+
+        def detect(self, jpeg):
+            time.sleep(0.05)
+            return []
+
+        def detect_for_device(self, device_id, jpeg):
+            return self.detect(jpeg)
+
+    service = VisionService(
+        SlowDetector(), RecordingStore(), inference_timeout_ms=10, inference_executor_workers=1
+    )
+    try:
+        with pytest.raises(TransientInferenceError):
+            await service._detect("slow-phone", b"jpeg")
+        # A deadline is explicitly NOT the circuit-open escalation.
+        assert not isinstance(TransientInferenceError("x"), InferenceCircuitOpenError)
     finally:
         service.shutdown()
