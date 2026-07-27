@@ -41,5 +41,8 @@ testpaths = ["tests"]
 line-length = 100
 target-version = "py310"
 
+[tool.ruff.lint]
+ignore = ["B008", "SIM117", "BLE001", "UP031", "TRY004", "PLW1510", "S110", "G201", "I001"]
+
 [tool.setuptools]
 packages = ["akshrava_backend"]

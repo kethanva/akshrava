@@ -21,6 +21,11 @@ import android.widget.FrameLayout
  * stop while the WebSocket looks healthy.
  */
 class ScreenKeepAlive(private val context: Context) {
+    private companion object {
+        /** Matches AssistService.WAKE_LOCK_TIMEOUT_MS: a safety net, re-armed by [renew]. */
+        const val WAKE_LOCK_TIMEOUT_MS = 60 * 60_000L
+    }
+
     private var overlay: View? = null
     private var screenWakeLock: PowerManager.WakeLock? = null
     private val wm = context.getSystemService(WindowManager::class.java)
@@ -97,7 +102,7 @@ class ScreenKeepAlive(private val context: Context) {
             )
             wl.setReferenceCounted(false)
             // Match AssistService partial-wake budget so a hung teardown cannot hold the panel forever.
-            wl.acquire(60 * 60_000L)
+            wl.acquire(WAKE_LOCK_TIMEOUT_MS)
             screenWakeLock = wl
             true
         } catch (_: Exception) {
@@ -108,6 +113,20 @@ class ScreenKeepAlive(private val context: Context) {
 
     fun isHoldingScreenOn(): Boolean =
         overlay != null || (screenWakeLock?.isHeld == true)
+
+    /**
+     * Re-arm the timed wake-lock fallback for a session that is still running.
+     *
+     * Only the fallback needs this: the overlay holds FLAG_KEEP_SCREEN_ON for as long as the view
+     * is attached, with no expiry. The wake lock does expire, and when it did the display slept
+     * mid-walk on precisely the phones that lacked overlay permission — the case this fallback
+     * exists to cover. Safe to call repeatedly; the lock is not reference counted.
+     */
+    fun renew() {
+        if (mode != Mode.WAKE_LOCK) return
+        val wl = screenWakeLock ?: return
+        runCatching { wl.acquire(WAKE_LOCK_TIMEOUT_MS) }
+    }
 
     fun stop() {
         val view = overlay

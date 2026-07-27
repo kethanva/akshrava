@@ -168,8 +168,11 @@ class ProtocolClient(
         const val APP_PING_INTERVAL_MS = 60_000L
     }
     private val reconnect: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
+    // Exactly one frame is in flight at a time. The server advertises max_in_flight in its ready
+    // payload; that value is logged for diagnostics but deliberately not stored as client state,
+    // because nothing here honours a value above 1 and a field suggesting otherwise reads as a
+    // capability the client does not have.
     private val inFlight = AtomicBoolean(false)
-    @Volatile private var maxInFlight: Int = 1
     private var socket: WebSocket? = null
     private var pendingReconnect: ScheduledFuture<*>? = null
     private val connectionGeneration = AtomicInteger(0)
@@ -425,7 +428,6 @@ class ProtocolClient(
                 val serverMaxAge = payload.optLong("alert_max_age_ms", STALE_ALERT_MS)
                 configuredStaleAlertMs = serverMaxAge.coerceAtLeast(STALE_ALERT_MS)
                 val advertised = payload.optInt("max_in_flight", 1).coerceIn(1, 2)
-                maxInFlight = advertised
                 Log.i(
                     "AkshravaDebug",
                     "ws_ready detector=${payload.optString("detector", "unknown")} vision_enabled=$visionEnabled " +

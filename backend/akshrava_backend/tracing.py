@@ -7,8 +7,8 @@ production images should install `opentelemetry-api` (see pyproject.toml).
 from __future__ import annotations
 
 import secrets
+from collections.abc import Iterator, MutableMapping
 from contextlib import contextmanager
-from typing import Iterator, MutableMapping
 
 _PROVIDER_READY = False
 
@@ -22,7 +22,7 @@ def _fallback_traceparent() -> str:
     takes precedence (this is only used as the except-path fallback), so a real distributed trace
     still stitches correctly; otherwise the phone→API→worker legs at least share one id in logs.
     """
-    return "00-%s-%s-01" % (secrets.token_hex(16), secrets.token_hex(8))
+    return f"00-{secrets.token_hex(16)}-{secrets.token_hex(8)}-01"
 
 
 def ensure_tracer_provider() -> None:

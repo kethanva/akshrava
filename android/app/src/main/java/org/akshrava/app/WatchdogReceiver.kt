@@ -5,7 +5,11 @@ import android.app.NotificationManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.os.Handler
+import android.os.Looper
 import androidx.core.app.NotificationCompat
+import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Fires from the watchdog alarm. If a session is meant to be active but the camera service has
@@ -13,9 +17,30 @@ import androidx.core.app.NotificationCompat
  * the user must visibly press Start, per platform rules.
  */
 class WatchdogReceiver : BroadcastReceiver() {
-    private companion object {
+    internal companion object {
         const val CHANNEL_ID = "assist-watchdog"
         const val NOTIFICATION_ID = 2001
+
+        /**
+         * Upper bound on how long the async broadcast may stay open waiting for TTS.
+         *
+         * A BroadcastReceiver that never finishes its goAsync() result is killed by the system
+         * after ~10 s with a receiver ANR. The engine this prompt depends on is the same one an
+         * OEM ROM may have just force-stopped, in which case no utterance callback ever arrives.
+         */
+        const val SPEECH_TIMEOUT_MS = 6_000L
+
+        /**
+         * Locale for the recovery utterance.
+         *
+         * AppConfig stores BCP-47 tags ("hi-IN"); `Locale("hi-IN")` builds a locale whose
+         * *language* is the whole string ("hi-in"), which is not an ISO code, so setLanguage
+         * returns LANG_NOT_SUPPORTED and the prompt falls back to the engine default. A
+         * Hindi-only user then hears an English instruction they cannot act on, at exactly the
+         * moment assistance has already stopped.
+         */
+        fun speechLocale(languageTag: String): Locale =
+            Locale.forLanguageTag(languageTag.trim().ifEmpty { "en-IN" })
     }
 
     override fun onReceive(context: Context, intent: Intent) {
@@ -61,32 +86,53 @@ class WatchdogReceiver : BroadcastReceiver() {
             .build()
         manager.notify(NOTIFICATION_ID, notification)
         // Short BLV recovery utterance; watchdog remains prompt-only for restart (never auto-starts).
+        // The notification above is already posted, so every path below only decides whether the
+        // prompt is also *spoken* — none of them may leave the broadcast unfinished.
         lateinit var tts: android.speech.tts.TextToSpeech
+        val settled = AtomicBoolean(false)
+        val finish = {
+            if (settled.compareAndSet(false, true)) {
+                runCatching { tts.shutdown() }
+                pendingResult?.finish()
+            }
+        }
+        // Backstop for an engine that accepts the utterance and then never reports it done —
+        // observed on OEM ROMs that restart the TTS service underneath us. Without it the
+        // receiver is killed by the system instead of finishing on its own terms.
+        val timeout = Handler(Looper.getMainLooper())
+        timeout.postDelayed({ finish() }, SPEECH_TIMEOUT_MS)
         tts = android.speech.tts.TextToSpeech(context) { status ->
             if (status != android.speech.tts.TextToSpeech.SUCCESS) {
-                tts.shutdown()
-                pendingResult?.finish()
+                timeout.removeCallbacksAndMessages(null)
+                finish()
                 return@TextToSpeech
             }
-            tts.language = java.util.Locale(AppConfigStore.load(context).language)
+            tts.language = speechLocale(AppConfigStore.load(context).language)
             tts.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
                 override fun onStart(utteranceId: String?) = Unit
                 override fun onDone(utteranceId: String?) {
-                    tts.shutdown()
-                    pendingResult?.finish()
+                    timeout.removeCallbacksAndMessages(null)
+                    finish()
                 }
                 @Deprecated("Deprecated in Java")
                 override fun onError(utteranceId: String?) {
-                    tts.shutdown()
-                    pendingResult?.finish()
+                    timeout.removeCallbacksAndMessages(null)
+                    finish()
                 }
             })
-            tts.speak(
+            val queued = tts.speak(
                 context.getString(R.string.watchdog_text),
                 android.speech.tts.TextToSpeech.QUEUE_FLUSH,
                 null,
                 "watchdog-recovery"
             )
+            if (queued != android.speech.tts.TextToSpeech.SUCCESS) {
+                // The engine initialised but refused the utterance (the "not bound to TTS engine"
+                // state an OEM force-stop leaves behind). No progress callback will ever come,
+                // so finish now rather than holding the broadcast open until the timeout.
+                timeout.removeCallbacksAndMessages(null)
+                finish()
+            }
         }
     }
 }

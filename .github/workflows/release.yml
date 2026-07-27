@@ -184,7 +184,10 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           apk="release-assets/Akshrava-${version}-universal.apk"
           cp android/app/build/outputs/apk/release/app-release.apk "$apk"
-          sha256sum "$apk" > SHA256SUMS.txt
+          # Record the bare file name, not the build-time directory: SHA256SUMS.txt is published
+          # next to the APK, and `sha256sum -c SHA256SUMS.txt` must verify for someone who
+          # downloaded the two files side by side.
+          ( cd release-assets && sha256sum "$(basename "$apk")" ) > SHA256SUMS.txt
           python scripts/build_apk_download_site.py \
             --tag "$GITHUB_REF_NAME" \
             --repository "$GITHUB_REPOSITORY" \
@@ -196,8 +199,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           python - <<'PY'
-          import json, os, subprocess
+          import json, os, subprocess, sys
           from pathlib import Path
+          sys.path.insert(0, "scripts")
+          # Derived, never restated: a manifest naming a revision the migrations do not actually
+          # head at tells an operator a deployment is migrated when the API will refuse to start.
+          from check_release_version import alembic_head_revision
           tag = os.environ["GITHUB_REF_NAME"]
           commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
           manifest = {
@@ -207,7 +214,7 @@ jobs:
               "apk_sha256": Path("SHA256SUMS.txt").read_text(encoding="utf-8").split()[0],
               "supported_android_api_levels": list(range(26, 37)),
               "release_smoke_tested_android_api_levels": list(range(28, 37)),
-              "database_schema_revision": "20260721_01",
+              "database_schema_revision": alembic_head_revision(Path(".")),
               "detector_default": "noop",
               "yolo_weights_sha256": os.environ.get("YOLO_WEIGHTS_SHA256", ""),
               "artifacts": [

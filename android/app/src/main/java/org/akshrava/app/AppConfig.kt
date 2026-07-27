@@ -33,10 +33,10 @@ object AppConfigStore {
     fun load(context: Context): AppConfig {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         return AppConfig(
-            endpoint = prefs.getString(ENDPOINT, BuildConfig.DEFAULT_WSS_ENDPOINT)!!,
+            endpoint = prefs.getString(ENDPOINT, BuildConfig.DEFAULT_WSS_ENDPOINT) ?: BuildConfig.DEFAULT_WSS_ENDPOINT,
             deviceToken = loadToken(context),
-            language = prefs.getString(LANGUAGE, "en-IN")!!,
-            calibrationId = prefs.getString(CALIBRATION, "unprovisioned")!!,
+            language = prefs.getString(LANGUAGE, "en-IN") ?: "en-IN",
+            calibrationId = prefs.getString(CALIBRATION, "unprovisioned") ?: "unprovisioned",
             debugTelemetry = prefs.getBoolean(DEBUG_TELEMETRY, false)
         )
     }

@@ -1,9 +1,7 @@
 """Alert template table. Emits message_key + slots; phone TTS / clips render speech."""
 
-from typing import Dict, Optional
 
 from .domain import Hazard
-
 
 TEMPLATES_EN = {
     "obstacle_ahead": "Obstacle ahead",
@@ -69,7 +67,7 @@ def render(message_key: str, language: str = "en", bearing: str = "ahead") -> st
     )
 
 
-def hazard_payload(hazard: Hazard, language: str = "en") -> Dict:
+def hazard_payload(hazard: Hazard, language: str = "en") -> dict:
     """Wire payload: template ID + slots. Never includes approach/cross advice."""
     return {
         "kind": hazard.kind,
@@ -86,7 +84,7 @@ def hazard_payload(hazard: Hazard, language: str = "en") -> Dict:
     }
 
 
-def look_summary(hazard: Optional[Hazard], language: str = "en", checked: bool = True) -> str:
+def look_summary(hazard: Hazard | None, language: str = "en", checked: bool = True) -> str:
     """On-demand look: one composed sentence for this moment.
 
     `checked=False` means the frame was never scored (e.g. late-suppressed past the freshness

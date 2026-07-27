@@ -1,12 +1,11 @@
+from akshrava_backend.alert_policy import ALERT_DEBOUNCE_MS, AlertPolicy
 from akshrava_backend.domain import Detection, GeometryProfile, SessionState
 from akshrava_backend.hazards import (
     HazardScorer,
     _ground_plane_distance,
     _pinhole_distance,
 )
-from akshrava_backend.alert_policy import ALERT_DEBOUNCE_MS, AlertPolicy
 from akshrava_backend.tracker import SimpleTracker
-
 
 CENTRAL_BOX = (220, 100, 430, 460)
 HALF_CENTRAL_BOX = tuple(v / 2.0 for v in CENTRAL_BOX)
@@ -134,7 +133,7 @@ def test_server_same_key_debounce_is_short_phone_owns_speech_cooldown():
     blocked = policy.admit(state, scorer.score(state, 640, 480, 20, -1200, 0), priority=False)
     assert blocked is None
     # Simulate debounce expiry without waiting wall clock.
-    key = "%s:%s" % (first.kind, first.bearing)
+    key = f"{first.kind}:{first.bearing}"
     state.last_alert_at_ms[key] = state.last_alert_at_ms[key] - ALERT_DEBOUNCE_MS - 1
     again = policy.admit(state, scorer.score(state, 640, 480, 20, -1200, 0), priority=False)
     assert again is not None

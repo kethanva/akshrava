@@ -8,8 +8,8 @@ storage, making it reusable from a future WebTransport or broker gateway.
 import hashlib
 import logging
 
-from .protocol import SUPPORTED_LANGUAGES
 from .domain import FrameHeader, SessionState
+from .protocol import SUPPORTED_LANGUAGES
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ class SessionApplicationService:
         state.last_capture_mono_ms = header.capture_mono_ms
         result = await self.vision.analyze(state, header, jpeg)
         # Correlates phone/API/GPU logs without exposing a device ID in telemetry or results.
-        material = "%s:%s:%s" % (state.trace_prefix, header.frame_id, header.capture_mono_ms)
+        material = f"{state.trace_prefix}:{header.frame_id}:{header.capture_mono_ms}"
         result["trace_id"] = header.trace_id or hashlib.sha256(material.encode("utf-8")).hexdigest()[:20]
         return result
 

@@ -1,4 +1,4 @@
-from typing import Any, Dict
+from typing import Any
 
 from .domain import FrameHeader
 
@@ -14,12 +14,12 @@ class ProtocolError(ValueError):
 SUPPORTED_LANGUAGES = {"en", "hi", "ta", "kn", "ml", "te"}
 
 
-def _integer(payload: Dict[str, Any], key: str, minimum=0, required=True):
+def _integer(payload: dict[str, Any], key: str, minimum=0, required=True):
     value = payload.get(key)
     if value is None and not required:
         return None
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-        raise ProtocolError("%s must be an integer >= %s" % (key, minimum))
+        raise ProtocolError(f"{key} must be an integer >= {minimum}")
     return value
 
 
@@ -31,26 +31,26 @@ _POSE_CDEG_MIN = -18_000
 _POSE_CDEG_MAX = 18_000
 
 
-def _optional_pose_cdeg(payload: Dict[str, Any], key: str):
+def _optional_pose_cdeg(payload: dict[str, Any], key: str):
     value = payload.get(key)
     if value is None:
         return None
     # JSON numbers are normally int; accept whole-number floats so a serializer quirk cannot
     # turn a physically valid pose into a session-killing ProtocolError.
     if isinstance(value, bool):
-        raise ProtocolError("%s must be an integer" % key)
+        raise ProtocolError(f"{key} must be an integer")
     if isinstance(value, float) and value.is_integer():
         value = int(value)
     if not isinstance(value, int):
-        raise ProtocolError("%s must be an integer" % key)
+        raise ProtocolError(f"{key} must be an integer")
     if value < _POSE_CDEG_MIN or value > _POSE_CDEG_MAX:
         raise ProtocolError(
-            "%s must be an integer in [%s, %s]" % (key, _POSE_CDEG_MIN, _POSE_CDEG_MAX)
+            f"{key} must be an integer in [{_POSE_CDEG_MIN}, {_POSE_CDEG_MAX}]"
         )
     return value
 
 
-def parse_frame_header(payload: Dict[str, Any]) -> FrameHeader:
+def parse_frame_header(payload: dict[str, Any]) -> FrameHeader:
     if payload.get("type") != "frame":
         raise ProtocolError("expected frame header")
     width = _integer(payload, "w", 1)

@@ -1,4 +1,4 @@
-from typing import Iterable, List
+from collections.abc import Iterable
 
 from .domain import Detection, Track
 
@@ -27,11 +27,11 @@ class SimpleTracker:
 
     def update(
         self,
-        tracks: List[Track],
+        tracks: list[Track],
         detections: Iterable[Detection],
         *,
         discard_missed: bool = False,
-    ) -> List[Track]:
+    ) -> list[Track]:
         unmatched_dets = list(detections)
         unmatched_tracks = list(tracks)
         next_tracks = []

@@ -1,13 +1,12 @@
 import json
 import logging
 import time
-from typing import Optional
 
-from .domain import FrameHeader, SessionState
-from .rate_limit import FrameRateLimiter
 from .coordination import use_redis_frame_limiter
-from .protocol import ProtocolError, parse_frame_header
 from .detector import jpeg_dimensions
+from .domain import FrameHeader, SessionState
+from .protocol import ProtocolError, parse_frame_header
+from .rate_limit import FrameRateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +44,10 @@ class FrameStreamHandler:
         self.priority_rate = priority_rate
         self.priority_burst = priority_burst
 
-        self.pending_header: Optional[FrameHeader] = None
+        self.pending_header: FrameHeader | None = None
         self.discard_next_binary = False
 
-    async def handle_text_frame(self, raw_payload: str) -> Optional[dict]:
+    async def handle_text_frame(self, raw_payload: str) -> dict | None:
         """Verify the header text framing and apply admission rate limits.
 
         Returns an action dictionary, error response dictionary, or None (waiting for binary).
@@ -107,7 +106,7 @@ class FrameStreamHandler:
             # the freshness budget of the next valid one.
 
             if header.priority:
-                rate_id = "%s:priority" % self.device_id
+                rate_id = f"{self.device_id}:priority"
                 rate_per_second, burst = self.priority_rate, self.priority_burst
                 dev_limiter = self.priority_local_limiter
             else:

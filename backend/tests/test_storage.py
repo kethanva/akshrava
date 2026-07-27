@@ -17,7 +17,7 @@ def test_every_timestamp_column_is_declared_timezone_aware():
         for column in model.__table__.columns:
             if isinstance(column.type, DateTime):
                 assert column.type.timezone is True, (
-                    "%s.%s must be DateTime(timezone=True)" % (model.__tablename__, column.name)
+                    f"{model.__tablename__}.{column.name} must be DateTime(timezone=True)"
                 )
 
 
@@ -141,7 +141,9 @@ async def test_device_revocation_uses_redis_cache():
             self.data[key] = value
         async def delete(self, key):
             self.data.pop(key, None)
-        async def close(self):
+        # Mirrors the real redis-py asyncio client, which deprecated close() in 5.0.1.
+        # A fake that still exposes only close() would hide a caller left on the alias.
+        async def aclose(self):
             pass
 
     mock_client = MockRedis()
@@ -178,7 +180,9 @@ async def test_revocation_publishes_short_ttl_negative_and_revoke_overwrites():
         async def delete(self, key):
             self.data.pop(key, None)
 
-        async def close(self):
+        # Mirrors the real redis-py asyncio client, which deprecated close() in 5.0.1.
+        # A fake that still exposes only close() would hide a caller left on the alias.
+        async def aclose(self):
             pass
 
     mock_client = MockRedis()

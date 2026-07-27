@@ -4,26 +4,28 @@ import logging
 import secrets
 from contextlib import asynccontextmanager, suppress
 from json import JSONDecodeError
-from typing import Optional
 
 from fastapi import FastAPI, Header, HTTPException, Response, WebSocket, WebSocketDisconnect
 
-from .auth import AuthError, device_claims_from_token, device_id_from_token
 from .application import SessionApplicationService
-from .config import Settings
-from .domain import SessionState
-from .protocol import ProtocolError, quality_for_inference
+from .auth import AuthError, device_claims_from_token, device_id_from_token
 from .cloud_fallback import make_cloud_provider
+from .config import Settings
 from .coordination import device_rate_limiter_for
 from .detector import TransientInferenceError, make_detector
+from .domain import SessionState
+from .gcp_storage import GcpDiagnosticStorage
 from .logging_util import configure_json_logging
 from .metrics import Metrics
+from .protocol import ProtocolError, quality_for_inference
 from .rate_limit import FrameRateLimiter
-from .service import InferenceCircuitOpenError, VisionService
+from .service import BackgroundTaskTracker, InferenceCircuitOpenError, VisionService
 from .session_admission import session_admission_for
+from .session_handler import (  # noqa: F401 — re-exported operational limit
+    MAX_CONTROL_MESSAGE_BYTES,
+    FrameStreamHandler,
+)
 from .storage import Store
-from .gcp_storage import GcpDiagnosticStorage
-from .session_handler import MAX_CONTROL_MESSAGE_BYTES, FrameStreamHandler  # noqa: F401 — re-exported operational limit
 from .tracing import ensure_tracer_provider
 
 configure_json_logging()
@@ -150,8 +152,8 @@ async def readyz():
 
 @app.get("/metrics", include_in_schema=False)
 async def prometheus_metrics(
-    x_akshrava_metrics_token: Optional[str] = Header(default=None),
-    authorization: Optional[str] = Header(default=None),
+    x_akshrava_metrics_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ):
     # Match Compose Caddy: do not expose aggregate metrics on the public URL outside development.
     # Internal scrapers pass METRICS_SCRAPE_TOKEN via header or Bearer.
@@ -188,6 +190,95 @@ async def _retention_loop(stop: asyncio.Event):
             continue
 
 
+async def _analyze_and_reply(
+    websocket: WebSocket,
+    state: SessionState,
+    header,
+    jpeg: bytes,
+    decode_ms: int,
+    device_id: str,
+    frame_lock: asyncio.Lock,
+) -> None:
+    """Analyse one already-validated frame and write its result back to the phone.
+
+    Runs as a tracked background task so a slow inference never blocks the receive loop (the
+    phone must stay able to send Stop/ping while a frame is in flight). Two properties matter
+    and are both enforced by `frame_lock`:
+
+    * `SessionState` (tracker association, hit counts, alert cooldowns) is mutated here. Two
+      frames analysed concurrently interleave those mutations, so a track can lose the second
+      hit that S2 requires -- the alert is simply never spoken.
+    * Results must reach the phone in capture order. Concurrent frames finish out of order
+      whenever one pays a cost the other skips (the first frame of a session also writes the
+      calibration row), and ProtocolClient settles its single in-flight slot on *any* result.
+
+    Taking the arguments explicitly rather than closing over the receive loop's variables also
+    keeps this bound to the frame it was created for, whatever the loop does next.
+    """
+    async with frame_lock:
+        try:
+            result = await session_application.analyze_frame(state, header, jpeg)
+        except TransientInferenceError:
+            # One frame produced nothing usable (slow inference, worker 5xx, queue full). Shed
+            # it and keep the socket: tearing the session down here made a routine CPU-path
+            # hiccup cost a full reconnect, and the phone stopped streaming until the user
+            # pressed Stop/Start. Sustained failure is escalated by InferenceCircuitOpenError
+            # below, not by this branch.
+            metrics.worker_saturated()
+            await websocket.send_json({"type": "error", "code": "worker_saturated"})
+            return
+        except InferenceCircuitOpenError:
+            # Breaker open: keep shedding while the cooldown runs, but do not close the socket.
+            # Closing forced reconnect → "Connection restored" while the circuit was still open
+            # → the next frame failed closed again, which is the unavailable↔restored flap
+            # users heard.
+            logger.warning(
+                "inference circuit open for device=%s frame_id=%s; shedding frame",
+                device_id,
+                header.frame_id,
+            )
+            metrics.worker_saturated()
+            await websocket.send_json({"type": "error", "code": "worker_saturated"})
+            return
+        except Exception:
+            logger.exception(
+                "vision inference failed for device=%s frame_id=%s",
+                device_id,
+                header.frame_id,
+            )
+            metrics.inference_failed()
+            await websocket.send_json({"type": "error", "code": "vision_unavailable"})
+            await websocket.close(code=1011)
+            return
+        stages = dict(result.get("pipeline_stage_ms", {}))
+        stages["decode"] = decode_ms
+        metrics.observe_result(result["server_inference_ms"], result["hazard"] is not None, stages)
+        if header.capture_epoch_ms is not None:
+            frame_age_ms = int(result["server_received_epoch_ms"]) - header.capture_epoch_ms
+            if 0 <= frame_age_ms <= 60_000:
+                metrics.observe_frame_age(frame_age_ms)
+        if result.get("late_suppressed"):
+            metrics.late_suppressed()
+        await websocket.send_json(result)
+        # Fail-closed: JWT consent + bucket are not enough until blur exists (Important Architecture.md, privacy).
+        if (
+            settings.diagnostic_uploads_enabled
+            and state.diagnostic_consent
+            and settings.gcp_diagnostics_bucket
+        ):
+            file_name = f"{device_id}/{header.frame_id}_{header.capture_mono_ms}.jpg"
+
+            async def _upload_diagnostic(name=file_name, payload=jpeg):
+                try:
+                    await gcp_storage.upload_frame(name, payload)
+                except Exception:
+                    logger.exception("diagnostic upload failed device=%s", device_id)
+
+            vision.schedule_diagnostic_upload(_upload_diagnostic())
+
+        await websocket.send_json(quality_for_inference(result["server_inference_ms"]))
+
+
 async def _renew_or_readmit(session_id: str) -> bool:
     """Keep a live socket admitted across a lapsed lease.
 
@@ -203,7 +294,7 @@ async def _renew_or_readmit(session_id: str) -> bool:
     return await session_admission.try_open(session_id)
 
 
-def _http_device_id(authorization: Optional[str]) -> str:
+def _http_device_id(authorization: str | None) -> str:
     token = authorization[7:] if authorization and authorization.lower().startswith("bearer ") else None
     try:
         return device_id_from_token(token, settings)
@@ -212,7 +303,7 @@ def _http_device_id(authorization: Optional[str]) -> str:
 
 
 @app.get("/v1/devices/{device_id}/events")
-async def device_events(device_id: str, limit: int = 20, authorization: Optional[str] = Header(default=None)):
+async def device_events(device_id: str, limit: int = 20, authorization: str | None = Header(default=None)):
     # Device tokens are deliberately scoped to the device itself: this endpoint is not an
     # operator console and must never become a cross-device event feed.
     if _http_device_id(authorization) != device_id:
@@ -289,6 +380,10 @@ async def session(websocket: WebSocket):
         priority_rate=PRIORITY_FRAME_RATE_PER_SECOND,
         priority_burst=PRIORITY_FRAME_BURST,
     )
+    # Analysis runs off the receive loop, but strictly one frame at a time per connection and
+    # under this connection's own tracker, so nothing outlives the socket. See _analyze_and_reply.
+    frame_tasks = BackgroundTaskTracker(f"frame-analysis:{session_id}")
+    frame_lock = asyncio.Lock()
 
     # Normal walking sessions are bounded at 1.2 FPS with a two-frame burst. This matches the
     # freshness policy and prevents one authenticated device from turning server queue time into
@@ -334,74 +429,23 @@ async def session(websocket: WebSocket):
                     if not await _renew_or_readmit(session_id):
                         await websocket.close(code=1013)
                         return
-                    header = resp["header"]
-                    decode_ms = resp["decode_ms"]
-                    jpeg = message["bytes"]
-
-                    async def process_frame():
-                        try:
-                            result = await session_application.analyze_frame(state, header, jpeg)
-                        except TransientInferenceError:
-                            # One frame produced nothing usable (slow inference, worker 5xx, queue
-                            # full). Shed it and keep the socket: tearing the session down here made
-                            # a routine CPU-path hiccup cost a full reconnect, and the phone stopped
-                            # streaming until the user pressed Stop/Start. Sustained failure is
-                            # escalated by InferenceCircuitOpenError below, not by this branch.
-                            metrics.worker_saturated()
-                            await websocket.send_json({"type": "error", "code": "worker_saturated"})
-                            return
-                        except InferenceCircuitOpenError:
-                            # Breaker open: keep shedding while the cooldown runs, but do not close
-                            # the socket. Closing forced reconnect → "Connection restored" while the
-                            # circuit was still open → the next frame failed closed again, which is
-                            # the unavailable↔restored flap users heard.
-                            logger.warning(
-                                "inference circuit open for device=%s frame_id=%s; shedding frame",
-                                device_id,
-                                header.frame_id,
-                            )
-                            metrics.worker_saturated()
-                            await websocket.send_json({"type": "error", "code": "worker_saturated"})
-                            return
-                        except Exception:
-                            logger.exception(
-                                "vision inference failed for device=%s frame_id=%s",
-                                device_id,
-                                header.frame_id,
-                            )
-                            metrics.inference_failed()
-                            await websocket.send_json({"type": "error", "code": "vision_unavailable"})
-                            await websocket.close(code=1011)
-                            return
-                        stages = dict(result.get("pipeline_stage_ms", {}))
-                        stages["decode"] = decode_ms
-                        metrics.observe_result(result["server_inference_ms"], result["hazard"] is not None, stages)
-                        if header.capture_epoch_ms is not None:
-                            frame_age_ms = int(result["server_received_epoch_ms"]) - header.capture_epoch_ms
-                            if 0 <= frame_age_ms <= 60_000:
-                                metrics.observe_frame_age(frame_age_ms)
-                        if result.get("late_suppressed"):
-                            metrics.late_suppressed()
-                        await websocket.send_json(result)
-                        # Fail-closed: JWT consent + bucket are not enough until blur exists (Important Architecture.md, privacy).
-                        if (
-                            settings.diagnostic_uploads_enabled
-                            and state.diagnostic_consent
-                            and settings.gcp_diagnostics_bucket
-                        ):
-                            file_name = f"{device_id}/{header.frame_id}_{header.capture_mono_ms}.jpg"
-    
-                            async def _upload_diagnostic(name=file_name, payload=jpeg):
-                                try:
-                                    await gcp_storage.upload_frame(name, payload)
-                                except Exception:
-                                    logger.exception("diagnostic upload failed device=%s", device_id)
-    
-                            vision.schedule_diagnostic_upload(_upload_diagnostic())
-    
-                        await websocket.send_json(quality_for_inference(result["server_inference_ms"]))
-                        
-                    asyncio.create_task(process_frame())
+                    # Tracked, not fire-and-forget: the event loop holds only a weak reference to
+                    # a task, so an untracked one can be garbage-collected mid-inference. The
+                    # phone would then never receive a result for a frame it believes is in
+                    # flight, and its single in-flight slot stays held until the 10 s settle
+                    # timeout — a stall with no error anywhere to explain it. The tracker also
+                    # logs exceptions that a bare task would swallow.
+                    frame_tasks.schedule(
+                        _analyze_and_reply(
+                            websocket,
+                            state,
+                            resp["header"],
+                            message["bytes"],
+                            resp["decode_ms"],
+                            device_id,
+                            frame_lock,
+                        )
+                    )
                 else:
                     await websocket.send_json(resp)
             else:
@@ -423,10 +467,14 @@ async def session(websocket: WebSocket):
             await websocket.send_json({"type": "error", "code": "protocol_error", "detail": str(exc)})
             await websocket.close(code=4400)
     finally:
+        # The socket is gone; an in-flight analysis can only fail trying to write to it, and its
+        # result is for a frame the user has already walked past. Cancel before releasing session
+        # state so no task touches the tracker or the admission lease after they are torn down.
+        await frame_tasks.cancel_all()
         if session_opened:
             try:
                 await session_admission.close(session_id)
-            except Exception as e:
-                logger.error(f"Failed to close admission for {session_id}: {e}")
+            except Exception:
+                logger.exception("Failed to close admission for %s", session_id)
             metrics.session_closed()
         await session_application.close_session(state)

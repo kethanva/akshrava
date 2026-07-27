@@ -1,7 +1,6 @@
 from akshrava_backend.domain import Detection
 from akshrava_backend.tracker import SimpleTracker
 
-
 BOX = (100.0, 100.0, 200.0, 200.0)
 
 

@@ -1,19 +1,18 @@
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
 
 
 @dataclass(frozen=True)
 class FrameHeader:
     frame_id: int
     capture_mono_ms: int
-    capture_epoch_ms: Optional[int]
+    capture_epoch_ms: int | None
     width: int
     height: int
     jpeg_bytes: int
     calibration_id: str
-    pitch_cdeg: Optional[int]
-    roll_cdeg: Optional[int]
-    pose_age_ms: Optional[int]
+    pitch_cdeg: int | None
+    roll_cdeg: int | None
+    pose_age_ms: int | None
     mode: str
     priority: bool = False
     trace_id: str = ""
@@ -25,7 +24,7 @@ class FrameHeader:
 class Detection:
     label: str
     confidence: float
-    box: Tuple[float, float, float, float]
+    box: tuple[float, float, float, float]
 
 
 @dataclass(frozen=True)
@@ -48,7 +47,7 @@ class Track:
     track_id: int
     label: str
     confidence: float
-    box: Tuple[float, float, float, float]
+    box: tuple[float, float, float, float]
     hits: int = 1
     missed: int = 0
 
@@ -64,7 +63,7 @@ class Hazard:
     severity: str = "S2"
     range_band: str = "unknown"
     range_valid: bool = False
-    track_id: Optional[int] = None
+    track_id: int | None = None
 
 
 @dataclass
@@ -75,12 +74,12 @@ class SessionState:
     session_key: str = ""
     trace_prefix: str = ""
     calibration_id: str = ""
-    tracks: List[Track] = field(default_factory=list)
-    last_alert_at_ms: Dict[str, int] = field(default_factory=dict)
-    alert_timestamps_ms: List[int] = field(default_factory=list)
-    last_capture_mono_ms: Optional[int] = None
-    last_pitch_cdeg: Optional[int] = None
-    last_roll_cdeg: Optional[int] = None
-    geometry_profile: Optional[GeometryProfile] = None
+    tracks: list[Track] = field(default_factory=list)
+    last_alert_at_ms: dict[str, int] = field(default_factory=dict)
+    alert_timestamps_ms: list[int] = field(default_factory=list)
+    last_capture_mono_ms: int | None = None
+    last_pitch_cdeg: int | None = None
+    last_roll_cdeg: int | None = None
+    geometry_profile: GeometryProfile | None = None
     language: str = ""
     diagnostic_consent: bool = False

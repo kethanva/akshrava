@@ -80,7 +80,7 @@ async def test_redis_session_admission_renew_refreshes_lease_only(monkeypatch):
 
     monkeypatch.setattr(admission, "_client_for_use", fake_client)
     assert await admission.renew("session-alive")
-    script, keys, namespace, session_id, now, lease_seconds = calls[0]
+    script, keys, _namespace, session_id, now, lease_seconds = calls[0]
     assert "ZCARD" not in script
     assert "ZSCORE" in script
     assert keys == 1

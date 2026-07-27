@@ -1,16 +1,15 @@
-import io
 import hashlib
 import hmac
+import io
 import json
 import secrets
 import ssl
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import List, Optional, Set, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import HTTPRedirectHandler, Request, build_opener, HTTPSHandler, HTTPHandler
+from urllib.request import HTTPHandler, HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
 from PIL import Image
 
@@ -20,7 +19,7 @@ from .model_integrity import verify_model_sha256
 
 class Detector(ABC):
     @abstractmethod
-    def detect(self, jpeg: bytes) -> List[Detection]:
+    def detect(self, jpeg: bytes) -> list[Detection]:
         raise NotImplementedError
 
     def requires_serial_execution(self) -> bool:
@@ -32,7 +31,7 @@ class Detector(ABC):
         """
         return True
 
-    def detect_batch(self, jpegs: List[bytes]) -> List[List[Detection]]:
+    def detect_batch(self, jpegs: list[bytes]) -> list[list[Detection]]:
         """Detect a bounded group of independent frames.
 
         Adapters that cannot batch safely retain correct behaviour through this default. GPU
@@ -41,7 +40,7 @@ class Detector(ABC):
         """
         return [self.detect(jpeg) for jpeg in jpegs]
 
-    def detect_for_device(self, device_id: str, jpeg: bytes) -> List[Detection]:
+    def detect_for_device(self, device_id: str, jpeg: bytes) -> list[Detection]:
         """Detect for an authenticated device.
 
         Most detectors are device-agnostic. Remote adapters may use the stable device id to keep
@@ -49,17 +48,17 @@ class Detector(ABC):
         """
         return self.detect(jpeg)
 
-    async def detect_async(self, jpeg: bytes) -> List[Detection]:
+    async def detect_async(self, jpeg: bytes) -> list[Detection]:
         import asyncio
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self.detect, jpeg)
 
-    async def detect_async_for_device(self, device_id: str, jpeg: bytes) -> List[Detection]:
+    async def detect_async_for_device(self, device_id: str, jpeg: bytes) -> list[Detection]:
         import asyncio
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self.detect_for_device, device_id, jpeg)
 
-    async def detect_async_with_status_for_device(self, device_id: str, jpeg: bytes) -> Tuple[List[Detection], bool]:
+    async def detect_async_with_status_for_device(self, device_id: str, jpeg: bytes) -> tuple[list[Detection], bool]:
         """Return detections along with fallback status. Defaults to False (fallback not active)."""
         return await self.detect_async_for_device(device_id, jpeg), False
 
@@ -80,7 +79,7 @@ def jpeg_dimensions(jpeg: bytes):
 class NoopDetector(Detector):
     """Safe default: accepts frames but never invents an alert."""
 
-    def detect(self, jpeg: bytes) -> List[Detection]:
+    def detect(self, jpeg: bytes) -> list[Detection]:
         return []
 
     def requires_serial_execution(self) -> bool:
@@ -130,7 +129,7 @@ class RemoteWorkerDetector(Detector):
         tls_ca_file: str = "",
         tls_client_cert_file: str = "",
         tls_client_key_file: str = "",
-        allowed_hosts: Optional[Set[str]] = None,
+        allowed_hosts: set[str] | None = None,
     ):
         self.endpoint = endpoint
         parsed = urlparse(endpoint)
@@ -165,7 +164,7 @@ class RemoteWorkerDetector(Detector):
             )
         return self._async_client
 
-    def detect(self, jpeg: bytes) -> List[Detection]:
+    def detect(self, jpeg: bytes) -> list[Detection]:
         self._assert_host_allowed(self.endpoint)
         body = jpeg
         timestamp = str(int(time.time()))
@@ -215,7 +214,7 @@ class RemoteWorkerDetector(Detector):
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise RemoteInferenceError("invalid remote worker response") from exc
 
-    async def detect_async(self, jpeg: bytes) -> List[Detection]:
+    async def detect_async(self, jpeg: bytes) -> list[Detection]:
         self._assert_host_allowed(self.endpoint)
         client = await self._get_async_client()
         body = jpeg
@@ -316,14 +315,14 @@ class StaticInferenceEndpointRegistry:
     It is still configured at deploy time, but it is no longer a blind comma-separated retry list.
     """
 
-    def __init__(self, endpoints: List[InferenceEndpoint]):
+    def __init__(self, endpoints: list[InferenceEndpoint]):
         enabled = [endpoint for endpoint in endpoints if endpoint.enabled]
         if not enabled:
             raise ValueError("at least one enabled inference endpoint is required")
         self._endpoints = enabled
 
     @classmethod
-    def from_urls(cls, urls: List[str]):
+    def from_urls(cls, urls: list[str]):
         endpoints = [
             InferenceEndpoint(id="worker-%d" % (index + 1), url=url)
             for index, url in enumerate(urls)
@@ -351,15 +350,15 @@ class StaticInferenceEndpointRegistry:
         return cls(endpoints)
 
     @property
-    def endpoints(self) -> List[InferenceEndpoint]:
+    def endpoints(self) -> list[InferenceEndpoint]:
         return list(self._endpoints)
 
-    def ordered_for_device(self, device_id: str) -> List[InferenceEndpoint]:
+    def ordered_for_device(self, device_id: str) -> list[InferenceEndpoint]:
         digest = hashlib.sha256(device_id.encode("utf-8")).digest()
         start = int.from_bytes(digest[:8], "big") % len(self._endpoints)
         return self._endpoints[start:] + self._endpoints[:start]
 
-    def allowed_hosts(self) -> Set[str]:
+    def allowed_hosts(self) -> set[str]:
         hosts = set()
         for endpoint in self._endpoints:
             host = urlparse(endpoint.url).hostname
@@ -381,10 +380,10 @@ class RegistryRemoteWorkerDetector(Detector):
             for endpoint in registry.endpoints
         }
 
-    def detect(self, jpeg: bytes) -> List[Detection]:
+    def detect(self, jpeg: bytes) -> list[Detection]:
         return self.detect_for_device("", jpeg)
 
-    def detect_for_device(self, device_id: str, jpeg: bytes) -> List[Detection]:
+    def detect_for_device(self, device_id: str, jpeg: bytes) -> list[Detection]:
         errors = []
         for endpoint in self.registry.ordered_for_device(device_id):
             try:
@@ -394,10 +393,10 @@ class RegistryRemoteWorkerDetector(Detector):
         aggregated = self._aggregate_remote_errors(errors)
         raise aggregated from errors[-1]
 
-    async def detect_async(self, jpeg: bytes) -> List[Detection]:
+    async def detect_async(self, jpeg: bytes) -> list[Detection]:
         return await self.detect_async_for_device("", jpeg)
 
-    async def detect_async_for_device(self, device_id: str, jpeg: bytes) -> List[Detection]:
+    async def detect_async_for_device(self, device_id: str, jpeg: bytes) -> list[Detection]:
         errors = []
         for endpoint in self.registry.ordered_for_device(device_id):
             try:
@@ -408,7 +407,7 @@ class RegistryRemoteWorkerDetector(Detector):
         raise aggregated from errors[-1]
 
     @staticmethod
-    def _aggregate_remote_errors(errors: List[Exception]) -> RemoteInferenceError:
+    def _aggregate_remote_errors(errors: list[Exception]) -> RemoteInferenceError:
         """Preserve WorkerSaturatedError so the API can soft-shed without tearing down WSS.
 
         A single-endpoint pilot that returns HTTP 503 must not be rewritten into a generic
@@ -441,10 +440,10 @@ class UltralyticsDetector(Detector):
         from concurrent.futures import ThreadPoolExecutor
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="akshrava-local-infer")
 
-    def detect(self, jpeg: bytes) -> List[Detection]:
+    def detect(self, jpeg: bytes) -> list[Detection]:
         return self.detect_batch([jpeg])[0]
 
-    def detect_batch(self, jpegs: List[bytes]) -> List[List[Detection]]:
+    def detect_batch(self, jpegs: list[bytes]) -> list[list[Detection]]:
         images = [Image.open(io.BytesIO(jpeg)).convert("RGB") for jpeg in jpegs]
         results = self._model.predict(images, imgsz=640, conf=0.25, verbose=False)
         parsed = []
@@ -462,12 +461,12 @@ class UltralyticsDetector(Detector):
             parsed.append(detections)
         return parsed
 
-    async def detect_async(self, jpeg: bytes) -> List[Detection]:
+    async def detect_async(self, jpeg: bytes) -> list[Detection]:
         import asyncio
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self._executor, self.detect, jpeg)
 
-    async def detect_async_for_device(self, device_id: str, jpeg: bytes) -> List[Detection]:
+    async def detect_async_for_device(self, device_id: str, jpeg: bytes) -> list[Detection]:
         import asyncio
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self._executor, self.detect_for_device, device_id, jpeg)
@@ -511,7 +510,7 @@ def make_detector(
             tls_client_key_file=remote_tls_client_key_file,
         )
     else:
-        raise RuntimeError("unknown DETECTOR=%s" % kind)
+        raise RuntimeError(f"unknown DETECTOR={kind}")
     if cloud_provider is not None:
         from .cloud_fallback import CloudFallbackDetector
         return CloudFallbackDetector(detector, cloud_provider, cloud_min_confidence)

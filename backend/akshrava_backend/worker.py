@@ -14,12 +14,11 @@ import os
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request, Response, Depends
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 
-from .detector import Detector, jpeg_dimensions, make_detector
 from .coordination import nonce_store_for
+from .detector import Detector, jpeg_dimensions, make_detector
 from .logging_util import configure_json_logging
 from .metrics import Metrics
 from .model_integrity import verify_model_sha256
@@ -167,8 +166,8 @@ def get_inference_queue(request: Request) -> asyncio.Queue:
 
 
 def create_worker_app(
-    settings: Optional[WorkerSettings] = None,
-    detector: Optional[Detector] = None,
+    settings: WorkerSettings | None = None,
+    detector: Detector | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):

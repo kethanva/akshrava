@@ -1,8 +1,6 @@
 import math
-from typing import List, Optional, Tuple
 
 from .domain import GeometryProfile, Hazard, SessionState, Track
-
 
 VEHICLE_LABELS = {"car", "truck", "bus", "motorcycle", "bicycle", "auto_rickshaw"}
 OBSTACLE_LABELS = {"person", "dog", "cat", "chair", "pole", "hawker_cart", "parked_vehicle"}
@@ -61,7 +59,7 @@ def _bearing(track: Track, width: int) -> str:
     return "ahead"
 
 
-def _effective_focal(profile: GeometryProfile, image_height: int) -> Optional[float]:
+def _effective_focal(profile: GeometryProfile, image_height: int) -> float | None:
     """Scale calibrated focal_px from reference_height_px to the current JPEG height."""
     if image_height < 1 or profile.reference_height_px < 1:
         return None
@@ -70,10 +68,10 @@ def _effective_focal(profile: GeometryProfile, image_height: int) -> Optional[fl
 
 def _pinhole_distance(
     label: str,
-    box: Tuple[float, float, float, float],
+    box: tuple[float, float, float, float],
     image_height: int,
-    profile: Optional[GeometryProfile],
-) -> Optional[float]:
+    profile: GeometryProfile | None,
+) -> float | None:
     """Calibrated pinhole estimate: distance = focal_px * H_known / box_height_px."""
     h_known = KNOWN_HEIGHTS_M.get(label)
     if h_known is None or profile is None:
@@ -88,11 +86,11 @@ def _pinhole_distance(
 
 
 def _ground_plane_distance(
-    box: Tuple[float, float, float, float],
+    box: tuple[float, float, float, float],
     image_height: int,
-    pitch_cdeg: Optional[int],
-    profile: Optional[GeometryProfile],
-) -> Optional[float]:
+    pitch_cdeg: int | None,
+    profile: GeometryProfile | None,
+) -> float | None:
     """Ground-plane homography estimate from bottom edge of bounding box.
 
     Uses the camera pitch angle and the pixel offset of the box bottom from the
@@ -127,12 +125,12 @@ def _ground_plane_distance(
 
 
 def _range_valid(
-    pose_age_ms: Optional[int],
-    pitch_cdeg: Optional[int],
-    roll_cdeg: Optional[int],
-    pinhole_dist: Optional[float],
-    ground_dist: Optional[float],
-    profile: Optional[GeometryProfile],
+    pose_age_ms: int | None,
+    pitch_cdeg: int | None,
+    roll_cdeg: int | None,
+    pinhole_dist: float | None,
+    ground_dist: float | None,
+    profile: GeometryProfile | None,
 ) -> bool:
     """Return false until each phone supplies a validated calibration profile.
 
@@ -158,12 +156,10 @@ def _range_valid(
     if pinhole_dist <= 0 or ground_dist <= 0:
         return False
     ratio = pinhole_dist / ground_dist
-    if ratio < 0.5 or ratio > 1.5:
-        return False
-    return True
+    return not (ratio < 0.5 or ratio > 1.5)
 
 
-def _range_band(distance: Optional[float]) -> str:
+def _range_band(distance: float | None) -> str:
     """Map distance to a range band: near (<3m), ahead (3–6m), far (>6m)."""
     if distance is None:
         return "unknown"
@@ -182,13 +178,13 @@ class HazardScorer:
         state: SessionState,
         width: int,
         height: int,
-        pose_age_ms: Optional[int],
-        pitch_cdeg: Optional[int],
-        roll_cdeg: Optional[int],
-        geometry_profile: Optional[GeometryProfile] = None,
+        pose_age_ms: int | None,
+        pitch_cdeg: int | None,
+        roll_cdeg: int | None,
+        geometry_profile: GeometryProfile | None = None,
         skip_cooldowns: bool = False,
-    ) -> Optional[Hazard]:
-        candidates: List[Hazard] = []
+    ) -> Hazard | None:
+        candidates: list[Hazard] = []
         for track in state.tracks:
             if track.confidence < MIN_CONFIDENCE:
                 continue

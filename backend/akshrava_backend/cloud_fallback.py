@@ -5,17 +5,16 @@ form captions and broad image tags never leave this module: returning them to th
 needlessly disclose cloud-derived scene details without an approved operator-consent workflow.
 """
 
-from dataclasses import dataclass
 import io
 import logging
 import threading
 import time
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
 
 from PIL import Image
 
-from .domain import Detection
 from .detector import Detector
+from .domain import Detection
 
 logger = logging.getLogger(__name__)
 
@@ -28,14 +27,14 @@ class CloudProviderError(RuntimeError):
 class CloudObject:
     label: str
     confidence: float
-    box: Optional[Tuple[float, float, float, float]] = None
+    box: tuple[float, float, float, float] | None = None
     normalized: bool = False
 
 
 @dataclass(frozen=True)
 class CloudResult:
     provider: str
-    labels: List[CloudObject]
+    labels: list[CloudObject]
 
 
 class CloudImageProvider:
@@ -45,7 +44,7 @@ class CloudImageProvider:
         raise NotImplementedError
 
 
-_SAFE_LABELS: Dict[str, str] = {
+_SAFE_LABELS: dict[str, str] = {
     "person": "person",
     "bicycle": "bicycle",
     "bike": "bicycle",
@@ -71,16 +70,16 @@ class CloudFallbackDetector(Detector):
         self._last_logged_failure_at = 0.0
         self._log_lock = threading.Lock()
 
-    def detect(self, jpeg: bytes) -> List[Detection]:
+    def detect(self, jpeg: bytes) -> list[Detection]:
         return self.detect_with_status(jpeg)[0]
 
-    def detect_for_device(self, device_id: str, jpeg: bytes) -> List[Detection]:
+    def detect_for_device(self, device_id: str, jpeg: bytes) -> list[Detection]:
         return self.detect_with_status_for_device(device_id, jpeg)[0]
 
-    def detect_with_status(self, jpeg: bytes) -> Tuple[List[Detection], bool]:
+    def detect_with_status(self, jpeg: bytes) -> tuple[list[Detection], bool]:
         return self.detect_with_status_for_device("", jpeg)
 
-    def detect_with_status_for_device(self, device_id: str, jpeg: bytes) -> Tuple[List[Detection], bool]:
+    def detect_with_status_for_device(self, device_id: str, jpeg: bytes) -> tuple[list[Detection], bool]:
         """Return frame-local availability with detections; never share it between devices."""
         local_detections = self.local.detect_for_device(device_id, jpeg)
         if local_detections:
@@ -121,15 +120,15 @@ class CloudFallbackDetector(Detector):
             return [], True
         return detections, False
 
-    async def detect_async(self, jpeg: bytes) -> List[Detection]:
+    async def detect_async(self, jpeg: bytes) -> list[Detection]:
         detections, _ = await self.detect_async_with_status_for_device("", jpeg)
         return detections
 
-    async def detect_async_for_device(self, device_id: str, jpeg: bytes) -> List[Detection]:
+    async def detect_async_for_device(self, device_id: str, jpeg: bytes) -> list[Detection]:
         detections, _ = await self.detect_async_with_status_for_device(device_id, jpeg)
         return detections
 
-    async def detect_async_with_status_for_device(self, device_id: str, jpeg: bytes) -> Tuple[List[Detection], bool]:
+    async def detect_async_with_status_for_device(self, device_id: str, jpeg: bytes) -> tuple[list[Detection], bool]:
         local_detections = await self.local.detect_async_for_device(device_id, jpeg)
         if local_detections:
             return local_detections, False
@@ -276,7 +275,7 @@ class AzureImageAnalysisProvider(CloudImageProvider):
         return CloudResult(self.name, parsed)
 
 
-def make_cloud_provider(kind: str, aws_region: str, azure_endpoint: str, azure_key: str) -> Optional[CloudImageProvider]:
+def make_cloud_provider(kind: str, aws_region: str, azure_endpoint: str, azure_key: str) -> CloudImageProvider | None:
     if kind == "none":
         return None
     if kind == "aws":
@@ -287,4 +286,4 @@ def make_cloud_provider(kind: str, aws_region: str, azure_endpoint: str, azure_k
         if not azure_endpoint or not azure_key:
             raise CloudProviderError("AZURE_VISION_ENDPOINT and AZURE_VISION_KEY are required")
         return AzureImageAnalysisProvider(azure_endpoint, azure_key)
-    raise CloudProviderError("unknown CLOUD_FALLBACK_PROVIDER=%s" % kind)
+    raise CloudProviderError(f"unknown CLOUD_FALLBACK_PROVIDER={kind}")

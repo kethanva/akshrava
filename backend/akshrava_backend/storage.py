@@ -1,9 +1,8 @@
-from collections import OrderedDict
-from datetime import datetime, timedelta, timezone
 import logging
 import os
 import time
-from typing import Optional, Tuple
+from collections import OrderedDict
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import DateTime, Float, Integer, String, delete, event, inspect, select, text
 from sqlalchemy.exc import IntegrityError
@@ -43,7 +42,7 @@ class Device(Base):
     calibration_id: Mapped[str] = mapped_column(String(128), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class CalibrationProfileRecord(Base):
@@ -82,9 +81,9 @@ class Store:
         self,
         url,
         *,
-        redis_url: Optional[str] = None,
+        redis_url: str | None = None,
         bootstrap_schema: bool = True,
-        expected_schema_revision: Optional[str] = None,
+        expected_schema_revision: str | None = None,
     ):
         if url.startswith("sqlite"):
             # SQLite (dev/test) uses a single-file connection; the QueuePool sizing args do not
@@ -126,7 +125,11 @@ class Store:
 
     async def close(self):
         if self._redis_client is not None:
-            await self._redis_client.close()
+            # aclose(), not close(): redis-py deprecated the close() alias in 5.0.1, and the
+            # other Redis-backed components here (admission, rate limiter, nonce store) already
+            # use aclose(). Leaving one caller on the alias means shutdown emits a deprecation
+            # warning that will become an AttributeError on the next major redis-py.
+            await self._redis_client.aclose()
             self._redis_client = None
         await self.engine.dispose()
 
@@ -149,18 +152,17 @@ class Store:
             )
         missing = required - present
         if missing:
-            raise RuntimeError("database schema is not migrated; missing tables: %s" % ", ".join(sorted(missing)))
+            raise RuntimeError("database schema is not migrated; missing tables: {}".format(", ".join(sorted(missing))))
         if self.expected_schema_revision:
             if "alembic_version" not in present:
                 raise RuntimeError(
-                    "database schema revision mismatch: expected %s, found none" % self.expected_schema_revision
+                    f"database schema revision mismatch: expected {self.expected_schema_revision}, found none"
                 )
             async with self.engine.connect() as connection:
                 revision = (await connection.execute(text("SELECT version_num FROM alembic_version"))).scalar_one_or_none()
             if revision != self.expected_schema_revision:
                 raise RuntimeError(
-                    "database schema revision mismatch: expected %s, found %s"
-                    % (self.expected_schema_revision, revision or "none")
+                    "database schema revision mismatch: expected {}, found {}".format(self.expected_schema_revision, revision or "none")
                 )
 
     async def upsert_device(self, device_id, calibration_id):
@@ -252,7 +254,7 @@ class Store:
                     client = await self._get_redis_client()
                     if client:
                         await client.set(
-                            "revocation:%s" % device_id,
+                            f"revocation:{device_id}",
                             b"1",
                             ex=max(int(self._cache_ttl), 60),
                         )
@@ -273,7 +275,7 @@ class Store:
             try:
                 client = await self._get_redis_client()
                 if client:
-                    cached = await client.get("revocation:%s" % device_id)
+                    cached = await client.get(f"revocation:{device_id}")
                     if cached is not None:
                         return cached == b"1"
             except Exception:
@@ -299,7 +301,7 @@ class Store:
                 if client:
                     # Positives and short-TTL negatives are both safe: revoke always overwrites with b"1".
                     await client.set(
-                        "revocation:%s" % device_id,
+                        f"revocation:{device_id}",
                         b"1" if revoked else b"0",
                         ex=max(int(ttl), 1),
                     )
@@ -311,7 +313,7 @@ class Store:
         async with self.engine.connect() as connection:
             await connection.execute(text("SELECT 1"))
 
-    def pool_status(self) -> Tuple[int, int]:
+    def pool_status(self) -> tuple[int, int]:
         """Returns (checkedin, checkedout) connection counts for the SQLAlchemy pool."""
         try:
             pool = self.engine.pool

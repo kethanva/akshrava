@@ -1,5 +1,5 @@
-from typing import List, NamedTuple, Optional
 from pathlib import Path
+from typing import NamedTuple
 
 import jwt
 
@@ -37,7 +37,7 @@ def _read_pem(path: Path) -> str:
     return pem
 
 
-def _verification_keys(settings: Settings) -> List[str]:
+def _verification_keys(settings: Settings) -> list[str]:
     """Current RS256 public key plus optional previous key for rotation cutover."""
     if settings.jwt_algorithm == "HS256":
         return [settings.jwt_secret]
@@ -54,13 +54,13 @@ def _verification_keys(settings: Settings) -> List[str]:
     return keys
 
 
-def device_claims_from_token(token: Optional[str], settings: Settings) -> DeviceClaims:
+def device_claims_from_token(token: str | None, settings: Settings) -> DeviceClaims:
     """Decode a device JWT. Diagnostic upload consent is a server-side claim, not a query param."""
     if settings.dev_auth_bypass and token == "dev-device-token":
         return DeviceClaims(device_id="dev-device", diagnostic_consent=False)
     if not token:
         raise AuthError("missing device token")
-    last_error: Optional[Exception] = None
+    last_error: Exception | None = None
     for key in _verification_keys(settings):
         try:
             # PyJWT only validates exp/iat/aud when the claim is PRESENT in the token. A token
@@ -89,5 +89,5 @@ def device_claims_from_token(token: Optional[str], settings: Settings) -> Device
     return DeviceClaims(device_id=subject, diagnostic_consent=consent)
 
 
-def device_id_from_token(token: Optional[str], settings: Settings) -> str:
+def device_id_from_token(token: str | None, settings: Settings) -> str:
     return device_claims_from_token(token, settings).device_id

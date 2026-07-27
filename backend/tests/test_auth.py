@@ -118,7 +118,8 @@ def _rs256_token(private, sub="phone-1"):
 
 def test_rs256_key_cache_picks_up_a_rotated_public_key_on_mtime_change(tmp_path, monkeypatch):
     import os
-    import akshrava_backend.auth as auth
+
+    from akshrava_backend import auth
 
     auth._KEY_CACHE.clear()
     key_a = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -146,7 +147,7 @@ def test_rs256_key_cache_picks_up_a_rotated_public_key_on_mtime_change(tmp_path,
 
 def test_rs256_dual_key_accepts_previous_during_rotation_cutover(tmp_path, monkeypatch):
     """During rotate_jwt_rs256.sh cutover, tokens minted with the previous private key still verify."""
-    import akshrava_backend.auth as auth
+    from akshrava_backend import auth
 
     auth._KEY_CACHE.clear()
     previous = rsa.generate_private_key(public_exponent=65537, key_size=2048)

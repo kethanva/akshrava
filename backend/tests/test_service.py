@@ -1,5 +1,5 @@
-import time
 import asyncio
+import time
 
 import pytest
 
@@ -435,3 +435,42 @@ async def test_inference_deadline_is_transient_not_a_session_ending_failure():
         assert not isinstance(TransientInferenceError("x"), InferenceCircuitOpenError)
     finally:
         service.shutdown()
+
+
+async def test_cancel_all_stops_tracked_work_that_has_nowhere_left_to_go():
+    """Work whose destination is gone must be cancelled, and the caller must know it has unwound.
+
+    A frame still being analysed when its WebSocket dies can only fail on the send, and it holds
+    a reference to session state the connection teardown is about to release. cancel_all() must
+    therefore both cancel and await, so nothing is mid-await on that state afterwards.
+    """
+    from akshrava_backend.service import BackgroundTaskTracker
+
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    completed = False
+
+    async def long_running():
+        nonlocal completed
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        completed = True
+
+    tracker = BackgroundTaskTracker("test-cancel")
+    tracker.schedule(long_running())
+    await started.wait()
+    await tracker.cancel_all()
+
+    assert cancelled.is_set()
+    assert completed is False
+    assert all(task.done() for task in tracker.tasks)
+
+
+async def test_cancel_all_is_safe_when_nothing_is_in_flight():
+    from akshrava_backend.service import BackgroundTaskTracker
+
+    await BackgroundTaskTracker("test-empty").cancel_all()

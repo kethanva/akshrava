@@ -1,11 +1,11 @@
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from typing import Callable, Dict, Set
 
-from .composer import hazard_payload, look_summary
 from .alert_policy import AlertPolicy
+from .composer import hazard_payload, look_summary
 from .detector import (
     Detector,
     RegistryRemoteWorkerDetector,
@@ -37,7 +37,7 @@ class BackgroundTaskTracker:
 
     def __init__(self, name: str):
         self.name = name
-        self.tasks: Set[asyncio.Task] = set()
+        self.tasks: set[asyncio.Task] = set()
 
     def schedule(self, coro) -> None:
         task = asyncio.create_task(coro)
@@ -62,11 +62,26 @@ class BackgroundTaskTracker:
         if not self.tasks:
             return
         pending = list(self.tasks)
-        done, still_pending = await asyncio.wait(pending, timeout=timeout)
+        _done, still_pending = await asyncio.wait(pending, timeout=timeout)
         for task in still_pending:
             task.cancel()
         if still_pending:
             await asyncio.gather(*still_pending, return_exceptions=True)
+
+    async def cancel_all(self) -> None:
+        """Cancel every tracked task and wait for it to unwind.
+
+        Unlike drain(), this gives no grace period: it is for work whose destination is already
+        gone (a closed WebSocket), where finishing would only raise on the send. Awaiting the
+        cancellations still matters -- it guarantees no task is mid-await on shared session state
+        when the caller tears that state down.
+        """
+        if not self.tasks:
+            return
+        pending = list(self.tasks)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
 class VisionService:
@@ -98,7 +113,7 @@ class VisionService:
         self.detector = detector
         self.store = store
         self.language = language
-        self._trackers: Dict[str, SimpleTracker] = {}
+        self._trackers: dict[str, SimpleTracker] = {}
         self._tracker_factory = tracker_factory
         self.scorer = HazardScorer()
         self.alert_policy = AlertPolicy()
@@ -112,8 +127,8 @@ class VisionService:
         self._local_executor = self._new_executor("akshrava-local-infer")
         self._remote_executor = self._new_executor("akshrava-remote-infer")
         # Per-device breakers: one hung phone/GPU path must not silence the fleet.
-        self._timeout_streak: Dict[str, int] = {}
-        self._circuit_open_until: Dict[str, float] = {}
+        self._timeout_streak: dict[str, int] = {}
+        self._circuit_open_until: dict[str, float] = {}
         # Alert persistence / diagnostic uploads must never block the phone WebSocket reply.
         self._persist_tracker = BackgroundTaskTracker("alert-persistence")
         self._upload_tracker = BackgroundTaskTracker("diagnostic-uploads")
@@ -135,7 +150,7 @@ class VisionService:
             self._trackers[session_key] = self._tracker_factory()
         return self._trackers[session_key]
 
-    async def analyze(self, state: SessionState, header: FrameHeader, jpeg: bytes) -> Dict:
+    async def analyze(self, state: SessionState, header: FrameHeader, jpeg: bytes) -> dict:
         started = time.monotonic()
         detected_started = started
         # Local models and cloud-fallback wrappers retain mutable state. Remote workers opt in
@@ -398,7 +413,11 @@ class VisionService:
 
     @staticmethod
     def _remember_pose(state: SessionState, header: FrameHeader) -> None:
-        if header.pose_age_ms is not None and header.pose_age_ms <= 100:
-            if header.pitch_cdeg is not None and header.roll_cdeg is not None:
-                state.last_pitch_cdeg = header.pitch_cdeg
-                state.last_roll_cdeg = header.roll_cdeg
+        if (
+            header.pose_age_ms is not None
+            and header.pose_age_ms <= 100
+            and header.pitch_cdeg is not None
+            and header.roll_cdeg is not None
+        ):
+            state.last_pitch_cdeg = header.pitch_cdeg
+            state.last_roll_cdeg = header.roll_cdeg

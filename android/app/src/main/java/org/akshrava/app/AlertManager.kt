@@ -344,8 +344,13 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
     }
 
     private fun pruneRecent(now: Long) {
-        while (recentUtterances.isNotEmpty() && now - recentUtterances.peekFirst()!! > BUSY_WINDOW_MS) {
-            recentUtterances.pollFirst()
+        while (recentUtterances.isNotEmpty()) {
+            val first = recentUtterances.peekFirst() ?: break
+            if (now - first > BUSY_WINDOW_MS) {
+                recentUtterances.pollFirst()
+            } else {
+                break
+            }
         }
     }
 

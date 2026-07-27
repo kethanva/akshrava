@@ -48,6 +48,19 @@ class AssistService : LifecycleService() {
         internal const val HEARTBEAT_INTERVAL_MS = 30_000L
         /** Partial wake lock is timed so a hung teardown cannot hold the CPU forever. */
         internal const val WAKE_LOCK_TIMEOUT_MS = 60 * 60_000L
+
+        /**
+         * How often a live session re-arms its timed wake locks.
+         *
+         * The timeout above is a safety net against a hung teardown, not a session budget: a walk
+         * longer than an hour is ordinary use, and when the timeout fired mid-walk the CPU lock
+         * and (without overlay permission) the screen-bright lock were both silently lost. The
+         * display then sleeps on its normal timeout, OEM ROMs stop delivering CameraX frames, and
+         * assistance ends with the socket still open and nothing in any log to explain it.
+         * Re-arming well inside the window keeps a healthy session alive indefinitely while a
+         * session that has stopped analysing frames still lets the locks lapse on schedule.
+         */
+        internal const val WAKE_LOCK_RENEW_INTERVAL_MS = 15 * 60_000L
         /** Hard upper bound on FGS teardown even if TTS never completes. */
         private const val STOP_HARD_TIMEOUT_MS = 3_000L
         /** Rebind CameraX when analysis callbacks go silent while the session is meant to be live. */
@@ -111,6 +124,7 @@ class AssistService : LifecycleService() {
     private var lastBatteryWarningMs = 0L
     private var lastCameraUnclearMs = 0L
     private var lastHeartbeatMs = 0L
+    private var lastWakeLockRenewAtMs = 0L
     private var lastAnalyzeAtMs = 0L
     private var lastQualityRebindAtMs = 0L
     private var lastNotificationText: String? = null
@@ -256,8 +270,14 @@ class AssistService : LifecycleService() {
         val am = AlertManager(this, config.language).also { alertManager = it }
         val manager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = manager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Akshrava:camera").also {
+            // Not reference counted: the session re-acquires this lock periodically to re-arm its
+            // timeout (see maybeRenewWakeLocks). With the default counting behaviour each renewal
+            // would add a hold that the single release() in teardown could never balance, leaking
+            // the CPU lock for the life of the process.
+            it.setReferenceCounted(false)
             it.acquire(WAKE_LOCK_TIMEOUT_MS)
         }
+        lastWakeLockRenewAtMs = SystemClock.elapsedRealtime()
         val httpClient = OkHttpClient.Builder().pingInterval(20, java.util.concurrent.TimeUnit.SECONDS).build().also { http = it }
         // Donated / low-RAM phones start on a cheaper ladder before the first server quality hint.
         linkQuality = LinkQualityController()
@@ -808,6 +828,22 @@ class AssistService : LifecycleService() {
         if (now - lastHeartbeatMs < HEARTBEAT_INTERVAL_MS) return
         lastHeartbeatMs = now
         SessionFlags.heartbeat(this)
+        maybeRenewWakeLocks(now)
+    }
+
+    /**
+     * Re-arm the timed CPU and screen wake locks while frames are still flowing.
+     *
+     * Driven from the heartbeat rather than a timer on purpose: the heartbeat only fires from the
+     * camera analysis callback, so a session that has genuinely stopped producing frames stops
+     * renewing and its locks lapse on schedule.
+     */
+    private fun maybeRenewWakeLocks(now: Long) {
+        if (now - lastWakeLockRenewAtMs < WAKE_LOCK_RENEW_INTERVAL_MS) return
+        lastWakeLockRenewAtMs = now
+        runCatching { wakeLock?.acquire(WAKE_LOCK_TIMEOUT_MS) }
+        screenKeepAlive?.renew()
+        Log.i("AkshravaDebug", "wake_locks_renewed screen_mode=${screenKeepAlive?.mode}")
     }
 
     private fun captureIntervalMs(): Long {

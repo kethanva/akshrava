@@ -9,10 +9,8 @@ a coarse global backstop so a saturated detector cannot flood the socket.
 """
 
 import time
-from typing import Optional
 
 from .domain import Hazard, SessionState
-
 
 # Short same-key debounce only. Speech cooldowns live on the phone so a client drop
 # (utterance gap / busy collapse) cannot create a multi-second phantom silence.
@@ -22,11 +20,11 @@ GLOBAL_RATE_WINDOW_MS = 60_000
 
 
 class AlertPolicy:
-    def admit(self, state: SessionState, candidate: Optional[Hazard], *, priority: bool) -> Optional[Hazard]:
+    def admit(self, state: SessionState, candidate: Hazard | None, *, priority: bool) -> Hazard | None:
         if candidate is None:
             return None
         now = int(time.monotonic() * 1000)
-        cooldown_key = "%s:%s" % (candidate.kind, candidate.bearing)
+        cooldown_key = f"{candidate.kind}:{candidate.bearing}"
         self._prune_rate_window(state, now)
         if not priority:
             previous = state.last_alert_at_ms.get(cooldown_key)

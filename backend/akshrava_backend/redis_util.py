@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict
+from typing import Any
 
 
-def _ssl_kwargs_for_url(url: str) -> Dict[str, Any]:
+def _ssl_kwargs_for_url(url: str) -> dict[str, Any]:
     """SSL kwargs for redis-py asyncio ``from_url``.
 
     ``ssl_cert_reqs`` must be the strings ``none`` / ``optional`` / ``required``

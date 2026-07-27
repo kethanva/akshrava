@@ -2,7 +2,12 @@ import io
 
 from PIL import Image
 
-from akshrava_backend.cloud_fallback import CloudFallbackDetector, CloudImageProvider, CloudObject, CloudResult
+from akshrava_backend.cloud_fallback import (
+    CloudFallbackDetector,
+    CloudImageProvider,
+    CloudObject,
+    CloudResult,
+)
 from akshrava_backend.detector import Detector
 from akshrava_backend.domain import Detection
 

@@ -5,7 +5,6 @@ endpoint must not become a source of location or behavioural telemetry.
 """
 
 from threading import Lock
-from typing import Dict
 
 
 class Metrics:
@@ -25,10 +24,10 @@ class Metrics:
         self._worker_saturated_total = 0
         self._db_pool_checkedin = 0
         self._db_pool_checkedout = 0
-        self._inference_counts: Dict[int, int] = {bucket: 0 for bucket in self._INFERENCE_BUCKETS}
+        self._inference_counts: dict[int, int] = {bucket: 0 for bucket in self._INFERENCE_BUCKETS}
         self._inference_sum_ms = 0
         self._inference_count = 0
-        self._frame_age_counts: Dict[int, int] = {bucket: 0 for bucket in self._FRAME_AGE_BUCKETS}
+        self._frame_age_counts: dict[int, int] = {bucket: 0 for bucket in self._FRAME_AGE_BUCKETS}
         self._frame_age_sum_ms = 0
         self._frame_age_count = 0
         self._stage_counts = {stage: {bucket: 0 for bucket in self._INFERENCE_BUCKETS} for stage in self._PIPELINE_STAGES}
@@ -116,48 +115,46 @@ class Metrics:
             lines = [
                 "# HELP akshrava_frames_processed_total Frames successfully processed by the vision service.",
                 "# TYPE akshrava_frames_processed_total counter",
-                "akshrava_frames_processed_total %s" % self._frames_total,
+                f"akshrava_frames_processed_total {self._frames_total}",
                 "# HELP akshrava_alerts_emitted_total Hazard alerts emitted to a device.",
                 "# TYPE akshrava_alerts_emitted_total counter",
-                "akshrava_alerts_emitted_total %s" % self._alerts_total,
+                f"akshrava_alerts_emitted_total {self._alerts_total}",
                 "# HELP akshrava_frames_rejected_total Frame messages rejected before inference.",
                 "# TYPE akshrava_frames_rejected_total counter",
-                "akshrava_frames_rejected_total %s" % self._rejected_frames_total,
+                f"akshrava_frames_rejected_total {self._rejected_frames_total}",
                 "# HELP akshrava_late_suppressed_total Hazards detected too late to speak safely.",
                 "# TYPE akshrava_late_suppressed_total counter",
-                "akshrava_late_suppressed_total %s" % self._late_suppressed_total,
+                f"akshrava_late_suppressed_total {self._late_suppressed_total}",
                 "# HELP akshrava_sessions_active Active authenticated WebSocket sessions on this API instance.",
                 "# TYPE akshrava_sessions_active gauge",
-                "akshrava_sessions_active %s" % self._sessions_active,
+                f"akshrava_sessions_active {self._sessions_active}",
                 "# HELP akshrava_session_admission_rejected_total Authenticated sessions rejected because fleet capacity was exhausted.",
                 "# TYPE akshrava_session_admission_rejected_total counter",
-                "akshrava_session_admission_rejected_total %s" % self._session_admission_rejected_total,
+                f"akshrava_session_admission_rejected_total {self._session_admission_rejected_total}",
                 "# HELP akshrava_inference_failures_total Inference failures that fail closed.",
                 "# TYPE akshrava_inference_failures_total counter",
-                "akshrava_inference_failures_total %s" % self._inference_failures_total,
+                f"akshrava_inference_failures_total {self._inference_failures_total}",
                 "# HELP akshrava_worker_saturated_total Frames soft-shed because the worker queue was full.",
                 "# TYPE akshrava_worker_saturated_total counter",
-                "akshrava_worker_saturated_total %s" % self._worker_saturated_total,
+                f"akshrava_worker_saturated_total {self._worker_saturated_total}",
                 "# HELP akshrava_db_pool_checkedin SQLAlchemy connection pool idle count.",
                 "# TYPE akshrava_db_pool_checkedin gauge",
-                "akshrava_db_pool_checkedin %s" % self._db_pool_checkedin,
+                f"akshrava_db_pool_checkedin {self._db_pool_checkedin}",
                 "# HELP akshrava_db_pool_checkedout SQLAlchemy connection pool active count.",
                 "# TYPE akshrava_db_pool_checkedout gauge",
-                "akshrava_db_pool_checkedout %s" % self._db_pool_checkedout,
+                f"akshrava_db_pool_checkedout {self._db_pool_checkedout}",
                 "# HELP akshrava_inference_duration_milliseconds Vision inference and queue duration.",
                 "# TYPE akshrava_inference_duration_milliseconds histogram",
             ]
             for bucket in self._INFERENCE_BUCKETS:
                 lines.append(
-                    'akshrava_inference_duration_milliseconds_bucket{le="%s"} %s'
-                    % (bucket, self._inference_counts[bucket])
+                    f'akshrava_inference_duration_milliseconds_bucket{{le="{bucket}"}} {self._inference_counts[bucket]}'
                 )
             lines.extend(
                 [
-                    'akshrava_inference_duration_milliseconds_bucket{le="+Inf"} %s'
-                    % self._inference_count,
-                    "akshrava_inference_duration_milliseconds_sum %s" % self._inference_sum_ms,
-                    "akshrava_inference_duration_milliseconds_count %s" % self._inference_count,
+                    f'akshrava_inference_duration_milliseconds_bucket{{le="+Inf"}} {self._inference_count}',
+                    f"akshrava_inference_duration_milliseconds_sum {self._inference_sum_ms}",
+                    f"akshrava_inference_duration_milliseconds_count {self._inference_count}",
                 ]
             )
             lines.extend(
@@ -168,15 +165,13 @@ class Metrics:
             )
             for bucket in self._FRAME_AGE_BUCKETS:
                 lines.append(
-                    'akshrava_frame_age_milliseconds_bucket{le="%s"} %s'
-                    % (bucket, self._frame_age_counts[bucket])
+                    f'akshrava_frame_age_milliseconds_bucket{{le="{bucket}"}} {self._frame_age_counts[bucket]}'
                 )
             lines.extend(
                 [
-                    'akshrava_frame_age_milliseconds_bucket{le="+Inf"} %s'
-                    % self._frame_age_count,
-                    "akshrava_frame_age_milliseconds_sum %s" % self._frame_age_sum_ms,
-                    "akshrava_frame_age_milliseconds_count %s" % self._frame_age_count,
+                    f'akshrava_frame_age_milliseconds_bucket{{le="+Inf"}} {self._frame_age_count}',
+                    f"akshrava_frame_age_milliseconds_sum {self._frame_age_sum_ms}",
+                    f"akshrava_frame_age_milliseconds_count {self._frame_age_count}",
                 ]
             )
             lines.extend(
@@ -188,19 +183,15 @@ class Metrics:
             for stage in self._PIPELINE_STAGES:
                 for bucket in self._INFERENCE_BUCKETS:
                     lines.append(
-                        'akshrava_pipeline_stage_duration_milliseconds_bucket{stage="%s",le="%s"} %s'
-                        % (stage, bucket, self._stage_counts[stage][bucket])
+                        f'akshrava_pipeline_stage_duration_milliseconds_bucket{{stage="{stage}",le="{bucket}"}} {self._stage_counts[stage][bucket]}'
                     )
                 lines.append(
-                    'akshrava_pipeline_stage_duration_milliseconds_bucket{stage="%s",le="+Inf"} %s'
-                    % (stage, self._stage_totals[stage])
+                    f'akshrava_pipeline_stage_duration_milliseconds_bucket{{stage="{stage}",le="+Inf"}} {self._stage_totals[stage]}'
                 )
                 lines.append(
-                    'akshrava_pipeline_stage_duration_milliseconds_sum{stage="%s"} %s'
-                    % (stage, self._stage_sums[stage])
+                    f'akshrava_pipeline_stage_duration_milliseconds_sum{{stage="{stage}"}} {self._stage_sums[stage]}'
                 )
                 lines.append(
-                    'akshrava_pipeline_stage_duration_milliseconds_count{stage="%s"} %s'
-                    % (stage, self._stage_totals[stage])
+                    f'akshrava_pipeline_stage_duration_milliseconds_count{{stage="{stage}"}} {self._stage_totals[stage]}'
                 )
             return "\n".join(lines) + "\n"

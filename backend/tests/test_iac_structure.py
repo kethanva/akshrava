@@ -1,5 +1,5 @@
-import os
 import glob
+import os
 import re
 
 IAC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../cloud/gcp"))

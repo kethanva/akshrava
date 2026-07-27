@@ -66,6 +66,26 @@ class SessionDurationTest {
     }
 
     @Test
+    fun wakeLocksAreRenewedFarInsideTheirOwnTimeout() {
+        // The timeout is a safety net against a hung teardown, not a session budget. A walk longer
+        // than the timeout is ordinary use, and when it expired mid-walk the CPU lock and the
+        // screen-bright fallback were both silently lost: the display sleeps, OEM ROMs stop
+        // delivering CameraX frames, and assistance ends with the socket still open. Renewal must
+        // leave room for at least one missed cycle before the lock could ever lapse.
+        assertTrue(
+            "renew interval (${AssistService.WAKE_LOCK_RENEW_INTERVAL_MS} ms) must leave margin " +
+                "inside the ${AssistService.WAKE_LOCK_TIMEOUT_MS} ms timeout",
+            AssistService.WAKE_LOCK_RENEW_INTERVAL_MS * 2 <= AssistService.WAKE_LOCK_TIMEOUT_MS
+        )
+        // Renewal rides on the heartbeat, which only fires from the camera analysis callback, so
+        // the heartbeat must be frequent enough to never be the reason a renewal is missed.
+        assertTrue(
+            "heartbeat must fire many times per renewal window",
+            AssistService.HEARTBEAT_INTERVAL_MS * 4 <= AssistService.WAKE_LOCK_RENEW_INTERVAL_MS
+        )
+    }
+
+    @Test
     fun watchdogKeepsCheckingForTheWholeSession() {
         // The alarm is one-shot; WatchdogReceiver reschedules it on every fire. Over a target
         // session that is several wake-ups, and each one must re-arm or liveness checking
