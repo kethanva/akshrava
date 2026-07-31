@@ -147,12 +147,22 @@ drop.
 | `vision_unavailable` / `Connection restored` flapping | Backend detector reported unavailable, client reconnected, still cycling | `ProtocolClient.handleMessage("error")` |
 | `camera_stall rebind after=...` | Analysis callbacks stopped arriving for >15s; camera was rebound | `AssistService.cameraStallCheck` |
 | `AssistService onDestroy` **without** a preceding `event=client_close` from the Stop tap | Service was killed (OOM, OEM background kill), not a user action | check `onTrimMemory`/`onLowMemory` lines just before |
+| `event=stale_inference_tick` | A frame was sent and left unanswered past 3s. Bounded to 3 ticks per frame, so a burst of exactly 3 then silence is the watchdog working, not the session recovering | `ProtocolClient.shouldTickStaleInference` |
+| `frame_luma ... occluded=true` repeating | Rear lens covered / phone lens-down. Frames are dropped from the **first** occluded frame; the spoken `Camera is dark. Uncover the rear lens.` prompt needs 3 consecutive | `AssistService.analyzeImage` · `FrameGate.isOccluded` |
 
 ## 5. Things that LOOK broken but are not (check here before filing a bug)
 
 - **`frame_drop framePending` appearing dozens of times.** Camera analyzes at ~30 fps; the
   server admits ~1.2 fps. ~29 of every 30 frames are *supposed* to be shed here. Only worry if
   `held_ms` in the accompanying wedge check exceeds `FRAME_SLOT_WEDGED_MS` (15000).
+- **A short burst of stale earcon ticks during a slow inference.** Capped at 3 per stuck frame on
+  purpose. An unbounded tick becomes a permanent beep in the user's only audio channel, masking
+  the alerts whose absence it is flagging; `FRAME_SETTLE_TIMEOUT_MS` (10 s) is the actual
+  recovery. Zero ticks on a healthy low-battery session (0.2 FPS ⇒ 5 s capture interval) is also
+  correct — the tick keys off an *outstanding frame*, never wall-clock since the last result.
+- **Alerts moving to the phone speaker after the earbuds die.** Expected. `ACTION_AUDIO_BECOMING_NOISY`
+  announces the route change and keeps speaking; it must never mute. If the session goes silent
+  on unplug, that is a regression.
 - **Detected objects but no spoken alert.** Only `VEHICLE_LABELS` and `OBSTACLE_LABELS`
   (`backend/akshrava_backend/hazards.py`) ever produce speech — a laptop, keyboard, chair, or
   TV is deliberately silent. Confirm with `scripts/watch_detection.sh <serial>`, which prints a

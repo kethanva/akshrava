@@ -1,9 +1,11 @@
 from datetime import datetime, timedelta, timezone
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 from sqlalchemy import DateTime, text
 
-from akshrava_backend.storage import AlertEvent, CalibrationProfileRecord, Device, Store
+from akshrava_backend.storage import AlertEvent, Base, CalibrationProfileRecord, Device, Store
 
 
 def test_every_timestamp_column_is_declared_timezone_aware():
@@ -236,3 +238,68 @@ def test_non_sqlite_engine_uses_a_bounded_connection_pool():
 def storage_mod_pool_size():
     import akshrava_backend.storage as storage_mod
     return storage_mod._POOL_SIZE
+
+
+@pytest.mark.asyncio
+async def test_storage_additional_coverage_paths(tmp_path):
+    store = Store("sqlite+aiosqlite:///%s" % (tmp_path / "extra.db"), redis_url="redis://localhost:6379/0")
+    await store.initialize()
+    try:
+        # pool_status
+        checked_in, checked_out = store.pool_status()
+        assert checked_in >= 0 and checked_out >= 0
+
+        # ping
+        await store.ping()
+
+        # record_alert
+        from akshrava_backend.domain import Hazard
+        hazard = Hazard(
+            kind="person",
+            level="caution",
+            bearing="ahead",
+            message_key="person_ahead",
+            haptic="center",
+            confidence=0.88,
+            severity="medium",
+            range_band="medium",
+            track_id=1,
+        )
+        await store.record_alert("device-1", 10, hazard)
+        events = await store.recent_events("device-1", limit=10)
+        assert len(events) == 1
+        assert events[0].kind == "person"
+
+        # upsert_calibration_profile invalid reference height
+        with pytest.raises(ValueError, match="reference_height_px must be positive"):
+            await store.upsert_calibration_profile("c1", 500.0, 1.2, reference_height_px=0)
+
+        # _get_redis_client instantiation
+        mock_redis = AsyncMock()
+        with patch("akshrava_backend.redis_util.async_redis_from_url", return_value=mock_redis) as mock_from_url:
+            store._redis_client = None
+            client = await store._get_redis_client()
+            assert client is not None
+            mock_from_url.assert_called_once()
+
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_storage_schema_verification_errors(tmp_path):
+    store = Store("sqlite+aiosqlite:///%s" % (tmp_path / "schema_err.db"))
+    # Don't bootstrap schema, so missing tables error triggers
+    with pytest.raises(RuntimeError, match="database schema is not migrated"):
+        await store.verify_schema()
+
+    # Create tables but expect invalid revision
+    async with store.engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32))"))
+        await conn.execute(text("INSERT INTO alembic_version VALUES ('20200101_01')"))
+
+    store.expected_schema_revision = "20260721_01"
+    with pytest.raises(RuntimeError, match="revision mismatch: expected 20260721_01, found 20200101_01"):
+        await store.verify_schema()
+

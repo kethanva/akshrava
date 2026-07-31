@@ -43,6 +43,8 @@ class AssistService : LifecycleService() {
         private const val CHANNEL_ID = "assist-active"
         private const val NOTIFICATION_ID = 1001
         private const val THERMAL_CHECK_INTERVAL_MS = 30_000L
+        /** Consecutive black frames before the "uncover the lens" prompt is spoken (F-02). */
+        internal const val OCCLUDED_FRAMES_BEFORE_ANNOUNCE = 3
         private const val THERMAL_THROTTLE_C = 43f
         private const val THERMAL_CLEAR_C = 41f
         internal const val HEARTBEAT_INTERVAL_MS = 30_000L
@@ -89,6 +91,7 @@ class AssistService : LifecycleService() {
     private var http: OkHttpClient? = null
     private var calibrationId: String = ""
     private var headsetControls: HeadsetControls? = null
+    private var gestureDetectorEngine: GestureDetectorEngine? = null
     private var reflexEngine: ReflexEngine = DisabledReflexEngine()
     private var wakeLock: PowerManager.WakeLock? = null
     private var cameraProvider: ProcessCameraProvider? = null
@@ -97,6 +100,9 @@ class AssistService : LifecycleService() {
     private var screenKeepAlive: ScreenKeepAlive? = null
     private var osLifecycleReceiver: android.content.BroadcastReceiver? = null
     private var lastDarkAnnounceMs = 0L
+    private var lastTiltAnnounceMs = 0L
+    private var lastGlareAnnounceMs = 0L
+    private var extremeTiltSinceMs: Long? = null
     private var framesAnalyzed = 0L
     private val framePending = AtomicBoolean(false)
 
@@ -139,6 +145,8 @@ class AssistService : LifecycleService() {
         if (assistanceGeneration.get() == stopHardTimeoutGeneration) stopAssistance()
     }
     private var consecutiveBlurredFrames = 0
+    private var consecutiveOccludedFrames = 0
+    private var consecutiveGlaredFrames = 0
     private var previousThumbnail: IntArray? = null
     private val capturePolicy = CapturePolicy()
     private var linkQuality = LinkQualityController()
@@ -294,6 +302,9 @@ class AssistService : LifecycleService() {
         lastCaptureMs = 0L
         previousThumbnail = null
         consecutiveBlurredFrames = 0
+        consecutiveOccludedFrames = 0
+        consecutiveGlaredFrames = 0
+        extremeTiltSinceMs = null
         captureSuspendedForBattery = false
         captureSuspendedForFailure = false
         val pc = ProtocolClient(
@@ -328,8 +339,29 @@ class AssistService : LifecycleService() {
             this,
             onRepeat = { am.repeatLast() },
             onMute = { am.muteFor(15 * 60_000L) },
-            onLook = { lookRequested.set(true); am.acknowledgeLook() }
+            onLook = { lookRequested.set(true); am.acknowledgeLook() },
+            // Earbuds died or the cable was pulled (F-17). Say so and keep going: silence here
+            // would be indistinguishable from a dead app to someone who cannot see the screen.
+            onAudioRouteLost = { am.status("Headset disconnected. Alerts now play on the speaker.") }
         ).also { it.start() }
+        gestureDetectorEngine = GestureDetectorEngine(
+            // Double shake = one immediate look (F-31), nothing else. Speaking anything additional
+            // here would flush an in-progress hazard alert, and this gesture can fire by accident.
+            onDoubleShake = {
+                // Samples arrive on the sensor thread; acknowledgeLook vibrates and speaks, and
+                // blocking there stalls delivery for PoseTracker, which shares the registration.
+                mainHandler.post {
+                    lookRequested.set(true)
+                    am.acknowledgeLook()
+                }
+            }
+        ).also { engine ->
+            // Driven from PoseTracker's existing accelerometer stream rather than a second
+            // listener on the same sensor.
+            poseTracker?.onAccelerometerSample = { x, y, z, nowMs ->
+                engine.onAccelerometerSample(x, y, z, nowMs)
+            }
+        }
         // A session only survives a long walk if the display stays awake: many OEM ROMs stop
         // delivering CameraX frames once the screen sleeps, which ends the walk silently. The
         // overlay is the only thing that guarantees it, and it needs a permission the user must
@@ -392,6 +424,10 @@ class AssistService : LifecycleService() {
         bindGeneration.incrementAndGet()
         headsetControls?.stop()
         headsetControls = null
+        // Detach from PoseTracker before dropping it: the engine holds no sensor registration of
+        // its own, so clearing the sink is what stops it being fed.
+        poseTracker?.onAccelerometerSample = null
+        gestureDetectorEngine = null
         screenKeepAlive?.stop(); screenKeepAlive = null
         osLifecycleReceiver?.let {
             try { unregisterReceiver(it) } catch (e: Exception) {}
@@ -622,31 +658,39 @@ class AssistService : LifecycleService() {
             val priority = lookRequested.getAndSet(false)
             // Headset long-press look or a fresh turn asks for one immediate frame.
             val turning = poseTracker?.consumeTurn() ?: false
+            maybeAnnounceTilt(now)
             if (!priority && !turning && now - lastCaptureMs < captureIntervalMs()) {
                 framePending.set(false)
                 return
             }
 
             val thumbnail = FrameGate.luma(image)
-            val avgLuma = if (thumbnail.isNotEmpty()) thumbnail.sum() / thumbnail.size else -1
-            val nearBlack = FrameGate.isNearBlack(thumbnail)
+            val avgLuma = FrameGate.meanLuma(thumbnail)
+            val isOccluded = thumbnail.isEmpty() || FrameGate.isOccluded(avgLuma)
+            if (isOccluded) {
+                consecutiveOccludedFrames++
+            } else {
+                consecutiveOccludedFrames = 0
+            }
+
             // #region agent log
-            if (framesAnalyzed <= 5L || framesAnalyzed % 30L == 0L || nearBlack) {
-                Log.i("AkshravaDebug", "frame_luma n=$framesAnalyzed avgLuma=$avgLuma nearBlack=$nearBlack")
+            if (framesAnalyzed <= 5L || framesAnalyzed % 30L == 0L || isOccluded) {
+                Log.i("AkshravaDebug", "frame_luma n=$framesAnalyzed avgLuma=$avgLuma occluded=$isOccluded")
                 AgentDebugLog.log(
                     "H1",
                     "AssistService.analyzeImage:luma",
-                    if (nearBlack) "frame_near_black" else "frame_luma_ok",
+                    if (isOccluded) "frame_near_black" else "frame_luma_ok",
                     mapOf(
                         "n" to framesAnalyzed,
                         "avgLuma" to avgLuma,
-                        "nearBlack" to nearBlack,
+                        "occluded" to isOccluded,
+                        "consecutiveOccludedFrames" to consecutiveOccludedFrames,
                         "holdingIntervalMs" to (now - lastCaptureMs)
                     )
                 )
             }
             // #endregion
-            if (nearBlack) {
+            if (isOccluded) {
                 framePending.set(false)
                 // lastCaptureMs gates the capture interval above (`now - lastCaptureMs <
                 // captureIntervalMs()`), and every OTHER exit path in this function that reaches
@@ -661,7 +705,13 @@ class AssistService : LifecycleService() {
                 // after a few minutes" that would never show up on a bench test with the phone
                 // sitting lens-up on a desk.
                 lastCaptureMs = now
-                if (now - lastDarkAnnounceMs > 8_000L) {
+                // Dropping the frame is immediate, but the spoken prompt waits for several
+                // consecutive dark frames: one dark frame is ordinary (auto-exposure settling, a
+                // passing shadow, the first buffer after a bind) and telling the user to uncover a
+                // lens that is not covered teaches them to ignore the prompt that matters.
+                if (consecutiveOccludedFrames >= OCCLUDED_FRAMES_BEFORE_ANNOUNCE &&
+                    now - lastDarkAnnounceMs > 8_000L
+                ) {
                     lastDarkAnnounceMs = now
                     updateNotification("Camera is dark — uncover rear lens")
                     alertManager?.status("Camera is dark. Uncover the rear lens.")
@@ -675,6 +725,28 @@ class AssistService : LifecycleService() {
                     // #endregion
                 }
                 // Never upload black OEM buffers — YOLO returns empty and burns RTT budget.
+                return
+            }
+            val isGlared = FrameGate.isGlared(thumbnail, avgLuma)
+            if (isGlared) {
+                consecutiveGlaredFrames++
+            } else {
+                consecutiveGlaredFrames = 0
+            }
+            if (consecutiveGlaredFrames >= 3) {
+                framePending.set(false)
+                lastCaptureMs = now
+                if (now - lastGlareAnnounceMs > 8_000L) {
+                    lastGlareAnnounceMs = now
+                    updateNotification("Camera blinded by light")
+                    alertManager?.status("Camera blinded by light. Turn slightly.")
+                    AgentDebugLog.log(
+                        "H1",
+                        "AssistService.analyzeImage:glareAnnounce",
+                        "glare_announced",
+                        mapOf("n" to framesAnalyzed, "avgLuma" to avgLuma)
+                    )
+                }
                 return
             }
             if (FrameGate.isBlurred(thumbnail)) {
@@ -846,6 +918,16 @@ class AssistService : LifecycleService() {
         Log.i("AkshravaDebug", "wake_locks_renewed screen_mode=${screenKeepAlive?.mode}")
     }
 
+    private fun maybeAnnounceTilt(now: Long) {
+        val pitch = poseTracker?.snapshot()?.pitchCdeg
+        extremeTiltSinceMs = PoseTracker.extremeSinceUpdated(now, pitch, extremeTiltSinceMs)
+        if (!PoseTracker.shouldAnnounceTilt(now, extremeTiltSinceMs, lastTiltAnnounceMs)) return
+        lastTiltAnnounceMs = now
+        alertManager?.status("Phone tilted. Point camera forward.", haptic = true)
+        updateNotification("Phone tilted — point camera forward")
+        Log.i("AkshravaDebug", "tilt_announced pitch_cdeg=$pitch")
+    }
+
     private fun captureIntervalMs(): Long {
         val now = SystemClock.elapsedRealtime()
         val motion: MotionState = poseTracker?.motionState() ?: MotionState.STATIONARY
@@ -868,11 +950,10 @@ class AssistService : LifecycleService() {
             capturePolicy.thermalThrottled = false
         }
         
-        // Check battery level
-        val level = batteryStatus?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
-        val scale = batteryStatus?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
-        if (level > 0 && scale > 0) {
-            val batteryPct = level * 100 / scale
+        // Check battery level. Reuses the sticky intent already fetched above rather than a
+        // second binder call.
+        val batteryPct = DeviceCapability.batteryPercent(batteryStatus)
+        if (batteryPct != null) {
             if (batteryPct < 10) {
                 if (!batteryCritical) {
                     batteryCritical = true
@@ -889,7 +970,13 @@ class AssistService : LifecycleService() {
                     batteryLow = true
                     capturePolicy.batteryLow = true
                     if (now - lastBatteryWarningMs > 120_000L) {
-                        alertManager?.status("Battery low. Vision alerts may stop soon.")
+                        // The F-15 gauge rides on the warning that already exists: the moment the
+                        // user needs the number is the moment they have to decide whether to keep
+                        // walking, and it costs no extra utterance.
+                        alertManager?.status(
+                            "Battery low. Vision alerts may stop soon. " +
+                                DeviceCapability.batteryStatusText(batteryPct)
+                        )
                         lastBatteryWarningMs = now
                     }
                 }

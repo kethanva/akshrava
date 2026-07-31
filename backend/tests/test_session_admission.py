@@ -92,6 +92,30 @@ async def test_redis_session_admission_renew_refreshes_lease_only(monkeypatch):
 @pytest.mark.asyncio
 async def test_inmemory_renew_requires_open_session():
     admission = InMemorySessionAdmission(2)
+    assert admission.active == 0
     assert not await admission.renew("missing")
     assert await admission.try_open("a")
+    assert admission.active == 1
     assert await admission.renew("a")
+
+    # Closing missing session does nothing
+    await admission.close("nonexistent")
+    assert admission.active == 1
+
+    await admission.health()
+    await admission.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_redis_session_admission_health_and_shutdown(mock_redis_client):
+    admission = RedisSessionAdmission("redis://localhost:6379/0", maximum=10)
+    admission._client = mock_redis_client
+
+    await admission.health()
+    await admission.shutdown()
+
+
+def test_session_admission_factory():
+    adm = session_admission_for(redis_url="redis://localhost:6379/0", maximum=10, require_distributed=False)
+    assert isinstance(adm, RedisSessionAdmission)
+

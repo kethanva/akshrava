@@ -30,3 +30,14 @@ def test_rediss_url_without_ca_keeps_pilot_up_with_insecure_fallback(monkeypatch
     monkeypatch.delenv("REDIS_CA_PEM", raising=False)
     kwargs = _ssl_kwargs_for_url("rediss://host:6378/0")
     assert kwargs == {"ssl_check_hostname": False}
+
+
+from unittest.mock import patch
+from akshrava_backend.redis_util import async_redis_from_url
+
+
+def test_async_redis_from_url():
+    with patch("redis.asyncio.Redis.from_url") as mock_from_url:
+        async_redis_from_url("redis://localhost:6379/0", decode_responses=True)
+        mock_from_url.assert_called_once()
+

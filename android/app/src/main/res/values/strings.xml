@@ -7,7 +7,7 @@
     <string name="setup_help">Enter these once with a volunteer. Token is stored in the device Keystore.</string>
     <string name="setup_show">Show volunteer setup</string>
     <string name="setup_hide">Hide volunteer setup</string>
-    <string name="notification_channel_name">Navigation assistance</string>
+    <string name="notification_channel_name">Camera assistance</string>
     <string name="notification_title">Akshrava assistance active</string>
     <string name="notification_text">Tap Stop to stop camera assistance.</string>
     <string name="action_stop">Stop assistance</string>

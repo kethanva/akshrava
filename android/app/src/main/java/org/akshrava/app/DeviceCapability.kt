@@ -2,7 +2,10 @@ package org.akshrava.app
 
 import android.app.ActivityManager
 import android.content.Context
+import android.content.Intent
+import android.os.BatteryManager
 import android.os.Build
+import kotlin.math.roundToInt
 
 /**
  * Capture defaults for donated / older phones within [Build.VERSION_CODES.O] (minSdk 26).
@@ -48,4 +51,39 @@ object DeviceCapability {
     /** API 26–29 lack some camera2 quirks fixed later; keep a slightly longer settle bias. */
     fun preferConservativeSettle(context: Context): Boolean =
         isConstrained(context) || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
+
+    /**
+     * Percent-per-hour a live assistance session costs on the hardware this targets.
+     *
+     * A single coarse figure, not a measurement: capture rate, screen-on time, radio, and battery
+     * health all move it. Everything derived from it is phrased as an estimate for that reason.
+     */
+    internal const val SESSION_DRAIN_PERCENT_PER_HOUR = 4.0
+
+    /** Battery percent from a sticky ACTION_BATTERY_CHANGED intent, or null if unreadable. */
+    fun batteryPercent(batteryStatus: Intent?): Int? {
+        val level = batteryStatus?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = batteryStatus?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+        if (level < 0 || scale <= 0) return null
+        return (level * 100f / scale).roundToInt().coerceIn(0, 100)
+    }
+
+    /**
+     * Spoken F-15 battery gauge.
+     *
+     * The remaining-time figure is a planning aid for someone who cannot glance at a status bar,
+     * so it is stated as an estimate and never rounded down to "zero hours" while the phone is
+     * still running — a user deciding whether to start a walk must not be told the session is
+     * already over when it is not.
+     */
+    fun batteryStatusText(pct: Int?): String {
+        if (pct == null) return "Battery level unavailable."
+        val hours = pct / SESSION_DRAIN_PERCENT_PER_HOUR
+        val estimate = when {
+            hours >= 1.5 -> "roughly ${hours.roundToInt()} hours"
+            hours >= 0.75 -> "roughly one hour"
+            else -> "less than an hour"
+        }
+        return "Battery at $pct percent. Estimated $estimate of assistance time remaining."
+    }
 }

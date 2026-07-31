@@ -98,6 +98,32 @@ class ProtocolClient(
         /** Soft timeouts shed quality first; only repeated hangs tear down the socket. */
         const val SETTLE_TIMEOUTS_BEFORE_RECONNECT = 2
 
+        /** How long one *outstanding* frame may go unanswered before the stale tick starts (F-30). */
+        const val STALE_INFERENCE_TICK_AFTER_MS = 3_000L
+        /** Gap between stale ticks while that same frame is still unanswered. */
+        const val STALE_INFERENCE_TICK_PERIOD_MS = 2_000L
+        /**
+         * Ticks emitted per stuck frame before the watchdog goes quiet.
+         *
+         * Bounded on purpose. An unbounded tick becomes a permanent beep the moment anything holds
+         * the link — and a permanent beep in the user's only audio channel masks the alerts it is
+         * supposed to be flagging the absence of. FRAME_SETTLE_TIMEOUT_MS already recovers the slot.
+         */
+        const val STALE_INFERENCE_MAX_TICKS = 3
+
+        /**
+         * True when the stale-inference earcon should fire right now (F-30).
+         *
+         * Deliberately keyed off an *outstanding frame* rather than "time since the last result".
+         * The capture interval is adaptive and legitimately reaches 5 s (CapturePolicy MIN_FPS /
+         * BATTERY_LOW_FPS = 0.2) and 2 s (thermal throttle); a wall-clock rule at 3 s therefore
+         * beeps continuously on a perfectly healthy session as soon as the phone gets warm or the
+         * battery gets low — precisely when the user can least afford noise. A frame that was sent
+         * and never answered is the only thing that actually means "inference stalled".
+         */
+        fun shouldTickStaleInference(inFlight: Boolean, frameAgeMs: Long, ticksAlready: Int): Boolean =
+            inFlight && frameAgeMs >= STALE_INFERENCE_TICK_AFTER_MS && ticksAlready < STALE_INFERENCE_MAX_TICKS
+
         /** Device revocation is an operator action, not a network condition to retry. */
         fun isPermanentAccessClose(code: Int): Boolean = code == 4401 || code == 4403
 
@@ -168,6 +194,7 @@ class ProtocolClient(
         const val APP_PING_INTERVAL_MS = 60_000L
     }
     private val reconnect: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
+    private val earcons = ConnectionEarcons()
     // Exactly one frame is in flight at a time. The server advertises max_in_flight in its ready
     // payload; that value is logged for diagnostics but deliberately not stored as client state,
     // because nothing here honours a value above 1 and a field suggesting otherwise reads as a
@@ -189,6 +216,9 @@ class ProtocolClient(
     @Volatile private var frameSentAtMonoMs = 0L
     @Volatile private var consecutiveSettleTimeouts = 0
     @Volatile private var connectedAtMonoMs = 0L
+    /** Stale earcons already emitted for the frame currently in flight; see shouldTickStaleInference. */
+    @Volatile private var staleInferenceTicks = 0
+    @Volatile private var pendingStaleInferenceWatchdog: ScheduledFuture<*>? = null
 
     fun connect() {
         if (endpoint.isBlank() || token.isBlank()) {
@@ -341,6 +371,7 @@ class ProtocolClient(
         if (isLook) {
             cancelLookTimeout()
             alertManager.announceLookFailed()
+            earcons.lookFailed()
         }
         return false
     }
@@ -353,7 +384,10 @@ class ProtocolClient(
                 pendingSettleTimeout = null
                 val look = pendingLook
                 pendingLook = false
-                if (look) alertManager.announceLookFailed()
+                if (look) {
+                    alertManager.announceLookFailed()
+                    earcons.lookFailed()
+                }
                 // Unblock the camera immediately, then shed capture cost. Reconnect only after
                 // repeated hangs so a single slow CPU infer does not reset the WSS session.
                 onSettleTimeout()
@@ -410,6 +444,7 @@ class ProtocolClient(
         connectedAtMonoMs = SystemClock.elapsedRealtime()
         logConnection("transport_open", mapOf("recovered" to recovered))
         Log.i("AkshravaDebug", "ws_open endpoint_class=${EndpointPolicy.classify(endpoint).logValue}")
+        earcons.connected()
         // Transport alone is not vision. Announcing "Connection restored" here made every
         // blip/reconnect sound recovered even when the next frame immediately failed closed again.
         onState("Transport connected; checking vision service")
@@ -458,12 +493,15 @@ class ProtocolClient(
                 if (visionEnabled) {
                     if (outageAnnounced) {
                         outageAnnounced = false
+                        earcons.restored()
                         alertManager.status("Connection restored")
                     }
                     onState("Vision assistance connected")
                     scheduleAppPing()
+                    scheduleStaleInferenceWatchdog()
                 } else {
                     cancelAppPing()
+                    cancelStaleInferenceWatchdog()
                     val message = "Vision model unavailable. Use cane or guide."
                     onState(message)
                     if (!outageAnnounced) {
@@ -517,6 +555,8 @@ class ProtocolClient(
                 payload.optDouble("fps", 1.0)
             ))
             "result" -> {
+                // The stale-inference tick budget is reset by settleFrame() below, which is the
+                // single place the in-flight slot is released.
                 payload.optString("trace_id", "").takeIf { it.isNotBlank() }?.let {
                     // No device ID, endpoint, image, or location is logged; this is only a
                     // cross-tier frame correlation key for diagnosing glass-to-ear latency.
@@ -639,6 +679,7 @@ class ProtocolClient(
         settleFrame()
         cancelSettleTimeout()
         cancelAppPing()
+        cancelStaleInferenceWatchdog()
         sessionReady = false
         visionEnabled = false
         closedByUser = true
@@ -652,6 +693,7 @@ class ProtocolClient(
         settleFrame()
         cancelSettleTimeout()
         cancelAppPing()
+        cancelStaleInferenceWatchdog()
         val wasReady = sessionReady
         val wasVisionEnabled = visionEnabled
         // #region agent log
@@ -675,6 +717,7 @@ class ProtocolClient(
             )
         )
         if (closedByUser) return
+        earcons.dropped()
         if (!outageAnnounced) {
             outageAnnounced = true
             // No local detector is bundled. Do not imply that the phone can still see after the
@@ -706,6 +749,43 @@ class ProtocolClient(
         pendingAppPing = null
     }
 
+    private fun scheduleStaleInferenceWatchdog() {
+        cancelStaleInferenceWatchdog()
+        staleInferenceTicks = 0
+        pendingStaleInferenceWatchdog = runCatching {
+            reconnect.scheduleWithFixedDelay({
+                // scheduleWithFixedDelay cancels the whole repeating task the first time it
+                // throws, and does so without a trace. Contain it so one bad tick cannot silently
+                // retire the watchdog for the rest of the session.
+                runCatching {
+                    if (closedByUser || !canStream()) return@runCatching
+                    val sentAt = frameSentAtMonoMs
+                    val frameAgeMs =
+                        if (sentAt > 0L) SystemClock.elapsedRealtime() - sentAt else 0L
+                    if (shouldTickStaleInference(inFlight.get(), frameAgeMs, staleInferenceTicks)) {
+                        staleInferenceTicks += 1
+                        logConnection(
+                            "stale_inference_tick",
+                            mapOf("frameAgeMs" to frameAgeMs, "tick" to staleInferenceTicks)
+                        )
+                        earcons.staleTick()
+                    }
+                }.onFailure { Log.w("AkshravaDebug", "stale_inference_tick_failed", it) }
+            }, STALE_INFERENCE_TICK_AFTER_MS, STALE_INFERENCE_TICK_PERIOD_MS, TimeUnit.MILLISECONDS)
+        }.getOrElse {
+            // The executor is already shut down. Losing the tick is survivable (the settle timeout
+            // still recovers the slot), but it must not be lost silently.
+            Log.w("AkshravaDebug", "stale_inference_watchdog_not_armed", it)
+            null
+        }
+    }
+
+    private fun cancelStaleInferenceWatchdog() {
+        pendingStaleInferenceWatchdog?.cancel(false)
+        pendingStaleInferenceWatchdog = null
+        staleInferenceTicks = 0
+    }
+
     private fun scheduleReconnect(cause: String) {
         if (closedByUser) return
         pendingReconnect?.cancel(false)
@@ -717,6 +797,7 @@ class ProtocolClient(
             "reconnect_scheduled",
             mapOf("cause" to cause, "attempt" to attempt, "delayMs" to delayMs)
         )
+        earcons.reconnectPending()
         pendingReconnect = runCatching {
             reconnect.schedule({
                 logConnection("reconnect_executing", mapOf("attempt" to attempt))
@@ -729,6 +810,8 @@ class ProtocolClient(
 
     private fun settleFrame() {
         cancelSettleTimeout()
+        // The in-flight slot is free again, so the next frame starts with a fresh tick budget.
+        staleInferenceTicks = 0
         if (inFlight.getAndSet(false)) onFrameSettled()
     }
 
@@ -756,6 +839,7 @@ class ProtocolClient(
         pendingReconnect = null
         cancelSettleTimeout()
         cancelAppPing()
+        cancelStaleInferenceWatchdog()
         sessionReady = false
         visionEnabled = false
         socket?.close(1000, "user stopped")
@@ -764,6 +848,7 @@ class ProtocolClient(
         settleFrame()
         reconnect.shutdownNow()
         http.dispatcher.executorService.shutdown()
+        earcons.release()
     }
 
     /** Forwards OkHttp callbacks only when they belong to the current connection generation. */

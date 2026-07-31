@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 import jwt
+import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
@@ -166,3 +167,66 @@ def test_rs256_dual_key_accepts_previous_during_rotation_cutover(tmp_path, monke
     settings = Settings.from_env()
     assert device_id_from_token(_rs256_token(current), settings) == "phone-1"
     assert device_id_from_token(_rs256_token(previous), settings) == "phone-1"
+
+
+def test_auth_error_branches(tmp_path, monkeypatch):
+    from akshrava_backend.auth import AuthError
+
+    monkeypatch.setenv("DEV_AUTH_BYPASS", "false")
+    monkeypatch.setenv("JWT_SECRET", "x" * 32)
+    settings_hs = Settings.from_env()
+    with pytest.raises(AuthError, match="missing device token"):
+        device_claims_from_token("", settings_hs)
+
+    # 2. Missing public key file (OSError)
+    monkeypatch.setenv("AKSHRAVA_ENV", "production")
+    monkeypatch.setenv("DEV_AUTH_BYPASS", "false")
+    monkeypatch.setenv("JWT_ALGORITHM", "RS256")
+    monkeypatch.setenv("JWT_PUBLIC_KEY_FILE", str(tmp_path / "nonexistent.pem"))
+    monkeypatch.setenv("REDIS_URL", "rediss://redis.internal:6380/0")
+    monkeypatch.setenv("METRICS_SCRAPE_TOKEN", "test-metrics-token")
+    settings_rs = Settings.from_env()
+
+    with pytest.raises(AuthError, match="device verification key unavailable"):
+        device_claims_from_token("token", settings_rs)
+
+    # 3. Missing previous key file (non-fatal)
+    current = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    current_path = tmp_path / "current.pem"
+    current_path.write_bytes(_public_pem(current))
+    monkeypatch.setenv("JWT_PUBLIC_KEY_FILE", str(current_path))
+    monkeypatch.setenv("JWT_PUBLIC_KEY_PREVIOUS_FILE", str(tmp_path / "missing_prev.pem"))
+    settings_prev_missing = Settings.from_env()
+
+    # Valid token still verifies
+    assert device_id_from_token(_rs256_token(current), settings_prev_missing) == "phone-1"
+
+    # 4a. A token with no `sub` claim at all is rejected during decode by PyJWT's require list,
+    # so it surfaces as the generic decode failure, not the explicit subject check.
+    token_no_sub = jwt.encode(
+        {"aud": "akshrava-device", "exp": datetime.now(timezone.utc) + timedelta(minutes=5)},
+        settings_hs.jwt_secret,
+        algorithm="HS256",
+    )
+    with pytest.raises(AuthError, match="invalid device token"):
+        device_claims_from_token(token_no_sub, settings_hs)
+
+    # 4b. A present-but-empty subject passes PyJWT's require check, so the explicit subject
+    # validation is what stops it — an empty device id would otherwise scope a session to "".
+    token_blank_sub = jwt.encode(
+        {"sub": "", "aud": "akshrava-device", "exp": datetime.now(timezone.utc) + timedelta(minutes=5)},
+        settings_hs.jwt_secret,
+        algorithm="HS256",
+    )
+    with pytest.raises(AuthError, match="token missing subject"):
+        device_claims_from_token(token_blank_sub, settings_hs)
+
+    # 5. Non-boolean consent
+    token_int_consent = jwt.encode(
+        {"sub": "phone-1", "aud": "akshrava-device", "diagnostic_consent": 123, "exp": datetime.now(timezone.utc) + timedelta(minutes=5)},
+        settings_hs.jwt_secret,
+        algorithm="HS256",
+    )
+    claims = device_claims_from_token(token_int_consent, settings_hs)
+    assert claims.diagnostic_consent is False
+

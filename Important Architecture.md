@@ -127,7 +127,7 @@ sequenceDiagram
         PC->>AM: announce(message_key, bearing, urgent, haptic)
     end
     AM->>AM: per-object 5s cooldown · 1/2s gap ·<br/>3-in-10s → "busy road" collapse
-    AM->>Out: vibrate(haptic) ALWAYS (even muted)
+    AM->>Out: haptic ALWAYS (even muted):<br/>server pattern, or bearing cue when haptic="none"
     AM->>AM: mute gate (speech only) ·<br/>protect first 350ms of an urgent phrase
     AM->>Out: TTS speak (QUEUE_FLUSH urgent / QUEUE_ADD caution)
 ```
@@ -136,7 +136,9 @@ sequenceDiagram
 
 **Freshness and honesty gates on the return leg.** The phone computes age with its own `elapsedRealtime()` clock against the echoed `capture_mono_ms` (never a server clock) and drops any result older than the speak budget. Live **CPU remote** pilot uses ~8.5 s (server `ALERT_MAX_AGE_MS=8500`, advertised to the phone in the WebSocket `ready` payload so both ends share one speak budget); GPU / noop keep the tight 2500 ms target. A `late_suppressed` frame carries no hazard at all — the server skips scoring rather than speak an old detection — and a look answered past budget says *"could not check just now"*, never *"no hazard"*.
 
-**The single speaking lane (`AlertManager`).** Every caller — cloud alert, on-demand look, mode/status message, headset repeat — is serialised onto one worker thread so cooldown maps and the TTS queue stay consistent. Rules enforced there: a 5 s per-object cooldown; one utterance per 2 s (a gap-blocked caution is deferred once, not dropped, so a server admit is not wasted as silence); three alerts in ten seconds collapse to a single *"busy road, careful"*; an S1 urgent phrase flushes a caution mid-word but its own first 350 ms is protected from a following urgent; **haptics always fire, even while muted**, because the buzz is the channel a muted user still relies on. Mute auto-expires after 15 minutes so it can never be left silently dead, and single-press repeat replays the last alert if it is under 30 s old. The server only debounces same-key admits (~800 ms); it does not own the 5 s speech cooldown.
+**The single speaking lane (`AlertManager`).** Every caller — cloud alert, on-demand look, mode/status message, headset repeat — is serialised onto one worker thread so cooldown maps and the TTS queue stay consistent. Rules enforced there: a 5 s per-object cooldown; one utterance per 2 s (a gap-blocked caution is deferred once, not dropped, so a server admit is not wasted as silence); three alerts in ten seconds collapse to a single *"busy road, careful"*; an S1 urgent phrase flushes a caution mid-word but its own first 350 ms is protected from a following urgent; **haptics always fire, even while muted**, because the buzz is the channel a muted user still relies on — the server's `haptic` pattern when it sends one, otherwise a left/ahead/right bearing cue from `HapticFeedbackEngine` (F-01). Mute auto-expires after 15 minutes so it can never be left silently dead, and single-press repeat replays the last alert if it is under 30 s old.
+
+**Mute is a deliberate user action only.** Nothing else may silence the speaking lane. In particular a headset route change (`ACTION_AUDIO_BECOMING_NOISY` — earbuds die, cable pulled) announces *"Headset disconnected. Alerts now play on the speaker."* and keeps alerts flowing; it must never mute. A media player pauses on that broadcast because the only cost is embarrassment, but here the "media" is the hazard channel, and to a user who cannot see the screen silence is indistinguishable from a dead app. The server only debounces same-key admits (~800 ms); it does not own the 5 s speech cooldown.
 
 ## 3. Timing, freshness, and backpressure
 

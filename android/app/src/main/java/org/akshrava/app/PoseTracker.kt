@@ -23,11 +23,44 @@ enum class MotionState { STATIONARY, WALKING, TURNING }
  * calibration during provisioning (Appendix low-confidence).
  */
 class PoseTracker(context: Context) : SensorEventListener {
-    private companion object {
-        const val WALKING_MAD_THRESHOLD = 0.9f       // m/s^2 mean abs deviation of |accel|
-        const val TURN_RATE_THRESHOLD = 0.9f         // rad/s (~50 deg/s)
-        const val EMA_ALPHA = 0.2f
-        const val SENSOR_PERIOD_US = 40_000          // 25 Hz: enough for gating, gentler on old phones
+    companion object {
+        private const val WALKING_MAD_THRESHOLD = 0.9f       // m/s^2 mean abs deviation of |accel|
+        private const val TURN_RATE_THRESHOLD = 0.9f         // rad/s (~50 deg/s)
+        private const val EMA_ALPHA = 0.2f
+        private const val SENSOR_PERIOD_US = 40_000          // 25 Hz: enough for gating, gentler on old phones
+
+        /**
+         * Extreme pitch threshold in centidegrees (F-03).
+         *
+         * ±55° means the rear camera is pointed mostly at the ground or sky rather than ahead.
+         * Pure and unit-testable so AssistService can debounce without mocking SensorManager.
+         */
+        const val EXTREME_PITCH_CDEG = 5_500
+
+        /** How long extreme pitch must hold before the first awareness prompt. */
+        const val TILT_HOLD_MS = 2_000L
+
+        fun isExtremePitch(pitchCdeg: Int?): Boolean {
+            val pitch = pitchCdeg ?: return false
+            return abs(pitch) >= EXTREME_PITCH_CDEG
+        }
+
+        /**
+         * Returns the new "extreme since" timestamp, or null when pitch is normal again.
+         * [extremeSinceMs] is the mono clock when the streak started (null = not in streak).
+         */
+        fun extremeSinceUpdated(nowMs: Long, pitchCdeg: Int?, extremeSinceMs: Long?): Long? {
+            if (!isExtremePitch(pitchCdeg)) return null
+            return extremeSinceMs ?: nowMs
+        }
+
+        fun shouldAnnounceTilt(nowMs: Long, extremeSinceMs: Long?, lastAnnounceMs: Long, cooldownMs: Long = 8_000L): Boolean {
+            val since = extremeSinceMs ?: return false
+            if (nowMs - since < TILT_HOLD_MS) return false
+            // 0 = never announced this session; always allow the first prompt after the hold.
+            if (lastAnnounceMs == 0L) return true
+            return nowMs - lastAnnounceMs >= cooldownMs
+        }
     }
 
     private val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
@@ -43,6 +76,15 @@ class PoseTracker(context: Context) : SensorEventListener {
     @Volatile private var accelMad = 0f
     @Volatile private var gyroMagnitude = 0f
     @Volatile private var turnPending = false
+
+    /**
+     * Optional sink for raw accelerometer readings, invoked on the sensor thread.
+     *
+     * Exists so a second consumer (the double-shake gesture engine) can share this registration
+     * rather than opening its own on the same sensor: two listeners on one sensor doubles event
+     * dispatch for the entire walk without making the samples any better.
+     */
+    @Volatile var onAccelerometerSample: ((Float, Float, Float, Long) -> Unit)? = null
 
     fun start() {
         val orientationSensor = sensorManager.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)
@@ -94,10 +136,14 @@ class PoseTracker(context: Context) : SensorEventListener {
                 timestampMs = SystemClock.elapsedRealtime()
             }
             Sensor.TYPE_ACCELEROMETER -> {
-                val magnitude = sqrt(event.values[0] * event.values[0] + event.values[1] * event.values[1] + event.values[2] * event.values[2])
+                val x = event.values[0]
+                val y = event.values[1]
+                val z = event.values[2]
+                val magnitude = sqrt(x * x + y * y + z * z)
                 val deviation = abs(magnitude - accelEma)
                 accelEma += EMA_ALPHA * (magnitude - accelEma)
                 accelMad += EMA_ALPHA * (deviation - accelMad)
+                onAccelerometerSample?.invoke(x, y, z, SystemClock.elapsedRealtime())
             }
             Sensor.TYPE_GYROSCOPE -> {
                 val magnitude = sqrt(event.values[0] * event.values[0] + event.values[1] * event.values[1] + event.values[2] * event.values[2])

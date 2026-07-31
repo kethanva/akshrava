@@ -2,8 +2,10 @@ package org.akshrava.app
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.mockito.Mockito.mock
 
 class ProtocolClientTest {
     @Test
@@ -29,7 +31,6 @@ class ProtocolClientTest {
 
     @Test
     fun settleBudgetCoversCpuRemoteInferenceWithoutImmediateReconnect() {
-        // GCP CPU remote YOLO uses up to ~9s; a 2.5s client settle was cancelling healthy sockets.
         assertTrue(ProtocolClient.FRAME_SETTLE_TIMEOUT_MS >= 9_000L)
         assertEquals(2, ProtocolClient.SETTLE_TIMEOUTS_BEFORE_RECONNECT)
         assertEquals(ProtocolClient.FRAME_SETTLE_TIMEOUT_MS, ProtocolClient.LOOK_TIMEOUT_MS)
@@ -90,7 +91,6 @@ class ProtocolClientTest {
 
     @Test
     fun wirePoseOmitsValuesThatWouldFatalCloseLegacyApi() {
-        // Proven against live Cloud Run: roll_cdeg=-12500 still closes the socket today.
         assertEquals(null, ProtocolClient.wirePoseCdeg(-12_500))
         assertEquals(null, ProtocolClient.wirePoseCdeg(-9_001))
         assertEquals(-9_000, ProtocolClient.wirePoseCdeg(-9_000))
@@ -101,13 +101,17 @@ class ProtocolClientTest {
 
     @Test
     fun wedgedSlotThresholdSitsAboveTheTimeoutMeantToPreventIt() {
-        // AssistService flags a held frame slot as wedged only once the send-side settle timeout
-        // has demonstrably failed to release it. If the threshold ever slipped below that
-        // timeout, every ordinary slow inference would be reported as a dead session and the
-        // signal would be worthless for finding the real one.
         assertTrue(
             "wedge threshold must outlast the settle timeout that is supposed to clear the slot",
             AssistService.FRAME_SLOT_WEDGED_MS > ProtocolClient.FRAME_SETTLE_TIMEOUT_MS
         )
+    }
+
+    @Test
+    fun protocolClientMockable() {
+        val mockClient = mock(ProtocolClient::class.java)
+        assertNotNull(mockClient)
+        mockClient.connect()
+        mockClient.close()
     }
 }

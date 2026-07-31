@@ -28,6 +28,7 @@ class FrameEncoder {
     // additional threads without external synchronization — scratch buffers would race.
     private var nv21Scratch = ByteArray(0)
     private var transformScratch = ByteArray(0)
+    private var rowScratch = ByteArray(0)
     private val jpegScratch = ByteArrayOutputStream(64 * 1024)
 
     fun encode(image: ImageProxy, maxSide: Int, quality: Int): EncodedFrame =
@@ -52,10 +53,7 @@ class FrameEncoder {
                 width = height
                 height = swapped
             }
-            // Keep the live plane in nv21Scratch so the next encode can reuse it.
-            ensureNv21Capacity(required)
-            System.arraycopy(transformScratch, 0, nv21Scratch, 0, required)
-            nv21 = nv21Scratch
+            nv21 = promoteTransformScratch()
         }
 
         if (maxOf(width, height) > maxSide) {
@@ -68,14 +66,28 @@ class FrameEncoder {
             val required = evenWidth * evenHeight * 3 / 2
             ensureTransformCapacity(required)
             scaleNv21(nv21, width, height, evenWidth, evenHeight, transformScratch)
-            ensureNv21Capacity(required)
-            System.arraycopy(transformScratch, 0, nv21Scratch, 0, required)
-            nv21 = nv21Scratch
+            nv21 = promoteTransformScratch()
             width = evenWidth
             height = evenHeight
         }
 
         return PreparedFrame(nv21, width, height)
+    }
+
+    /**
+     * Make the just-written transform buffer the live plane by swapping the two scratch roles.
+     *
+     * Each transform stage writes into [transformScratch]; the live plane is expected to live in
+     * [nv21Scratch]. Copying it back cost a full-frame memcpy per stage per frame — up to two per
+     * frame at ~1.4 MB apiece for a 1280x960 analysis buffer — purely to preserve which field
+     * held the bytes. Swapping the references is equivalent and free: the previous plane is not
+     * needed once a stage has consumed it, and it becomes the scratch the next stage writes into.
+     */
+    private fun promoteTransformScratch(): ByteArray {
+        val produced = transformScratch
+        transformScratch = nv21Scratch
+        nv21Scratch = produced
+        return produced
     }
 
     fun compressPrepared(prepared: PreparedFrame, quality: Int): EncodedFrame =
@@ -119,17 +131,60 @@ class FrameEncoder {
         buffer: ByteBuffer, rowStride: Int, pixelStride: Int, width: Int, height: Int,
         out: ByteArray, offset: Int, outputStride: Int
     ) {
-        val duplicate = buffer.duplicate()
-        val base = duplicate.position()
-        for (row in 0 until height) {
-            for (column in 0 until width) {
-                val inputIndex = row * rowStride + column * pixelStride
-                out[offset + (row * width + column) * outputStride] = duplicate.get(base + inputIndex)
-            }
-        }
+        val rowBytes = (width - 1) * pixelStride + 1
+        if (rowScratch.size < rowBytes) rowScratch = ByteArray(rowBytes)
+        copyPlaneInto(buffer, rowStride, pixelStride, width, height, out, offset, outputStride, rowScratch)
     }
 
     companion object {
+        /**
+         * Copy one YUV_420_888 plane into [out], writing every [outputStride]-th byte from [offset].
+         *
+         * Reads a whole source row per [ByteBuffer.get] call instead of one byte at a time. The
+         * camera hands back a *direct* buffer, where every single-index `get` is a bounds-checked
+         * off-heap read; doing that per pixel meant roughly 1.8 million of them per frame at a
+         * 1280x960 analysis resolution, all on the one analysis thread that also rotates, scales,
+         * JPEG-encodes and sends. Bulk reads turn each row into a memcpy, which is where the cost
+         * belongs on the recycled hardware this runs on.
+         *
+         * [rowScratch] must hold at least `(width - 1) * pixelStride + 1` bytes. That is exactly
+         * the documented extent of a plane's last row — reading a full [rowStride] there would
+         * overrun a tightly-sized buffer.
+         */
+        fun copyPlaneInto(
+            buffer: ByteBuffer, rowStride: Int, pixelStride: Int, width: Int, height: Int,
+            out: ByteArray, offset: Int, outputStride: Int, rowScratch: ByteArray,
+        ) {
+            if (width <= 0 || height <= 0) return
+            val source = buffer.duplicate()
+            val base = source.position()
+
+            // Packed source into a packed destination (the usual luma case): one memcpy, no loop.
+            if (pixelStride == 1 && outputStride == 1 && rowStride == width) {
+                source.position(base)
+                source.get(out, offset, width * height)
+                return
+            }
+
+            val rowBytes = (width - 1) * pixelStride + 1
+            require(rowScratch.size >= rowBytes) { "rowScratch too small for one plane row" }
+            for (row in 0 until height) {
+                source.position(base + row * rowStride)
+                source.get(rowScratch, 0, rowBytes)
+                var destination = offset + row * width * outputStride
+                if (pixelStride == 1 && outputStride == 1) {
+                    System.arraycopy(rowScratch, 0, out, destination, width)
+                    continue
+                }
+                var read = 0
+                for (column in 0 until width) {
+                    out[destination] = rowScratch[read]
+                    read += pixelStride
+                    destination += outputStride
+                }
+            }
+        }
+
         fun normalizeRotation(degrees: Int): Int {
             var value = degrees % 360
             if (value < 0) value += 360

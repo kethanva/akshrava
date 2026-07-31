@@ -408,3 +408,88 @@ def test_registry_remote_preserves_worker_saturated_error(monkeypatch):
     with pytest.raises(WorkerSaturatedError):
         asyncio.run(detector.detect_async_for_device("phone-1", JPEG))
 
+
+def test_worker_settings_from_env_validation(monkeypatch):
+    base_env = {
+        "WORKER_SHARED_SECRET": SECRET,
+        "YOLO_WEIGHTS": "/models/yolo.pt",
+        "YOLO_WEIGHTS_SHA256": "a" * 64,
+        "MAX_IMAGE_BYTES": "200000",
+        "MAX_FRAME_SIDE": "1280",
+        "WORKER_REQUEST_MAX_AGE_SECONDS": "30",
+        "REQUIRE_GPU": "false",
+        "WORKER_BATCH_MAX_SIZE": "8",
+        "WORKER_BATCH_WAIT_MS": "12",
+        "AKSHRAVA_ENV": "development",
+        "NONCE_REDIS_URL": "redis://localhost:6379/0",
+        "WORKER_INFER_TIMEOUT_SECONDS": "5.0",
+        "METRICS_SCRAPE_TOKEN": "token123",
+    }
+
+    # Short secret
+    with monkeypatch.context() as m:
+        m.setattr("os.environ", {**base_env, "WORKER_SHARED_SECRET": "short"})
+        with pytest.raises(ValueError, match="at least 32 characters"):
+            WorkerSettings.from_env()
+
+    # Invalid max image bytes
+    with monkeypatch.context() as m:
+        m.setattr("os.environ", {**base_env, "MAX_IMAGE_BYTES": "0"})
+        with pytest.raises(ValueError, match="MAX_IMAGE_BYTES must be positive"):
+            WorkerSettings.from_env()
+
+    # Invalid max frame side
+    with monkeypatch.context() as m:
+        m.setattr("os.environ", {**base_env, "MAX_FRAME_SIDE": "0"})
+        with pytest.raises(ValueError, match="MAX_FRAME_SIDE must be positive"):
+            WorkerSettings.from_env()
+
+    # Invalid request max age
+    with monkeypatch.context() as m:
+        m.setattr("os.environ", {**base_env, "WORKER_REQUEST_MAX_AGE_SECONDS": "1"})
+        with pytest.raises(ValueError, match="WORKER_REQUEST_MAX_AGE_SECONDS must be between 5 and 300"):
+            WorkerSettings.from_env()
+
+    # Invalid batch max size
+    with monkeypatch.context() as m:
+        m.setattr("os.environ", {**base_env, "WORKER_BATCH_MAX_SIZE": "100"})
+        with pytest.raises(ValueError, match="WORKER_BATCH_MAX_SIZE must be between 1 and 64"):
+            WorkerSettings.from_env()
+
+    # Invalid batch wait ms
+    with monkeypatch.context() as m:
+        m.setattr("os.environ", {**base_env, "WORKER_BATCH_WAIT_MS": "100"})
+        with pytest.raises(ValueError, match="WORKER_BATCH_WAIT_MS must be between 0 and 50"):
+            WorkerSettings.from_env()
+
+    # Invalid infer timeout
+    with monkeypatch.context() as m:
+        m.setattr("os.environ", {**base_env, "WORKER_INFER_TIMEOUT_SECONDS": "0.1"})
+        with pytest.raises(ValueError, match="WORKER_INFER_TIMEOUT_SECONDS must be between 0.5 and 30"):
+            WorkerSettings.from_env()
+
+    # Invalid environment
+    with monkeypatch.context() as m:
+        m.setattr("os.environ", {**base_env, "AKSHRAVA_ENV": "invalid"})
+        with pytest.raises(ValueError, match="AKSHRAVA_ENV must be"):
+            WorkerSettings.from_env()
+
+    # Non-development missing sha256
+    with monkeypatch.context() as m:
+        m.setattr("os.environ", {**base_env, "AKSHRAVA_ENV": "pilot", "YOLO_WEIGHTS_SHA256": ""})
+        with pytest.raises(ValueError, match="YOLO_WEIGHTS_SHA256 is required"):
+            WorkerSettings.from_env()
+
+    # Non-development missing redis url
+    with monkeypatch.context() as m:
+        m.setattr("os.environ", {**base_env, "AKSHRAVA_ENV": "pilot", "NONCE_REDIS_URL": ""})
+        with pytest.raises(ValueError, match="NONCE_REDIS_URL is required"):
+            WorkerSettings.from_env()
+
+    # Non-development missing metrics token
+    with monkeypatch.context() as m:
+        m.setattr("os.environ", {**base_env, "AKSHRAVA_ENV": "pilot", "METRICS_SCRAPE_TOKEN": ""})
+        with pytest.raises(ValueError, match="METRICS_SCRAPE_TOKEN is required"):
+            WorkerSettings.from_env()
+
+

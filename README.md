@@ -235,7 +235,9 @@ The app uses CameraX `STRATEGY_KEEP_ONLY_LATEST`, closes every `ImageProxy`, and
 
 ### Audio, haptics, and user-facing states
 
-`AlertManager` is the single owner of speech and haptics. It renders server `message_key` and bearing from offline phone templates, so speech does not depend on cloud audio. It applies per-object cooldowns (5s), a minimum speech gap (2s), burst collapse (3 in 10s -> "Busy road, careful"), priority handling, mute expiry (15m), and last-alert repeat (<30s old). Haptics still fire while speech is muted.
+`AlertManager` is the single owner of speech and haptics. It renders server `message_key` and bearing from offline phone templates, so speech does not depend on cloud audio. It applies per-object cooldowns (5s), a minimum speech gap (2s), burst collapse (3 in 10s -> "Busy road, careful"), priority handling, mute expiry (15m), and last-alert repeat (<30s old). Haptics still fire while speech is muted — the server's pattern where one is supplied, otherwise a left/ahead/right bearing cue.
+
+Muting is a deliberate user action (headset double-press) and nothing else may silence the speaking lane. A headset route change — earbuds dying, a cable pulled — announces that alerts have moved to the phone speaker and keeps speaking, because to a user who cannot see the screen, silence is indistinguishable from a dead app.
 
 Examples of permitted language are `Obstacle ahead`, `Vehicle nearby, left`, `Camera view unclear`, and `Vision assistance unavailable. Use cane or guide.` The app never converts a detection into distance, approach speed, a safe route, or a crossing recommendation.
 

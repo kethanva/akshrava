@@ -1,11 +1,15 @@
 package org.akshrava.app
 
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.media.AudioManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.util.Log
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import android.view.KeyEvent
@@ -15,7 +19,16 @@ class HeadsetControls(
     context: Context,
     private val onRepeat: () -> Unit,
     private val onMute: () -> Unit,
-    private val onLook: () -> Unit
+    private val onLook: () -> Unit,
+    /**
+     * Audio is about to fall back to the phone speaker (earbuds died, cable pulled) — F-17.
+     *
+     * Deliberately NOT wired to [onMute]. A media player pauses on this broadcast because the
+     * only cost is embarrassment; here the "media" is the hazard channel, and going quiet
+     * because a cable came loose strands the user with no awareness and no indication that
+     * anything changed. The route change is announced instead, and alerts keep flowing.
+     */
+    private val onAudioRouteLost: () -> Unit = {}
 ) {
     private val session = MediaSessionCompat(context, "akshrava")
     private val handler = Handler(Looper.getMainLooper())
@@ -26,8 +39,18 @@ class HeadsetControls(
     // previously it only checked `pressCount == 1`, which a later unrelated single press could
     // innocently restore, letting a stale callback fire a spurious repeat.
     private var pressGeneration = 0
+    private val appContext = context.applicationContext
+    private var noisyReceiverRegistered = false
+    private val noisyReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
+                onAudioRouteLost()
+            }
+        }
+    }
 
     fun start() {
+        registerNoisyReceiver()
         session.setCallback(object : MediaSessionCompat.Callback() {
             override fun onMediaButtonEvent(mediaButtonEvent: Intent?): Boolean {
                 val key = mediaButtonEvent.keyEvent() ?: return false
@@ -80,6 +103,27 @@ class HeadsetControls(
         session.isActive = true
     }
 
+    /**
+     * A failure here must not take the media buttons down with it: repeat / mute / look are the
+     * user's only manual controls, and registering the route-change receiver first meant one
+     * throwing OEM ROM disabled all three.
+     */
+    private fun registerNoisyReceiver() {
+        if (noisyReceiverRegistered) return
+        val filter = IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
+        runCatching {
+            if (Build.VERSION.SDK_INT >= 33) {
+                appContext.registerReceiver(noisyReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                appContext.registerReceiver(noisyReceiver, filter)
+            }
+        }.onSuccess {
+            noisyReceiverRegistered = true
+        }.onFailure {
+            Log.w("AkshravaDebug", "headset_noisy_register_failed", it)
+        }
+    }
+
     private fun Intent?.keyEvent(): KeyEvent? {
         if (this == null) return null
         return if (Build.VERSION.SDK_INT >= 33) {
@@ -91,6 +135,11 @@ class HeadsetControls(
     }
 
     fun stop() {
+        if (noisyReceiverRegistered) {
+            noisyReceiverRegistered = false
+            runCatching { appContext.unregisterReceiver(noisyReceiver) }
+                .onFailure { Log.w("AkshravaDebug", "headset_noisy_unregister_failed", it) }
+        }
         handler.removeCallbacksAndMessages(null)
         session.isActive = false
         session.release()

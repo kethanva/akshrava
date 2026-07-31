@@ -2,11 +2,11 @@ package org.akshrava.app
 
 import android.content.Context
 import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
-import android.os.VibrationEffect
-import android.os.Vibrator
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import java.util.ArrayDeque
@@ -90,7 +90,12 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
     @Volatile private var lastAlertText: String? = null
     @Volatile private var lastAlertAtMs = 0L
     private var lastUrgentSpokenAtMs = 0L
-    private val vibrator = context.getSystemService(Vibrator::class.java)
+    private val hapticFeedbackEngine = HapticFeedbackEngine(context)
+    private val audioManager = context.getSystemService(AudioManager::class.java)
+    private val focusListener = AudioManager.OnAudioFocusChangeListener { /* ducking is transient; no state needed */ }
+    private val focusRequest: AudioFocusRequest = AlertAudioFocus.buildRequest(focusListener)
+    /** Nested speak/flush holds: abandon system focus only when the last utterance ends. */
+    private val focusHoldCount = java.util.concurrent.atomic.AtomicInteger(0)
     @Volatile private var closed = false
     /** Consecutive engine rebuilds without a successful speak hand-off; see engineRebuildAllowed. */
     @Volatile private var engineRebuildStreak = 0
@@ -233,7 +238,11 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
         lastAlertAtMs = now
         // Muting silences speech, per the user's explicit request, but never haptics: the S1
         // buzz needs no words and is exactly the channel a muted user still relies on (§6.4).
-        vibrate(haptic)
+        if (haptic == "none" || haptic.isEmpty()) {
+            hapticFeedbackEngine.playBearingCue(bearing)
+        } else {
+            vibrate(haptic)
+        }
         if (now < mutedUntilMs) return
         // S1 cuts a CAUTION utterance mid-word; interruption itself signals urgency. But an
         // urgent phrase's own first 350 ms is protected: a second urgent alert queues behind it
@@ -294,8 +303,9 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
         }
     }
 
-    fun status(text: String, onComplete: (() -> Unit)? = null) {
+    fun status(text: String, haptic: Boolean = false, onComplete: (() -> Unit)? = null) {
         runApi {
+            if (haptic) vibrate("single")
             if (ready) {
                 speak(text, flush = true, id = nextStatusId(), onComplete = onComplete)
             } else {
@@ -371,6 +381,11 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
             return
         }
         if (onComplete != null) synchronized(completionLock) { completionCallbacks[id] = onComplete }
+        // Duck TalkBack / media briefly so the alert is audible (F-09). Failure to gain focus
+        // must not suppress speech — a quiet alert still beats silence mid-walk.
+        // Refcount holds across flush/queue so a prior utterance's onStop cannot abandon focus
+        // while a newer one is still speaking.
+        acquireAudioFocus()
         val result = tts?.speak(
             text, if (flush) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, null, id
         ) ?: TextToSpeech.ERROR
@@ -379,6 +394,7 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
             engineRebuildStreak = 0
             return
         }
+        releaseAudioFocus()
         // speak() returning ERROR after successful init means the engine connection is dead
         // (verified live: OEM force-stop of com.google.android.tts -> "speak failed: not bound
         // to TTS engine" on every call, forever). The framework never rebinds; we must.
@@ -443,8 +459,33 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
     private fun nextStatusId(): String = "status-${++statusSequence}"
 
     private fun complete(utteranceId: String) {
+        releaseAudioFocus()
         val callback = synchronized(completionLock) { completionCallbacks.remove(utteranceId) }
         callback?.let { mainHandler.post(it) }
+    }
+
+    /**
+     * Take one hold for the utterance about to be queued.
+     *
+     * The hold is taken whether or not the system grants focus, because the hold is what pairs
+     * with the release in [complete] — every utterance handed to the engine gets exactly one
+     * onDone/onStop/onError. Counting only *granted* requests meant a denial (or a speak issued
+     * during teardown) later decremented a hold belonging to a different, still-speaking
+     * utterance, abandoning the duck in the middle of an alert.
+     */
+    private fun acquireAudioFocus() {
+        val first = focusHoldCount.getAndIncrement() == 0
+        if (first && AlertAudioFocus.shouldRequest(ready = ready, closed = closed)) {
+            // A denial is not fatal: a quiet alert still beats silence, so speech proceeds either way.
+            AlertAudioFocus.request(audioManager, focusRequest)
+        }
+    }
+
+    private fun releaseAudioFocus() {
+        // Clamped at zero so a stray release can never drive the count negative and strand a
+        // later duck (the count would have to climb back through the deficit before requesting).
+        val remaining = focusHoldCount.updateAndGet { if (it > 0) it - 1 else 0 }
+        if (remaining == 0) AlertAudioFocus.abandon(audioManager, focusRequest)
     }
 
     private fun template(key: String, bearing: String): String = when (key) {
@@ -480,18 +521,14 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
     private val bearingTe = mapOf("left" to "ఎడమ వైపున ఉంది", "right" to "కుడి వైపున ఉంది", "ahead" to "ముందు ఉంది")
 
     private fun vibrate(pattern: String) {
-        val timings = when (pattern) {
-            "single" -> longArrayOf(0, 80)
-            "double" -> longArrayOf(0, 60, 90, 60)
-            "triple" -> longArrayOf(0, 60, 70, 60, 70, 60)
-            else -> return
-        }
-        vibrator?.vibrate(VibrationEffect.createWaveform(timings, -1))
+        hapticFeedbackEngine.playPattern(pattern)
     }
 
     fun shutdown() {
         closed = true
         cancelDeferredCaution()
+        focusHoldCount.set(0)
+        AlertAudioFocus.abandon(audioManager, focusRequest)
         val pending = synchronized(completionLock) {
             val values = completionCallbacks.values.toMutableList()
             completionCallbacks.clear()

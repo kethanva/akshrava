@@ -6,6 +6,7 @@ from akshrava_backend.coordination import (
     InMemoryDeviceRateLimiter,
     InMemoryNonceStore,
     RedisDeviceRateLimiter,
+    RedisNonceStore,
     device_rate_limiter_for,
     nonce_store_for,
     use_redis_frame_limiter,
@@ -67,3 +68,47 @@ async def test_redis_device_rate_limiter_passes_wall_clock_epoch(monkeypatch):
     assert burst == 2.0 and rate == 1.2
     assert before - 1 <= now <= after + 1
     assert now > 1_000_000_000
+
+
+@pytest.mark.asyncio
+async def test_redis_nonce_store(mock_redis_client):
+    from akshrava_backend.coordination import RedisNonceStore
+
+    store = RedisNonceStore("redis://localhost:6379/0")
+    store._client = mock_redis_client
+
+    assert await store.claim("nonce123", 30) is True
+    # mock_redis_client returns True on first set
+    await store.health()
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_redis_device_rate_limiter_health_and_close(mock_redis_client):
+    from akshrava_backend.coordination import RedisDeviceRateLimiter
+
+    limiter = RedisDeviceRateLimiter("redis://localhost:6379/0")
+    limiter._client = mock_redis_client
+
+    await limiter.health()
+    await limiter.close()
+
+
+@pytest.mark.asyncio
+async def test_in_memory_stores_health_and_close():
+    store = InMemoryNonceStore()
+    await store.health()
+    await store.close()
+
+    limiter = InMemoryDeviceRateLimiter()
+    await limiter.health()
+    await limiter.close()
+
+
+def test_coordination_factories():
+    ns = nonce_store_for(redis_url="redis://localhost:6379/0", require_distributed=False)
+    assert isinstance(ns, RedisNonceStore)
+
+    rl = device_rate_limiter_for(redis_url="redis://localhost:6379/0", require_distributed=False)
+    assert isinstance(rl, RedisDeviceRateLimiter)
+

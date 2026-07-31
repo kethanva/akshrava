@@ -130,3 +130,148 @@ def test_diagnostic_uploads_plumbing_is_allowed_in_development(monkeypatch):
     monkeypatch.setenv("DIAGNOSTIC_UPLOADS_ENABLED", "true")
     monkeypatch.setenv("GCP_DIAGNOSTICS_BUCKET", "akshrava-diagnostics")
     assert Settings.from_env().diagnostic_uploads_enabled is True
+
+
+def test_config_additional_validations(monkeypatch):
+    monkeypatch.setenv("AKSHRAVA_ENV", "development")
+    monkeypatch.setenv("DEV_AUTH_BYPASS", "true")
+
+    # Invalid AKSHRAVA_ENV
+    with monkeypatch.context() as m:
+        m.setenv("AKSHRAVA_ENV", "invalid_env")
+        with pytest.raises(ValueError, match="AKSHRAVA_ENV must be"):
+            Settings.from_env()
+
+    # Invalid JWT_ALGORITHM
+    with monkeypatch.context() as m:
+        m.setenv("JWT_ALGORITHM", "ES256")
+        with pytest.raises(ValueError, match="JWT_ALGORITHM must be HS256 or RS256"):
+            Settings.from_env()
+
+    # HS256 default secret when bypass false
+    with monkeypatch.context() as m:
+        m.setenv("DEV_AUTH_BYPASS", "false")
+        m.setenv("JWT_ALGORITHM", "HS256")
+        m.setenv("JWT_SECRET", "change-me-before-field-use")
+        with pytest.raises(ValueError, match="JWT_SECRET must be set"):
+            Settings.from_env()
+
+    # HS256 short secret when bypass false
+    with monkeypatch.context() as m:
+        m.setenv("DEV_AUTH_BYPASS", "false")
+        m.setenv("JWT_ALGORITHM", "HS256")
+        m.setenv("JWT_SECRET", "short")
+        with pytest.raises(ValueError, match="at least 32 characters"):
+            Settings.from_env()
+
+    # RS256 missing public key file
+    with monkeypatch.context() as m:
+        m.setenv("JWT_ALGORITHM", "RS256")
+        m.delenv("JWT_PUBLIC_KEY_FILE", raising=False)
+        with pytest.raises(ValueError, match="JWT_PUBLIC_KEY_FILE is required"):
+            Settings.from_env()
+
+    # Invalid MAX_ACTIVE_SESSIONS
+    with monkeypatch.context() as m:
+        m.setenv("MAX_ACTIVE_SESSIONS", "0")
+        with pytest.raises(ValueError, match="MAX_ACTIVE_SESSIONS"):
+            Settings.from_env()
+
+    # Invalid ALERT_MAX_AGE_MS
+    with monkeypatch.context() as m:
+        m.setenv("ALERT_MAX_AGE_MS", "0")
+        with pytest.raises(ValueError, match="ALERT_MAX_AGE_MS"):
+            Settings.from_env()
+
+    # Invalid MIN_FRAME_INTERVAL_MS
+    with monkeypatch.context() as m:
+        m.setenv("MIN_FRAME_INTERVAL_MS", "-1")
+        with pytest.raises(ValueError, match="MIN_FRAME_INTERVAL_MS"):
+            Settings.from_env()
+
+    # Invalid ALERT_RETENTION_DAYS
+    with monkeypatch.context() as m:
+        m.setenv("ALERT_RETENTION_DAYS", "0")
+        with pytest.raises(ValueError, match="ALERT_RETENTION_DAYS"):
+            Settings.from_env()
+
+    # Invalid CLOUD_FALLBACK_PROVIDER
+    with monkeypatch.context() as m:
+        m.setenv("CLOUD_FALLBACK_PROVIDER", "invalid")
+        with pytest.raises(ValueError, match="CLOUD_FALLBACK_PROVIDER"):
+            Settings.from_env()
+
+    # Invalid CLOUD_MIN_CONFIDENCE
+    with monkeypatch.context() as m:
+        m.setenv("CLOUD_MIN_CONFIDENCE", "1.5")
+        with pytest.raises(ValueError, match="CLOUD_MIN_CONFIDENCE"):
+            Settings.from_env()
+
+    # Invalid DETECTOR
+    with monkeypatch.context() as m:
+        m.setenv("DETECTOR", "invalid_det")
+        with pytest.raises(ValueError, match="DETECTOR"):
+            Settings.from_env()
+
+    # Registry JSON invalid json
+    with monkeypatch.context() as m:
+        m.setenv("DETECTOR", "remote")
+        m.setenv("REMOTE_WORKER_SECRET", "s" * 32)
+        m.setenv("REMOTE_INFERENCE_REGISTRY_JSON", "not-json")
+        with pytest.raises(ValueError, match="REMOTE_INFERENCE_REGISTRY_JSON must be valid JSON"):
+            Settings.from_env()
+
+    # Registry JSON not list
+    with monkeypatch.context() as m:
+        m.setenv("DETECTOR", "remote")
+        m.setenv("REMOTE_WORKER_SECRET", "s" * 32)
+        m.setenv("REMOTE_INFERENCE_REGISTRY_JSON", "{}")
+        with pytest.raises(ValueError, match="REMOTE_INFERENCE_REGISTRY_JSON must be a list"):
+            Settings.from_env()
+
+    # Remote worker secret short
+    with monkeypatch.context() as m:
+        m.setenv("DETECTOR", "remote")
+        m.setenv("REMOTE_INFERENCE_URL", "http://127.0.0.1:8090")
+        m.setenv("REMOTE_WORKER_SECRET", "short")
+        with pytest.raises(ValueError, match="REMOTE_WORKER_SECRET must be at least 32 characters"):
+            Settings.from_env()
+
+    # Invalid REMOTE_INFERENCE_TIMEOUT_MS
+    with monkeypatch.context() as m:
+        m.setenv("REMOTE_INFERENCE_TIMEOUT_MS", "10")
+        with pytest.raises(ValueError, match="REMOTE_INFERENCE_TIMEOUT_MS"):
+            Settings.from_env()
+
+    # Invalid READY_TIMEOUT_MS
+    with monkeypatch.context() as m:
+        m.setenv("READY_TIMEOUT_MS", "10")
+        with pytest.raises(ValueError, match="READY_TIMEOUT_MS"):
+            Settings.from_env()
+
+    # Invalid INFERENCE_TIMEOUT_MS
+    with monkeypatch.context() as m:
+        m.setenv("INFERENCE_TIMEOUT_MS", "10")
+        with pytest.raises(ValueError, match="INFERENCE_TIMEOUT_MS"):
+            Settings.from_env()
+
+    # Invalid INFERENCE_EXECUTOR_WORKERS
+    with monkeypatch.context() as m:
+        m.setenv("INFERENCE_EXECUTOR_WORKERS", "0")
+        with pytest.raises(ValueError, match="INFERENCE_EXECUTOR_WORKERS"):
+            Settings.from_env()
+
+    # Pilot missing schema revision
+    with monkeypatch.context() as m:
+        _pilot_rs256(m)
+        m.setenv("DATABASE_SCHEMA_REVISION", "")
+        with pytest.raises(ValueError, match="DATABASE_SCHEMA_REVISION is required"):
+            Settings.from_env()
+
+    # Pilot missing metrics scrape token
+    with monkeypatch.context() as m:
+        _pilot_rs256(m)
+        m.delenv("METRICS_SCRAPE_TOKEN", raising=False)
+        with pytest.raises(ValueError, match="METRICS_SCRAPE_TOKEN is required"):
+            Settings.from_env()
+
