@@ -303,6 +303,18 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
         }
     }
 
+    /**
+     * True while a hazard alert spoken within [windowMs] is still the freshest thing in the
+     * user's only audio channel.
+     *
+     * [status] flushes TTS, which is right for every prompt that means "the camera cannot see" —
+     * assistance is degraded and the user needs to know now. It is the wrong trade for context
+     * that makes no claim about what is ahead (F-71 ambient light), so that tier checks this and
+     * drops itself rather than cutting off "Vehicle nearby".
+     */
+    fun hazardSpokenWithin(nowMs: Long, windowMs: Long = MIN_UTTERANCE_GAP_MS): Boolean =
+        lastAlertAtMs != 0L && nowMs - lastAlertAtMs < windowMs
+
     fun status(text: String, haptic: Boolean = false, onComplete: (() -> Unit)? = null) {
         runApi {
             if (haptic) vibrate("single")

@@ -20,7 +20,7 @@ The key honesty boundary is kinematic: at the 0.2–3 FPS envelope used by a rec
 | Local fallback | No TFLite/LiteRT model is bundled; offline state says assistance is unavailable | A pinned, evaluated model asset and complete preprocessing/postprocessing contract, device benchmark and controlled-course evidence |
 | Pilot use | Bench tests and supervised preparation only | A named mobility instructor, Tier-A device, valid consent, controlled-course pass and release-gate sign-off |
 
-Silence never means safety. The app must state `Camera view unclear`, `Limited alerts`, or `Vision assistance unavailable` when it knows it cannot assist.
+Silence never means safety. The app must state `Camera is blurry. Wipe the lens.`, `Limited alerts`, or `Vision assistance unavailable` when it knows it cannot assist.
 
 ## 2. End-to-end system
 

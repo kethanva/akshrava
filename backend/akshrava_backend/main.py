@@ -120,7 +120,7 @@ async def lifespan(app):
         await session_admission.shutdown()
 
 
-app = FastAPI(title="Akshrava backend", version="0.2.13", lifespan=lifespan)
+app = FastAPI(title="Akshrava backend", version="0.2.14", lifespan=lifespan)
 
 
 @app.get("/livez")

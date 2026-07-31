@@ -57,6 +57,8 @@ Do not rebuild. Extend tests / soak signals instead.
 | — | Session watchdog (distinct from F-30) | [`Watchdog`](android/app/src/main/java/org/akshrava/app/Watchdog.kt) + WatchdogReceiver | Prompt-only; never auto-starts FGS |
 | F-31 | Double-shake | [`GestureDetectorEngine`](android/app/src/main/java/org/akshrava/app/GestureDetectorEngine.kt) in AssistService + [`GestureDetectorEngineTest`](android/app/src/test/java/org/akshrava/app/GestureDetectorEngineTest.kt) | Shake → one look; 3 s trigger cooldown; speaks nothing extra (an extra utterance would flush a live hazard alert) |
 | F-42 | Glare / washout guard | [`FrameGate.isGlared`](android/app/src/main/java/org/akshrava/app/FrameGate.kt) + AssistService (≥3 frames, drop) + [`FrameGateTest`](android/app/src/test/java/org/akshrava/app/FrameGateTest.kt) | `Camera blinded by light. Turn slightly.` |
+| F-71 | Ambient light **edge** context | [`AmbientLightMonitor`](android/app/src/main/java/org/akshrava/app/AmbientLightMonitor.kt) (`TYPE_LIGHT` @ 1 Hz) + `AssistService.announceAmbientLightEdge` + [`AmbientLightMonitorTest`](android/app/src/test/java/org/akshrava/app/AmbientLightMonitorTest.kt) | Edges only: `Environment is dark.` / `Brighter now.` after a 3 s hold, ≥8 s cooldown; 10/50 lux hysteresis band; no continuous tone; dropped (never deferred) while a hazard alert is still landing |
+| F-72 | Wipe-lens blur prompt | `FrameGate.shouldAnnounceBlur` + AssistService + [`FrameGateTest`](android/app/src/test/java/org/akshrava/app/FrameGateTest.kt) | `Camera is blurry. Wipe the lens. Use cane or guide.` after ≥5 frames; **never drops**; first prompt is not held behind the 60 s cooldown |
 | — | Priority look (baseline) | Protocol `priority` / headset long-press → `look_summary` | On-demand scene sentence; no approach/crossing |
 | — | Backend awareness classes | [`hazards.py`](backend/akshrava_backend/hazards.py) vehicles + obstacles (`person`, `pole`, …) | `vehicle_nearby` / `person_ahead` / `obstacle_ahead` only |
 
@@ -64,7 +66,7 @@ Do not rebuild. Extend tests / soak signals instead.
 
 | Piece | Today | Remaining polish |
 |---|---|---|
-| Blur gate | `FrameGate.isBlurred` → after **≥5** frames and **60 s** cooldown: `Camera view unclear. Use cane or guide.` — **never drops** frames | **F-72**: clearer wipe-lens copy; optional shorter first-announce |
+| Blur gate | `FrameGate.isBlurred` → `FrameGate.shouldAnnounceBlur`: after **≥5** frames, `Camera is blurry. Wipe the lens. Use cane or guide.`, then a **60 s** cooldown — **never drops** frames | None. F-72 shipped: copy names the fix, and the first prompt no longer sits behind the cooldown (a `0` sentinel against `elapsedRealtime()` swallowed it on a freshly booted phone) |
 
 ---
 
@@ -78,8 +80,11 @@ Priority ranking uses: (1) energy / session survival on donated phones, (2) ligh
 |---|---|---|---|---|---|
 | 1 | **F-73** | In-pocket suspend | Pocketed rear-camera sessions burn heat/battery while “looking healthy”; AssistService already comments on pocket-as-busy-loop risk; PocketMode / AOSP = `TYPE_PROXIMITY` + `TYPE_LIGHT` | New `PocketStateDetector` (prox near + lux ≲ ~3 + optional face-down gravity); AssistService pauses analysis / sheds frames; status `Assistance paused. Phone may be in a pocket.`; resume on exit | Unit: pocket FSM. Soak: pocket 30 s → pause; remove → frames resume |
 | 2 | **F-04** | Earcon-only urgent mode | Noisy Indian streets; Seeing AI Light uses tones; we already have `ConnectionEarcons` | Pref on `AppConfig` + MainActivity toggle; S1 → earcon + haptic only; status / look still spoken | Unit: urgent×pref matrix. Manual: traffic noise, S1 buzz without sentence |
-| 3 | **F-71** | Ambient light **edge** context | Seeing AI Light channel; arXiv §5.1 lighting accuracy; camera luma ≠ environment lux (F-02/F-42) | `Sensor.TYPE_LIGHT`; announce dark↔bright edges only (`Environment is dark` / `Brighter now`), ≥8 s cooldown; **no continuous tone by default** (battery) | Unit: lux thresholds + cooldown |
-| 4 | **F-72** | Wipe-lens blur prompt | Blur already gated; Lookout Images notes blur/occlusion hurt results | Replace/augment unclear copy → `Camera is blurry. Wipe the lens.`; keep never-drop | AssistService string + optional test assert |
+
+> F-71 and F-72 have shipped — see §2. F-73 inherits the `TYPE_LIGHT` registration pattern from
+> [`AmbientLightMonitor`](android/app/src/main/java/org/akshrava/app/AmbientLightMonitor.kt), but
+> needs its own reading: pocket detection wants raw lux against a near-zero floor, not the
+> dark/bright edge machine, and it must gate on proximity as well.
 
 ### P1 — On-demand daily living (user-triggered only)
 

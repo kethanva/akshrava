@@ -239,7 +239,7 @@ The app uses CameraX `STRATEGY_KEEP_ONLY_LATEST`, closes every `ImageProxy`, and
 
 Muting is a deliberate user action (headset double-press) and nothing else may silence the speaking lane. A headset route change — earbuds dying, a cable pulled — announces that alerts have moved to the phone speaker and keeps speaking, because to a user who cannot see the screen, silence is indistinguishable from a dead app.
 
-Examples of permitted language are `Obstacle ahead`, `Vehicle nearby, left`, `Camera view unclear`, and `Vision assistance unavailable. Use cane or guide.` The app never converts a detection into distance, approach speed, a safe route, or a crossing recommendation.
+Examples of permitted language are `Obstacle ahead`, `Vehicle nearby, left`, `Camera is blurry. Wipe the lens.`, `Environment is dark.`, and `Vision assistance unavailable. Use cane or guide.` The app never converts a detection into distance, approach speed, a safe route, or a crossing recommendation.
 
 ## Protocol and trust boundaries
 

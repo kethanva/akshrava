@@ -7,9 +7,14 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_release_version_script_accepts_the_current_v0212_tag():
+def test_release_version_script_accepts_the_tag_for_the_packaged_version():
+    # Derived, not hardcoded: a literal here has to be edited on every bump, and the one that
+    # used to live here had already drifted out of step with its own test name. What this
+    # asserts is unchanged -- that all four version sites and the schema revision agree with
+    # the packaged version -- and the mismatch case is covered by the test below.
+    version = _release_checker().version_from_backend(ROOT)
     result = subprocess.run(
-        [sys.executable, str(ROOT / "scripts/check_release_version.py"), "v0.2.13"],
+        [sys.executable, str(ROOT / "scripts/check_release_version.py"), f"v{version}"],
         cwd=ROOT,
         capture_output=True,
         text=True,

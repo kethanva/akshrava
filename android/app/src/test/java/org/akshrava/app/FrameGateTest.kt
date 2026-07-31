@@ -53,4 +53,28 @@ class FrameGateTest {
         // Dim flat field is occlusion/blur territory, not glare.
         assertFalse(FrameGate.isGlared(IntArray(32 * 32) { 100 }))
     }
+
+    @Test
+    fun blurPromptWaitsForPersistentEvidence() {
+        val frames = FrameGate.BLUR_FRAMES_BEFORE_ANNOUNCE
+        assertFalse(FrameGate.shouldAnnounceBlur(50_000L, frames - 1, lastAnnounceMs = null))
+        assertTrue(FrameGate.shouldAnnounceBlur(50_000L, frames, lastAnnounceMs = null))
+    }
+
+    @Test
+    fun firstBlurPromptIsNotHeldBehindTheCooldown() {
+        // elapsedRealtime() is time since boot, so a 0 "never announced" sentinel reads as
+        // "announced at boot" and silently swallows the first prompt on a phone that started
+        // assistance within the cooldown of powering on.
+        assertTrue(FrameGate.shouldAnnounceBlur(1_000L, FrameGate.BLUR_FRAMES_BEFORE_ANNOUNCE, null))
+    }
+
+    @Test
+    fun blurPromptRespectsItsCooldownAfterTheFirst() {
+        val frames = FrameGate.BLUR_FRAMES_BEFORE_ANNOUNCE
+        val cooldown = FrameGate.BLUR_ANNOUNCE_COOLDOWN_MS
+        assertFalse(FrameGate.shouldAnnounceBlur(cooldown - 1, frames, lastAnnounceMs = 0L))
+        assertTrue(FrameGate.shouldAnnounceBlur(cooldown, frames, lastAnnounceMs = 0L))
+        assertTrue(FrameGate.shouldAnnounceBlur(120_000L, frames, lastAnnounceMs = 30_000L))
+    }
 }

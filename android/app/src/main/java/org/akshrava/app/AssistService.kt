@@ -92,6 +92,7 @@ class AssistService : LifecycleService() {
     private var calibrationId: String = ""
     private var headsetControls: HeadsetControls? = null
     private var gestureDetectorEngine: GestureDetectorEngine? = null
+    private var ambientLightMonitor: AmbientLightMonitor? = null
     private var reflexEngine: ReflexEngine = DisabledReflexEngine()
     private var wakeLock: PowerManager.WakeLock? = null
     private var cameraProvider: ProcessCameraProvider? = null
@@ -128,7 +129,8 @@ class AssistService : LifecycleService() {
     private var lastCaptureMs = 0L
     private var lastThermalCheckMs = 0L
     private var lastBatteryWarningMs = 0L
-    private var lastCameraUnclearMs = 0L
+    /** null = the wipe-lens prompt has not spoken this session; see FrameGate.shouldAnnounceBlur. */
+    private var lastCameraUnclearMs: Long? = null
     private var lastHeartbeatMs = 0L
     private var lastWakeLockRenewAtMs = 0L
     private var lastAnalyzeAtMs = 0L
@@ -304,6 +306,7 @@ class AssistService : LifecycleService() {
         consecutiveBlurredFrames = 0
         consecutiveOccludedFrames = 0
         consecutiveGlaredFrames = 0
+        lastCameraUnclearMs = null
         extremeTiltSinceMs = null
         captureSuspendedForBattery = false
         captureSuspendedForFailure = false
@@ -361,6 +364,15 @@ class AssistService : LifecycleService() {
             poseTracker?.onAccelerometerSample = { x, y, z, nowMs ->
                 engine.onAccelerometerSample(x, y, z, nowMs)
             }
+        }
+        ambientLightMonitor = AmbientLightMonitor(this) { level ->
+            // Samples arrive on the sensor thread; status() speaks, so hop off it for the same
+            // reason the gesture engine does — PoseTracker shares that thread.
+            mainHandler.post { announceAmbientLightEdge(am, level) }
+        }.also { monitor ->
+            // A phone with no light sensor simply never gets this context. It is additive
+            // awareness, so its absence is logged, not spoken: it is not a fault the user can act on.
+            if (!monitor.start()) Log.i("AkshravaDebug", "ambient_light_sensor_unavailable")
         }
         // A session only survives a long walk if the display stays awake: many OEM ROMs stop
         // delivering CameraX frames once the screen sleeps, which ends the walk silently. The
@@ -428,6 +440,7 @@ class AssistService : LifecycleService() {
         // its own, so clearing the sink is what stops it being fed.
         poseTracker?.onAccelerometerSample = null
         gestureDetectorEngine = null
+        ambientLightMonitor?.stop(); ambientLightMonitor = null
         screenKeepAlive?.stop(); screenKeepAlive = null
         osLifecycleReceiver?.let {
             try { unregisterReceiver(it) } catch (e: Exception) {}
@@ -753,10 +766,13 @@ class AssistService : LifecycleService() {
                 consecutiveBlurredFrames += 1
                 // Blur never drops a frame. Persistent evidence only produces a bounded status
                 // prompt, because the cane/guide is primary when the camera cannot be trusted.
-                if (consecutiveBlurredFrames >= 5 && now - lastCameraUnclearMs >= 60_000L) {
+                if (FrameGate.shouldAnnounceBlur(now, consecutiveBlurredFrames, lastCameraUnclearMs)) {
                     lastCameraUnclearMs = now
-                    alertManager?.status("Camera view unclear. Use cane or guide.")
-                    updateNotification("Camera view unclear")
+                    // Name the fix first (F-72): a smeared lens on a pocket-carried donated phone
+                    // is usually a fingerprint, and "unclear" alone gave the user nothing to do
+                    // about it. The cane/guide fallback stays, because wiping may not help.
+                    alertManager?.status("Camera is blurry. Wipe the lens. Use cane or guide.")
+                    updateNotification("Camera is blurry — wipe the lens")
                 }
             } else {
                 consecutiveBlurredFrames = 0
@@ -928,6 +944,30 @@ class AssistService : LifecycleService() {
         Log.i("AkshravaDebug", "tilt_announced pitch_cdeg=$pitch")
     }
 
+    /**
+     * Speak one ambient light edge (F-71), or drop it.
+     *
+     * Dropped rather than deferred on purpose. This is the lowest tier of speech in the app: it
+     * describes the environment and makes no claim about what is ahead, so it must never cut off
+     * a hazard alert that is still landing. By the time a deferral would have expired the edge is
+     * old news, and the monitor has already adopted the new level, so nothing repeats later.
+     *
+     * No notification update either — the light changing is not a fault state to display.
+     */
+    private fun announceAmbientLightEdge(am: AlertManager, level: AmbientLightLevel) {
+        val now = SystemClock.elapsedRealtime()
+        if (am.hazardSpokenWithin(now)) {
+            Log.i("AkshravaDebug", "ambient_light_edge_skipped level=$level reason=alert_busy")
+            return
+        }
+        val text = when (level) {
+            AmbientLightLevel.DARK -> "Environment is dark."
+            AmbientLightLevel.BRIGHT -> "Brighter now."
+        }
+        am.status(text)
+        Log.i("AkshravaDebug", "ambient_light_edge level=$level")
+    }
+
     private fun captureIntervalMs(): Long {
         val now = SystemClock.elapsedRealtime()
         val motion: MotionState = poseTracker?.motionState() ?: MotionState.STATIONARY
@@ -1023,6 +1063,10 @@ class AssistService : LifecycleService() {
         cameraLifecycleOwner?.destroy(); cameraLifecycleOwner = null
         client?.close(); client = null
         poseTracker?.stop(); poseTracker = null
+        // Stop here, not just in teardown: the camera is already gone, and an ambient-light line
+        // arriving between now and the deferred stop would tell a user who cannot see the screen
+        // that something is still watching.
+        ambientLightMonitor?.stop(); ambientLightMonitor = null
         frameExecutor?.shutdownNow(); frameExecutor = null
         wakeLock?.let { if (it.isHeld) it.release(); wakeLock = null }
         // Capture generation before scheduling deferred stops. A Start that bumps
