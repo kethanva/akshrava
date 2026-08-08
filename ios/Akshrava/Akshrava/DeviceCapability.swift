@@ -8,6 +8,9 @@
 //
 
 import Foundation
+#if os(iOS)
+import UIKit
+#endif
 
 public enum DeviceCapability {
     /// Percent-per-hour a live assistance session costs on typical donated hardware.
@@ -28,6 +31,21 @@ public enum DeviceCapability {
         let physicalMemory = ProcessInfo.processInfo.physicalMemory
         let threshold: UInt64 = UInt64(2.8 * 1024 * 1024 * 1024)
         return physicalMemory < threshold
+    }
+
+    /// Current battery percent (0–100), or nil when monitoring is unavailable (macOS CI / unknown).
+    public static func batteryPercent() -> Int? {
+        #if os(iOS)
+        let device = UIDevice.current
+        if !device.isBatteryMonitoringEnabled {
+            device.isBatteryMonitoringEnabled = true
+        }
+        let level = device.batteryLevel
+        guard level >= 0 else { return nil }
+        return Int((level * 100).rounded())
+        #else
+        return nil
+        #endif
     }
 
     /// Spoken F-15 battery gauge text.
