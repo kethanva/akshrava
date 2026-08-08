@@ -221,6 +221,7 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
     private var pingWorkItem: DispatchWorkItem?
     private var reconnectAttempt = 0
     private var reconnectScheduled = false
+    private let webSocketDispatchQueue = DispatchQueue(label: "org.akshrava.ios.ws.delegate")
 
     public override init() {
         super.init()
@@ -423,7 +424,7 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
         // also reorder relative to each other across those callbacks.
         let delegateQueue = OperationQueue()
         delegateQueue.maxConcurrentOperationCount = 1
-        delegateQueue.underlyingQueue = DispatchQueue(label: "org.akshrava.ios.ws.delegate")
+        delegateQueue.underlyingQueue = webSocketDispatchQueue
         let session = URLSession(configuration: configuration, delegate: self, delegateQueue: delegateQueue)
 
         var request = URLRequest(url: url)
