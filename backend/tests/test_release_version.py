@@ -62,6 +62,33 @@ def test_release_manifest_schema_revision_is_derived_from_the_migrations():
     assert checker.alembic_head_revision(ROOT) == checker.expected_schema_revision(ROOT)
 
 
+def test_every_ios_version_site_matches_the_packaged_release_version():
+    """The iOS version is declared in three files and all three reach a shipped build.
+
+    Info.plist is what an installed IPA reports, project.yml MARKETING_VERSION is what the
+    xcodegen-produced archive is stamped with, and AppConfig.swift is what the app itself logs.
+    Checking only the Swift constant would let a release publish an IPA carrying the previous
+    version while the gate reported parity.
+    """
+    checker = _release_checker()
+    packaged = checker.version_from_backend(ROOT)
+    sites = checker.ios_versions(ROOT)
+    assert set(sites) == {"ios-appconfig", "ios-infoplist", "ios-xcodegen"}
+    for name, version in sites.items():
+        assert version == packaged, f"{name} declares {version} but the package is {packaged}"
+
+
+def test_a_missing_ios_release_file_fails_the_gate_instead_of_falling_back(tmp_path):
+    """A deleted or moved iOS tree must block a release, not silently report parity.
+
+    The first version of this check returned the backend version when AppConfig.swift was absent,
+    so the gate passed precisely when it could not verify anything.
+    """
+    checker = _release_checker()
+    with pytest.raises(ValueError, match="iOS release file is missing"):
+        checker.ios_versions(tmp_path)
+
+
 def test_a_forked_migration_history_is_rejected_rather_than_guessed(tmp_path):
     """Two heads means someone branched the migration history; picking one silently is wrong."""
     checker = _release_checker()

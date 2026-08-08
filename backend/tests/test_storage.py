@@ -1,6 +1,7 @@
+import os
 from datetime import datetime, timedelta, timezone
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import DateTime, text
@@ -225,6 +226,167 @@ async def test_revocation_cache_is_lru_bounded(tmp_path, monkeypatch):
         await store.close()
 
 
+@pytest.mark.asyncio
+async def test_leader_purge_on_sqlite_runs_directly_without_an_advisory_lock(tmp_path):
+    """SQLite is single-process dev/test: there is no fleet to coordinate and no lock support."""
+    store = Store("sqlite+aiosqlite:///%s" % (tmp_path / "leader-sqlite.db"))
+    await store.initialize()
+    try:
+        async with store.sessions() as session:
+            session.add(
+                AlertEvent(
+                    device_id="dev-1", frame_id=1, kind="vehicle", level="caution",
+                    bearing="ahead", confidence=0.9,
+                    created_at=datetime.now(timezone.utc) - timedelta(days=60),
+                )
+            )
+            await session.commit()
+
+        assert await store.purge_alert_events_if_leader(30) == 1
+        # Idempotent: nothing left to remove on the next cycle.
+        assert await store.purge_alert_events_if_leader(30) == 0
+    finally:
+        await store.close()
+
+
+def _postgres_store_with_fake_connection(execute_side_effect=None, lock_acquired=True):
+    """A Postgres-URL Store whose engine hands out one mock connection.
+
+    AsyncEngine.connect is read-only, so the engine object itself is replaced rather than patched.
+    """
+    store = Store("postgresql+asyncpg://user:pw@localhost:5432/akshrava")
+    connection = AsyncMock()
+    connection.execution_options = AsyncMock(return_value=connection)
+    if execute_side_effect is not None:
+        connection.execute = AsyncMock(side_effect=execute_side_effect)
+    else:
+        lock_result = MagicMock()
+        lock_result.scalar.return_value = lock_acquired
+        connection.execute = AsyncMock(return_value=lock_result)
+    fake_engine = MagicMock()
+    fake_engine.connect = AsyncMock(return_value=connection)
+    store.engine = fake_engine
+    return store, connection
+
+
+@pytest.mark.asyncio
+async def test_leader_purge_skips_work_when_another_instance_holds_the_lock():
+    """A lost advisory lock is a normal outcome, not an error.
+
+    Ten Cloud Run instances each run their own retention loop. Exactly one should delete; the
+    rest must return None immediately and wait for their next interval rather than piling into
+    the same batched DELETE on alert_events while phones are streaming.
+    """
+    # lock_acquired=False -> somebody else is already purging.
+    store, connection = _postgres_store_with_fake_connection(lock_acquired=False)
+
+    with patch.object(store, "purge_alert_events_older_than", AsyncMock()) as raw_purge:
+        assert await store.purge_alert_events_if_leader(30) is None
+
+    raw_purge.assert_not_called()
+    connection.close.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_leader_purge_always_releases_the_session_lock_even_when_the_purge_fails():
+    """The advisory lock is session-scoped and the connection returns to the pool, not closed.
+
+    A leaked lock would silently disable retention for the entire life of the process, so the
+    unlock must run on the failure path too.
+    """
+    statements: list[str] = []
+
+    async def record(statement, *args, **kwargs):
+        statements.append(str(statement))
+        result = MagicMock()
+        result.scalar.return_value = True  # lock acquired
+        return result
+
+    store, connection = _postgres_store_with_fake_connection(execute_side_effect=record)
+
+    with patch.object(
+        store, "purge_alert_events_older_than", AsyncMock(side_effect=RuntimeError("boom"))
+    ):
+        with pytest.raises(RuntimeError):
+            await store.purge_alert_events_if_leader(30)
+
+    assert any("pg_try_advisory_lock" in item for item in statements)
+    assert any("pg_advisory_unlock" in item for item in statements), (
+        "session-level advisory lock must be released even when the purge raises"
+    )
+    connection.close.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_leader_purge_reports_the_purge_result_even_if_unlock_fails():
+    """Failing to release the lock must never mask a successful purge."""
+    async def flaky(statement, *args, **kwargs):
+        if "pg_advisory_unlock" in str(statement):
+            raise RuntimeError("unlock failed")
+        result = MagicMock()
+        result.scalar.return_value = True
+        return result
+
+    store, connection = _postgres_store_with_fake_connection(execute_side_effect=flaky)
+
+    with patch.object(store, "purge_alert_events_older_than", AsyncMock(return_value=7)):
+        assert await store.purge_alert_events_if_leader(30) == 7
+    connection.invalidate.assert_awaited_once()
+    connection.close.assert_awaited_once()
+
+
+_POSTGRES_URL = os.getenv("DATABASE_URL", "")
+_HAS_POSTGRES = _POSTGRES_URL.startswith("postgresql")
+
+
+@pytest.mark.skipif(not _HAS_POSTGRES, reason="requires a real Postgres DATABASE_URL (CI provides one)")
+@pytest.mark.asyncio
+async def test_leader_election_against_real_postgres_advisory_locks():
+    """Execute the advisory-lock SQL for real, not against a mock.
+
+    Every other leader-election test stubs the connection, so a typo in the lock SQL, a wrong
+    parameter style, or a function that does not exist would pass all of them and only fail in
+    production -- where the symptom is retention silently never running. CI runs a Postgres
+    service, so exercise the real primitive there.
+    """
+    from akshrava_backend.storage import _RETENTION_ADVISORY_LOCK_KEY
+
+    leader = Store(_POSTGRES_URL, bootstrap_schema=False)
+    contender = Store(_POSTGRES_URL, bootstrap_schema=False)
+    try:
+        # Uncontended: the lock is taken, the purge runs, and a row count comes back.
+        first = await leader.purge_alert_events_if_leader(30)
+        assert isinstance(first, int)
+
+        # Hold the lock on an independent session and confirm a second instance stands down
+        # instead of piling into the same batched DELETE.
+        holder = await contender.engine.connect()
+        holder = await holder.execution_options(isolation_level="AUTOCOMMIT")
+        try:
+            acquired = (
+                await holder.execute(
+                    text("SELECT pg_try_advisory_lock(:key)"),
+                    {"key": _RETENTION_ADVISORY_LOCK_KEY},
+                )
+            ).scalar()
+            assert acquired is True, "test could not take the lock it needs to contend for"
+
+            assert await leader.purge_alert_events_if_leader(30) is None
+        finally:
+            await holder.execute(
+                text("SELECT pg_advisory_unlock(:key)"), {"key": _RETENTION_ADVISORY_LOCK_KEY}
+            )
+            await holder.close()
+
+        # Lock released: the leader can purge again. This also proves the earlier successful
+        # purge released its own session-level lock rather than leaking it onto a pooled
+        # connection, which would disable retention for the life of the process.
+        assert isinstance(await leader.purge_alert_events_if_leader(30), int)
+    finally:
+        await leader.close()
+        await contender.close()
+
+
 def test_non_sqlite_engine_uses_a_bounded_connection_pool():
     # Cloud Run autoscaling + SQLAlchemy's default 15-conn pool would exhaust a 1-vCPU Cloud SQL
     # instance. The Postgres engine must use a small, explicitly bounded pool with pre_ping.
@@ -302,4 +464,3 @@ async def test_storage_schema_verification_errors(tmp_path):
     store.expected_schema_revision = "20260721_01"
     with pytest.raises(RuntimeError, match="revision mismatch: expected 20260721_01, found 20200101_01"):
         await store.verify_schema()
-

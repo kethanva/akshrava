@@ -22,6 +22,28 @@ class Metrics:
         self._session_admission_rejected_total = 0
         self._inference_failures_total = 0
         self._worker_saturated_total = 0
+        # ---- phone result delivery ----
+        # A successful server WebSocket write is not delivery: the peer can disappear before it
+        # processes the frame. Keep that transport fact separate from the phone's explicit ack,
+        # which is the only signal that proves the result reached the handset and passed its own
+        # glass-to-ear freshness gate. Neither metric claims that an utterance was audible; TTS
+        # acceptance is intentionally not inferred from a network protocol acknowledgement.
+        self._results_sent_total = 0
+        self._result_acknowledgements_expected_total = 0
+        self._phone_results_acknowledged_total = 0
+        self._phone_results_acknowledged_fresh_total = 0
+        # Counted exactly, at the moment a pending acknowledgement slot is evicted without ever
+        # having been acknowledged -- NOT derived as (expected - acknowledged) over an export
+        # window. That subtraction was structurally wrong: the two totals are observed in
+        # different 60s windows for any frame in flight across a window boundary, so at a
+        # realistic fleet size the derived value was permanently nonzero even when every result
+        # was acknowledged promptly. An eviction is unambiguous evidence the phone never acked.
+        self._phone_results_unacknowledged_total = 0
+        self._delivery_reported_sent_total = 0
+        self._delivery_reported_expected_total = 0
+        self._delivery_reported_acknowledged_total = 0
+        self._delivery_reported_fresh_total = 0
+        self._delivery_reported_unacknowledged_total = 0
         self._db_pool_checkedin = 0
         self._db_pool_checkedout = 0
         self._inference_counts: dict[int, int] = {bucket: 0 for bucket in self._INFERENCE_BUCKETS}
@@ -34,7 +56,17 @@ class Metrics:
         self._stage_sums = {stage: 0 for stage in self._PIPELINE_STAGES}
         self._stage_totals = {stage: 0 for stage in self._PIPELINE_STAGES}
 
-    def observe_result(self, inference_ms: int, has_alert: bool, stage_ms=None) -> None:
+    def observe_result(
+        self,
+        inference_ms: int,
+        has_alert: bool,
+        stage_ms=None,
+    ) -> None:
+        """Record one inference result produced by this process.
+
+        Transport delivery is recorded separately after a successful WebSocket write, and phone
+        receipt/freshness is recorded only after the bounded result acknowledgement arrives.
+        """
         with self._lock:
             self._frames_total += 1
             self._alerts_total += int(has_alert)
@@ -104,6 +136,52 @@ class Metrics:
         with self._lock:
             self._worker_saturated_total += 1
 
+    def result_sent(self, *, acknowledgement_expected: bool) -> None:
+        """A result was accepted by the server-side WebSocket transport."""
+        with self._lock:
+            self._results_sent_total += 1
+            self._result_acknowledgements_expected_total += int(acknowledgement_expected)
+
+    def phone_result_acknowledged(self, *, fresh: bool) -> None:
+        """The authenticated phone processed a sent result and reported its own freshness gate."""
+        with self._lock:
+            self._phone_results_acknowledged_total += 1
+            self._phone_results_acknowledged_fresh_total += int(fresh)
+
+    def phone_result_unacknowledged(self) -> None:
+        """A sent result aged out of the bounded pending-ack set without ever being acknowledged.
+
+        This is the alertable delivery-failure signal, and it is exact: the session sent a result,
+        kept a slot for its acknowledgement, and later discarded that slot because newer results
+        pushed it out. No window arithmetic is involved, so it cannot report a false failure for a
+        frame that is merely still in flight.
+        """
+        with self._lock:
+            self._phone_results_unacknowledged_total += 1
+
+    def take_phone_delivery_window(self) -> tuple[int, int, int, int, int]:
+        """Return one process-local delivery delta for export without device/frame labels.
+
+        Cloud Run does not scrape this private endpoint by itself. The API therefore logs bounded
+        aggregate deltas periodically, which Terraform turns into Cloud Logging metrics. Tracking
+        the last reported totals under the same lock preserves counter correctness across a
+        concurrent result send/ack while never retaining user-specific state.
+        """
+        with self._lock:
+            sent = self._results_sent_total - self._delivery_reported_sent_total
+            expected = self._result_acknowledgements_expected_total - self._delivery_reported_expected_total
+            acknowledged = self._phone_results_acknowledged_total - self._delivery_reported_acknowledged_total
+            fresh = self._phone_results_acknowledged_fresh_total - self._delivery_reported_fresh_total
+            unacknowledged = (
+                self._phone_results_unacknowledged_total - self._delivery_reported_unacknowledged_total
+            )
+            self._delivery_reported_sent_total = self._results_sent_total
+            self._delivery_reported_expected_total = self._result_acknowledgements_expected_total
+            self._delivery_reported_acknowledged_total = self._phone_results_acknowledged_total
+            self._delivery_reported_fresh_total = self._phone_results_acknowledged_fresh_total
+            self._delivery_reported_unacknowledged_total = self._phone_results_unacknowledged_total
+            return sent, expected, acknowledged, fresh, unacknowledged
+
     def set_db_pool_stats(self, checkedin: int, checkedout: int) -> None:
         with self._lock:
             self._db_pool_checkedin = checkedin
@@ -137,6 +215,21 @@ class Metrics:
                 "# HELP akshrava_worker_saturated_total Frames soft-shed because the worker queue was full.",
                 "# TYPE akshrava_worker_saturated_total counter",
                 f"akshrava_worker_saturated_total {self._worker_saturated_total}",
+                "# HELP akshrava_results_sent_total Results accepted by the server-side WebSocket transport; this is not handset delivery.",
+                "# TYPE akshrava_results_sent_total counter",
+                f"akshrava_results_sent_total {self._results_sent_total}",
+                "# HELP akshrava_result_acknowledgements_expected_total Sent results for phones that explicitly support result acknowledgements.",
+                "# TYPE akshrava_result_acknowledgements_expected_total counter",
+                f"akshrava_result_acknowledgements_expected_total {self._result_acknowledgements_expected_total}",
+                "# HELP akshrava_phone_results_acknowledged_total Results the authenticated phone explicitly processed.",
+                "# TYPE akshrava_phone_results_acknowledged_total counter",
+                f"akshrava_phone_results_acknowledged_total {self._phone_results_acknowledged_total}",
+                "# HELP akshrava_phone_results_acknowledged_fresh_total Phone-acknowledged results inside the phone freshness gate; this does not assert TTS playback.",
+                "# TYPE akshrava_phone_results_acknowledged_fresh_total counter",
+                f"akshrava_phone_results_acknowledged_fresh_total {self._phone_results_acknowledged_fresh_total}",
+                "# HELP akshrava_phone_results_unacknowledged_total Sent results whose bounded acknowledgement slot was evicted without the phone ever acknowledging them.",
+                "# TYPE akshrava_phone_results_unacknowledged_total counter",
+                f"akshrava_phone_results_unacknowledged_total {self._phone_results_unacknowledged_total}",
                 "# HELP akshrava_db_pool_checkedin SQLAlchemy connection pool idle count.",
                 "# TYPE akshrava_db_pool_checkedin gauge",
                 f"akshrava_db_pool_checkedin {self._db_pool_checkedin}",

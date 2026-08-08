@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- App identity -->
+    <key>CFBundleIdentifier</key>
+    <string>org.akshrava.app</string>
+    <key>CFBundleName</key>
+    <string>Akshrava</string>
+    <key>CFBundleDisplayName</key>
+    <string>Akshrava</string>
+    <key>CFBundleVersion</key>
+    <string>14</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.2.14</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+
+    <!-- Platform requirements — must match Android: API 26+ = iOS 14+ scope -->
+    <key>MinimumOSVersion</key>
+    <string>14.0</string>
+    <key>LSRequiresIPhoneOS</key>
+    <true/>
+
+    <!-- Camera is mandatory (mirrors AndroidManifest android.hardware.camera required=true) -->
+    <key>NSCameraUsageDescription</key>
+    <string>Akshrava uses the rear camera to detect nearby vehicles and obstacles for assistive vision. Camera access is required for the app to function.</string>
+
+    <!-- Background task scheduling and spoken output. Camera capture itself cannot continue
+         while iOS backgrounds the app; interruption handling announces that limitation. -->
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>audio</string>
+        <string>processing</string>
+    </array>
+
+    <!-- BGTaskScheduler identifiers (mirrors Watchdog.kt AlarmManager) -->
+    <key>BGTaskSchedulerPermittedIdentifiers</key>
+    <array>
+        <string>org.akshrava.ios.watchdog</string>
+    </array>
+
+    <!-- Networking — allow WSS connections to the GCP backend -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <!-- Only WSS (TLS) is allowed in production; ws:// dev override is env-gated -->
+        <key>NSAllowsArbitraryLoads</key>
+        <false/>
+    </dict>
+
+    <!-- Accessibility -->
+    <key>UIAccessibilityIsEnabled</key>
+    <true/>
+
+    <!-- Screen orientation: portrait and upside-down portrait for cane users -->
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationPortraitUpsideDown</string>
+    </array>
+
+    <!-- Status bar -->
+    <key>UIStatusBarStyle</key>
+    <string>UIStatusBarStyleLightContent</string>
+    <key>UIViewControllerBasedStatusBarAppearance</key>
+    <false/>
+
+    <key>UILaunchScreen</key>
+    <dict/>
+
+    <!-- App icon -->
+    <key>CFBundleIcons</key>
+    <dict>
+        <key>CFBundlePrimaryIcon</key>
+        <dict>
+            <key>CFBundleIconFiles</key>
+            <array>
+                <string>AppIcon</string>
+            </array>
+        </dict>
+    </dict>
+</dict>
+</plist>

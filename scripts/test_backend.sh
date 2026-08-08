@@ -20,6 +20,6 @@ fi
 export DEV_AUTH_BYPASS=true
 export DETECTOR=noop
 python -m pip install --upgrade 'pip>=26.1.2' 'setuptools>=83'
-python -m pip install '.[dev]'
+python -m pip install -e '.[dev]'
 pytest -q
 ruff check akshrava_backend tests

@@ -1,0 +1,72 @@
+name: AkshravaApp
+options:
+  bundleIdPrefix: org.akshrava
+  deploymentTarget:
+    iOS: "14.0"
+settings:
+  SWIFT_VERSION: "5.9"
+packages:
+  Akshrava:
+    path: ../Akshrava
+targets:
+  AkshravaApp:
+    type: application
+    platform: iOS
+    sources:
+      - path: .
+        excludes:
+          - project.yml
+          - provision.json
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: org.akshrava.app
+      INFOPLIST_FILE: Info.plist
+      TARGETED_DEVICE_FAMILY: "1"
+      CURRENT_PROJECT_VERSION: 14
+      MARKETING_VERSION: "0.2.14"
+      GENERATE_INFOPLIST_FILE: NO
+    dependencies:
+      - package: Akshrava
+        product: Akshrava
+
+  # Runs the SAME XCTest sources as `swift test`, but against the iOS SDK in a simulator.
+  #
+  # This exists because `swift test` builds for macOS, where every `#if os(iOS)` body -- the whole
+  # capture pipeline, the audio/TTS path, and the UIKit layer, i.e. most of the code that actually
+  # runs on a phone -- is compiled out. That suite passing was never evidence about any of it.
+  # The release archive step does compile those bodies, but compiling is not testing.
+  AkshravaAppTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: ../Akshrava/AkshravaTests
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: org.akshrava.app.tests
+      GENERATE_INFOPLIST_FILE: YES
+      # `@testable import Akshrava` requires the module to carry testing symbols. Debug builds
+      # enable this by default, including for the SPM dependency; stated explicitly so a
+      # configuration change cannot silently break every test's import.
+      ENABLE_TESTABILITY: YES
+    dependencies:
+      # Host app only, deliberately. Depending on the Akshrava package *as well* would link the
+      # (static) SPM product into both the host executable and this bundle, and a hosted test
+      # bundle is loaded into the host process -- duplicate copies of every class. The host
+      # already links the package, and TEST_HOST/BUNDLE_LOADER resolve those symbols from it at
+      # load time while the shared build-products dir supplies the .swiftmodule that
+      # `@testable import` needs.
+      - target: AkshravaApp
+
+schemes:
+  AkshravaApp:
+    build:
+      targets:
+        AkshravaApp: all
+        AkshravaAppTests: [test]
+    test:
+      config: Debug
+      gatherCoverageData: true
+      targets:
+        - AkshravaAppTests
+    run:
+      config: Debug
+    archive:
+      config: Release

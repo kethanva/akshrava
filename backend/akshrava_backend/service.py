@@ -7,9 +7,8 @@ from concurrent.futures import ThreadPoolExecutor
 from .alert_policy import AlertPolicy
 from .composer import hazard_payload, look_summary
 from .detector import (
+    INFERENCE_MODE_ASYNC,
     Detector,
-    RegistryRemoteWorkerDetector,
-    RemoteWorkerDetector,
     TransientInferenceError,
 )
 from .domain import FrameHeader, SessionState
@@ -121,11 +120,15 @@ class VisionService:
         self.alert_max_age_ms = alert_max_age_ms
         self.inference_timeout_seconds = inference_timeout_ms / 1000.0
         self._inference_executor_workers = inference_executor_workers
-        # Local YOLO and remote/cloud paths use separate pools so a hung cloud call cannot
-        # starve local inference (and vice versa). asyncio.wait_for does not cancel the
-        # underlying thread; isolation + a bounded worker count fail closed under saturation.
+        # One bounded pool for blocking (sync-mode) detectors. asyncio.wait_for cannot cancel a
+        # running thread, so the bound is what fails closed under saturation: a hung model can
+        # occupy at most this many threads instead of every worker on the instance.
+        #
+        # There used to be a second "remote" pool here, described as isolating a hung cloud call
+        # from local inference. No dispatch path ever used it -- remote adapters are async and
+        # never touch a thread pool -- so it allocated threads, was shut down and recreated on
+        # every lifespan, and documented an isolation property the code did not actually have.
         self._local_executor = self._new_executor("akshrava-local-infer")
-        self._remote_executor = self._new_executor("akshrava-remote-infer")
         # Per-device breakers: one hung phone/GPU path must not silence the fleet.
         self._timeout_streak: dict[str, int] = {}
         self._circuit_open_until: dict[str, float] = {}
@@ -138,9 +141,6 @@ class VisionService:
             max_workers=self._inference_executor_workers,
             thread_name_prefix=prefix,
         )
-
-    def _uses_remote_path(self) -> bool:
-        return isinstance(self.detector, (RemoteWorkerDetector, RegistryRemoteWorkerDetector))
 
     def _tracker_key(self, state: SessionState) -> str:
         return state.session_key or state.device_id
@@ -273,11 +273,9 @@ class VisionService:
                 task.cancel()
             tracker.tasks.clear()
         self._local_executor.shutdown(wait=True)
-        self._remote_executor.shutdown(wait=True)
         # TestClient can start a fresh lifespan over the imported application. Recreate the
-        # bounded pools lazily instead of retaining executors that have already been shut down.
+        # bounded pool lazily instead of retaining an executor that has already been shut down.
         self._local_executor = self._new_executor("akshrava-local-infer")
-        self._remote_executor = self._new_executor("akshrava-remote-infer")
 
     async def shutdown_async(self) -> None:
         await self.drain_persists()
@@ -358,46 +356,33 @@ class VisionService:
         return result
 
     async def _detect(self, device_id: str, jpeg: bytes):
-        """Run detection with timeout + per-device circuit break.
+        """Run detection with a deadline and the per-device circuit breaker.
 
-        Remote HTTP adapters are preferred on the async path (request timeouts are killable).
-        Local/sync detectors run on an isolated thread pool: wait_for cannot cancel a worker
-        thread, so pool separation limits blast radius when one path hangs.
+        The adapter *declares* how it wants to be driven (`inference_mode`) instead of this
+        method working it out by inspection. Previously this branched on
+        `isinstance(detector, RemoteWorkerDetector)` and probed five optional attributes, which
+        meant the application core knew every adapter by name: adding a detector required editing
+        this method, and getting the probe order wrong silently routed a detector down the wrong
+        path. Now there are exactly two ways to call a detector and the detector picks one.
+
+        Async adapters are awaited directly, because their deadline is real -- an httpx request
+        can actually be abandoned. Sync adapters go to a bounded thread pool, because
+        asyncio.wait_for cannot cancel a running thread; bounding the pool is what stops a hung
+        model from consuming every worker and silencing the whole instance.
         """
         self._circuit_allows(device_id)
-        loop = asyncio.get_running_loop()
 
-        # Remote workers: async HTTP with follow_redirects=False; timeout is meaningful.
-        if self._uses_remote_path():
-            async_for_device = getattr(self.detector, "detect_async_for_device", None)
-            call = (
-                async_for_device(device_id, jpeg)
-                if async_for_device is not None
-                else self.detector.detect_async(jpeg)
+        if self.detector.inference_mode() == INFERENCE_MODE_ASYNC:
+            outcome = await self._await_inference(
+                device_id, self.detector.infer_async(device_id, jpeg)
             )
-            return await self._await_inference(device_id, call), None
-
-        # CloudFallbackDetector exposes provider + local; keep async for the availability bit.
-        if getattr(self.detector, "provider", None) is not None and getattr(self.detector, "local", None) is not None:
-            return await self._await_inference(
-                device_id, self.detector.detect_async_with_status_for_device(device_id, jpeg)
-            )
-
-        # Local YOLO / noop: sync detect on the isolated local pool (not the default executor).
-        device_method = getattr(self.detector, "detect_with_status_for_device", None)
-        method = device_method or getattr(self.detector, "detect_with_status", None)
-        if device_method is not None:
-            def function(frame):
-                return device_method(device_id, frame)
-        elif method is not None:
-            function = method
         else:
-            def function(frame):
-                return self.detector.detect_for_device(device_id, frame)
-        result = await self._await_inference(
-            device_id, loop.run_in_executor(self._local_executor, function, jpeg)
-        )
-        return result if method is not None else (result, None)
+            loop = asyncio.get_running_loop()
+            outcome = await self._await_inference(
+                device_id,
+                loop.run_in_executor(self._local_executor, self.detector.infer_sync, device_id, jpeg),
+            )
+        return outcome.detections, outcome.cloud_fallback_unavailable
 
     def _pose_discontinuity(self, state: SessionState, header: FrameHeader) -> bool:
         if header.pose_age_ms is None or header.pose_age_ms > 100:

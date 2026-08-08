@@ -17,10 +17,58 @@ from .domain import Detection
 from .model_integrity import verify_model_sha256
 
 
+@dataclass(frozen=True)
+class InferenceOutcome:
+    """Everything the application layer needs from one inference call.
+
+    `cloud_fallback_unavailable` is None for detectors with no cloud fallback, and a frame-local
+    bool for those that have one. It travels in the return value rather than on the detector
+    instance so two phones sharing a detector cannot read each other's availability bit.
+    """
+
+    detections: list[Detection]
+    cloud_fallback_unavailable: bool | None = None
+
+
+# Dispatch modes an adapter may declare. This replaces VisionService introspecting concrete
+# adapter classes to work out how to call them.
+INFERENCE_MODE_SYNC = "sync"    # blocking; the caller offloads it to a bounded thread pool
+INFERENCE_MODE_ASYNC = "async"  # native async I/O; the caller awaits it with a killable deadline
+
+
 class Detector(ABC):
+    """Inference port.
+
+    `infer_*` plus `inference_mode()` is the interface the application layer uses. It exists
+    because VisionService previously had to ask `isinstance(detector, RemoteWorkerDetector)` and
+    probe five optional attributes to work out how to call its own dependency -- so the core knew
+    every adapter by name, and adding a detector meant editing the service. An adapter now
+    *declares* how it wants to be driven and the service just does it.
+
+    The legacy `detect*` methods remain: they are the adapter-facing surface each concrete
+    detector implements, and the defaults below build `infer_*` on top of them, so a detector
+    that only implements `detect()` keeps working unchanged.
+    """
+
     @abstractmethod
     def detect(self, jpeg: bytes) -> list[Detection]:
         raise NotImplementedError
+
+    def inference_mode(self) -> str:
+        """How this adapter must be invoked. Sync by default: it is the safe assumption.
+
+        Declaring async wrongly would run a blocking call on the event loop and stall every other
+        session on the instance, so the conservative default costs a thread and never correctness.
+        """
+        return INFERENCE_MODE_SYNC
+
+    def infer_sync(self, device_id: str, jpeg: bytes) -> InferenceOutcome:
+        """Blocking inference for one device. Called on a bounded worker thread."""
+        return InferenceOutcome(self.detect_for_device(device_id, jpeg))
+
+    async def infer_async(self, device_id: str, jpeg: bytes) -> InferenceOutcome:
+        """Async inference for one device. Only called when inference_mode() is async."""
+        return InferenceOutcome(await self.detect_async_for_device(device_id, jpeg))
 
     def requires_serial_execution(self) -> bool:
         """Whether one shared instance must process frames one at a time.
@@ -84,6 +132,9 @@ class NoopDetector(Detector):
 
     def requires_serial_execution(self) -> bool:
         return False
+
+    def infer_sync(self, device_id: str, jpeg: bytes) -> InferenceOutcome:
+        return InferenceOutcome([])
 
 
 class TransientInferenceError(RuntimeError):
@@ -164,9 +215,15 @@ class RemoteWorkerDetector(Detector):
             )
         return self._async_client
 
-    def detect(self, jpeg: bytes) -> list[Detection]:
-        self._assert_host_allowed(self.endpoint)
-        body = jpeg
+    def _signed_headers(self, body: bytes) -> dict[str, str]:
+        """Build the authenticated request headers for one frame.
+
+        Shared by the sync and async transports on purpose. These two paths previously carried
+        independent copies of the signing scheme, the response cap, and the response parser, and
+        had already drifted apart on 503 handling. Duplicated *security* code is the worst kind to
+        let drift: a fix applied to one copy silently leaves the other exploitable, and the nonce
+        and timestamp here are what make replay protection work at all.
+        """
         timestamp = str(int(time.time()))
         nonce = secrets.token_urlsafe(18)
         signature = hmac.new(
@@ -180,29 +237,18 @@ class RemoteWorkerDetector(Detector):
             "X-Akshrava-Nonce": nonce,
             "X-Akshrava-Signature": signature,
         }
-        from .tracing import inject_trace_headers, start_inference_span
+        from .tracing import inject_trace_headers
 
-        with start_inference_span("remote.detect"):
-            inject_trace_headers(headers)
-        request = Request(
-            self.endpoint,
-            data=body,
-            method="POST",
-            headers=headers,
-        )
-        handlers = [_RejectRedirectHandler()]
-        if self._ssl_context is not None:
-            handlers.append(HTTPSHandler(context=self._ssl_context))
-        else:
-            handlers.extend([HTTPHandler(), HTTPSHandler()])
-        opener = build_opener(*handlers)
-        try:
-            with opener.open(request, timeout=self.timeout_seconds) as response:
-                raw = response.read(self._MAX_RESPONSE_BYTES + 1)
-        except RemoteInferenceError:
-            raise
-        except (HTTPError, URLError, TimeoutError, OSError) as exc:
-            raise RemoteInferenceError("remote worker unavailable") from exc
+        inject_trace_headers(headers)
+        return headers
+
+    def _detections_from_response(self, raw: bytes) -> list[Detection]:
+        """Validate and parse a worker response body.
+
+        The size cap is enforced here rather than at each call site so neither transport can
+        forget it: the body is attacker-influenced only via a compromised worker, but an
+        unbounded read is still a memory-exhaustion path on the control plane.
+        """
         if len(raw) > self._MAX_RESPONSE_BYTES:
             raise RemoteInferenceError("remote worker response too large")
         try:
@@ -214,27 +260,50 @@ class RemoteWorkerDetector(Detector):
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise RemoteInferenceError("invalid remote worker response") from exc
 
+    def detect(self, jpeg: bytes) -> list[Detection]:
+        self._assert_host_allowed(self.endpoint)
+        body = jpeg
+        from .tracing import start_inference_span
+
+        with start_inference_span("remote.detect"):
+            headers = self._signed_headers(body)
+            request = Request(
+                self.endpoint,
+                data=body,
+                method="POST",
+                headers=headers,
+            )
+            handlers = [_RejectRedirectHandler()]
+            if self._ssl_context is not None:
+                handlers.append(HTTPSHandler(context=self._ssl_context))
+            else:
+                handlers.extend([HTTPHandler(), HTTPSHandler()])
+            opener = build_opener(*handlers)
+            try:
+                with opener.open(request, timeout=self.timeout_seconds) as response:
+                    raw = response.read(self._MAX_RESPONSE_BYTES + 1)
+            except RemoteInferenceError:
+                raise
+            except HTTPError as exc:
+                # Preserve saturation as its own class, exactly as the async path does. The two
+                # transports disagreed here: async mapped 503 to WorkerSaturatedError while sync
+                # flattened it into a generic failure, so identical worker overload produced
+                # different operational signals depending on which code path ran.
+                if exc.code == 503:
+                    raise WorkerSaturatedError("worker inference queue full") from exc
+                raise RemoteInferenceError("remote worker failed status=%d" % exc.code) from exc
+            except (URLError, TimeoutError, OSError) as exc:
+                raise RemoteInferenceError("remote worker unavailable") from exc
+            return self._detections_from_response(raw)
+
     async def detect_async(self, jpeg: bytes) -> list[Detection]:
         self._assert_host_allowed(self.endpoint)
         client = await self._get_async_client()
         body = jpeg
-        timestamp = str(int(time.time()))
-        nonce = secrets.token_urlsafe(18)
-        signature = hmac.new(
-            self.shared_secret,
-            timestamp.encode("ascii") + b"." + nonce.encode("ascii") + b"." + body,
-            hashlib.sha256,
-        ).hexdigest()
-        headers = {
-            "Content-Type": "image/jpeg",
-            "X-Akshrava-Timestamp": timestamp,
-            "X-Akshrava-Nonce": nonce,
-            "X-Akshrava-Signature": signature,
-        }
-        from .tracing import inject_trace_headers, start_inference_span
+        from .tracing import start_inference_span
 
         with start_inference_span("remote.detect_async"):
-            inject_trace_headers(headers)
+            headers = self._signed_headers(body)
             try:
                 response = await client.post(
                     self.endpoint,
@@ -259,19 +328,18 @@ class RemoteWorkerDetector(Detector):
                         "remote worker failed status=%d" % exc.response.status_code
                     ) from exc
                 raise RemoteInferenceError("remote worker unavailable") from exc
-            if len(raw) > self._MAX_RESPONSE_BYTES:
-                raise RemoteInferenceError("remote worker response too large")
-            try:
-                payload = json.loads(raw)
-                items = payload["detections"]
-                if not isinstance(items, list) or len(items) > self._MAX_DETECTIONS:
-                    raise ValueError("invalid detections")
-                return [self._parse_detection(item) for item in items]
-            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                raise RemoteInferenceError("invalid remote worker response") from exc
+            return self._detections_from_response(raw)
 
     def requires_serial_execution(self) -> bool:
         return False
+
+    def inference_mode(self) -> str:
+        # Real async HTTP: asyncio.wait_for can actually abandon it, so the deadline means
+        # something. A thread-pool hop here would only add latency and an uncancellable thread.
+        return INFERENCE_MODE_ASYNC
+
+    async def infer_async(self, device_id: str, jpeg: bytes) -> InferenceOutcome:
+        return InferenceOutcome(await self.detect_async(jpeg))
 
     async def close(self) -> None:
         if self._async_client is not None:
@@ -422,6 +490,14 @@ class RegistryRemoteWorkerDetector(Detector):
     def requires_serial_execution(self) -> bool:
         return False
 
+    def inference_mode(self) -> str:
+        return INFERENCE_MODE_ASYNC
+
+    async def infer_async(self, device_id: str, jpeg: bytes) -> InferenceOutcome:
+        # Device-sticky endpoint selection with fail-through lives in the adapter, where it
+        # belongs; the service no longer needs to know this detector routes at all.
+        return InferenceOutcome(await self.detect_async_for_device(device_id, jpeg))
+
     async def close(self) -> None:
         import asyncio
         await asyncio.gather(*(worker.close() for worker in self._workers.values()))
@@ -470,6 +546,11 @@ class UltralyticsDetector(Detector):
         import asyncio
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(self._executor, self.detect_for_device, device_id, jpeg)
+
+    def infer_sync(self, device_id: str, jpeg: bytes) -> InferenceOutcome:
+        # Declared sync: a local model call blocks, so the service offloads it to a bounded pool
+        # where a hung model cannot take the event loop -- and every other session -- with it.
+        return InferenceOutcome(self.detect_for_device(device_id, jpeg))
 
     def close(self) -> None:
         self._executor.shutdown(wait=True)

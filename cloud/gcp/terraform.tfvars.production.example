@@ -1,10 +1,14 @@
 # Production-hardening profile (Enterprise Readiness Review Top 5).
 # Copy selected flags into terraform.tfvars AFTER quota/DNS review — do not apply this file blindly.
 #
-# Defaults for the supervised pilot remain:
-#   enable_worker_ha = false
-#   enable_cloud_armor = false
-# Flip only after reviewing `terraform plan` and confirming GPU/CPU quota + DNS for the LB cert.
+# Variable DEFAULTS in variables.tf are now the available-by-default values:
+#   enable_worker_ha           = true       (regional MIG worker)
+#   redis_tier                 = STANDARD_HA
+#   database_availability_type = REGIONAL
+#   enable_cloud_armor         = false      (still opt-in: needs a domain + DNS for the LB cert)
+# The supervised pilot deliberately opts OUT of worker HA in its own terraform.tfvars. That is a
+# cost/quota decision, not the default — record it there explicitly so it stays a visible choice.
+# Flip anything here only after reviewing `terraform plan` and confirming GPU/CPU quota + DNS.
 
 project_id  = "<your-gcp-project-id>"
 region      = "us-central1"
@@ -17,10 +21,16 @@ manage_pki_in_terraform   = false
 worker_use_gpu            = false
 redis_transit_encryption  = true
 
+# Availability: state these explicitly in a production profile rather than inheriting them, so a
+# future change to a default cannot silently downgrade a running deployment.
+redis_tier                 = "STANDARD_HA"
+database_availability_type = "REGIONAL"
+
 # --- Top 5 enablement (opt-in; leave commented until ready) ---
-# 1) Regional MIG worker (fixes single-zone SPOF)
-# enable_worker_ha       = true
-# worker_ha_target_size  = 2
+# 1) Regional MIG worker — ON by default in variables.tf; pin it here so production never
+#    inherits a pilot-style opt-out. Confirm CPU/GPU quota in a second zone first.
+enable_worker_ha      = true
+worker_ha_target_size = 2
 #
 # 2) Cloud Armor + external HTTPS LB (DDoS / edge rate limit)
 # enable_cloud_armor     = true
@@ -29,5 +39,8 @@ redis_transit_encryption  = true
 # 3) Soft-shed SLO alert (requires log-based metric akshrava_worker_saturated)
 # enable_worker_saturation_log_metric = true
 #
+# Optional distributed tracing. The API image includes the exporter; set only an approved
+# in-VPC OTLP/HTTP collector endpoint, never a URL containing credentials.
+# otlp_exporter_endpoint = "http://otel-collector.internal:4318/v1/traces"
+#
 # JWT dual-key rotation: ./scripts/rotate_jwt_rs256.sh
-# Soft backpressure + JSON logs + W3C tracing ship in the API/worker images (no tfvars flag).

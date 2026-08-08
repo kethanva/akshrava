@@ -89,3 +89,83 @@ jobs:
       - uses: android-actions/setup-android@v3
       - run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
       - run: ./gradlew --no-daemon :app:testDebugUnitTest
+
+  ios:
+    # Same gate shape as `android`: the unit suite is the PR gate. macOS minutes are billed at a
+    # multiple of Linux, so this does not also run on every push to main -- the release workflow
+    # rebuilds and retests iOS from scratch before publishing anything.
+    if: github.event_name == 'pull_request'
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      # Pin the toolchain. scripts/test_ios.sh refuses to run under Command Line Tools because
+      # that toolchain has hung on emit-module for this package; select full Xcode explicitly so
+      # a runner-image default change cannot silently switch the compiler underneath the gate.
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+      - run: swift --version
+      # Builds the library, runs the XCTest suite, checks backend/android/iOS version parity, and
+      # runs the safety-boundary term audit over the Swift sources.
+      - name: iOS unit + integration suite
+        run: ./scripts/test_ios.sh
+      # The installable artifact is generated, not committed, so a spec that no longer produces a
+      # project must fail here rather than at tag time when a release is already in flight.
+      - name: Generate the Xcode project
+        run: |
+          set -euo pipefail
+          brew install xcodegen
+          ./scripts/bootstrap_ios_app.sh
+          test -d ios/AkshravaApp.xcodeproj
+      # THE iOS GATE. `swift test` above builds for macOS, where every `#if os(iOS)` body is
+      # compiled out -- the capture pipeline, the audio/TTS path and the UIKit layer are all
+      # excluded, so that suite proves nothing about the code that actually runs on a phone.
+      # This step is what compiles AND runs those bodies. It has already caught a test calling a
+      # method that does not exist (`CaptureController.stop()`), which macOS silently accepted for
+      # as long as the iOS branch was never built.
+      - name: iOS simulator unit tests (compiles + runs the #if os(iOS) code)
+        run: |
+          set -euo pipefail
+          xcodebuild test \
+            -project ios/AkshravaApp.xcodeproj \
+            -scheme AkshravaApp \
+            -configuration Debug \
+            -destination 'platform=iOS Simulator,name=iPhone 16,OS=latest' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            -quiet
+      - name: Build the unsigned archive artifact
+        run: |
+          set -euo pipefail
+          mkdir -p ios-pr-artifacts
+          # Library release binary for PR inspection (not installable).
+          (cd ios/Akshrava && swift build -c release)
+          cp -R ios/Akshrava/.build/release/Modules ios-pr-artifacts/swift-modules || true
+          # Unsigned .app archive — same honesty rule as release.yml (not named like a signed IPA).
+          xcodebuild archive \
+            -project ios/AkshravaApp.xcodeproj \
+            -scheme AkshravaApp \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/AkshravaApp.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            -quiet
+          test -d "$RUNNER_TEMP/AkshravaApp.xcarchive/Products/Applications/AkshravaApp.app"
+          mkdir -p "$RUNNER_TEMP/payload/Payload"
+          cp -R "$RUNNER_TEMP/AkshravaApp.xcarchive/Products/Applications/AkshravaApp.app" \
+            "$RUNNER_TEMP/payload/Payload/"
+          ( cd "$RUNNER_TEMP/payload" && zip -qry \
+            "$GITHUB_WORKSPACE/ios-pr-artifacts/Akshrava-pr-ios-unsigned.ipa" Payload )
+          cp ios/AkshravaApp.xcodeproj/project.pbxproj ios-pr-artifacts/project.pbxproj
+          ( cd ios-pr-artifacts && shasum -a 256 * ) > "$RUNNER_TEMP/SHA256SUMS-ios-pr.txt"
+          mv "$RUNNER_TEMP/SHA256SUMS-ios-pr.txt" ios-pr-artifacts/SHA256SUMS-ios-pr.txt
+          ls -la ios-pr-artifacts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-pr-artifacts
+          path: ios-pr-artifacts/
+          retention-days: 7
+          if-no-files-found: warn

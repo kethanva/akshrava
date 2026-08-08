@@ -1,16 +1,103 @@
 import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from akshrava_backend.main import app, _retention_loop, _renew_or_readmit, store
+from akshrava_backend.domain import FrameHeader, SessionState
+from akshrava_backend.main import (
+    _analyze_and_reply,
+    app,
+    session_application,
+    store,
+    _retention_loop,
+    _renew_or_readmit,
+)
 
 # The suite runs with DEV_AUTH_BYPASS=true, so auth.device_claims_from_token accepts exactly this
 # literal and maps it to this device id. Minting a real JWT here would need exp/sub/aud to match
 # the server's require list, which is covered in test_auth.py instead.
 DEV_TOKEN = "dev-device-token"
 DEV_DEVICE_ID = "dev-device"
+
+
+def _result_for_ack_ordering() -> dict:
+    return {
+        "type": "result",
+        "frame_id": 7,
+        "capture_mono_ms": 1000,
+        "server_inference_ms": 1,
+        "server_received_epoch_ms": 1001,
+        "pipeline_stage_ms": {},
+        "hazard": None,
+    }
+
+
+def _header_for_ack_ordering() -> FrameHeader:
+    return FrameHeader(
+        frame_id=7,
+        capture_mono_ms=1000,
+        capture_epoch_ms=None,
+        width=1,
+        height=1,
+        jpeg_bytes=1,
+        calibration_id="",
+        pitch_cdeg=None,
+        roll_cdeg=None,
+        pose_age_ms=None,
+        mode="normal",
+    )
+
+
+@pytest.mark.asyncio
+async def test_result_ack_slot_is_registered_before_result_write():
+    """A phone may acknowledge while send_json yields to the receive loop."""
+    handler = MagicMock(result_acknowledgement_supported=True)
+    websocket = MagicMock()
+
+    async def send_json(payload):
+        if payload["type"] == "result":
+            handler.note_result_sent.assert_called_once_with(7, True)
+
+    websocket.send_json = AsyncMock(side_effect=send_json)
+    with patch.object(session_application, "analyze_frame", AsyncMock(return_value=_result_for_ack_ordering())):
+        await _analyze_and_reply(
+            websocket,
+            SessionState(device_id=DEV_DEVICE_ID),
+            _header_for_ack_ordering(),
+            b"x",
+            1,
+            DEV_DEVICE_ID,
+            asyncio.Lock(),
+            handler,
+            True,
+        )
+
+    handler.forget_result_sent.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_failed_result_write_forgets_pre_registered_ack_slot():
+    handler = MagicMock(result_acknowledgement_supported=True)
+    websocket = MagicMock()
+    websocket.send_json = AsyncMock(side_effect=RuntimeError("peer gone"))
+
+    with patch.object(session_application, "analyze_frame", AsyncMock(return_value=_result_for_ack_ordering())):
+        with pytest.raises(RuntimeError, match="peer gone"):
+            await _analyze_and_reply(
+                websocket,
+                SessionState(device_id=DEV_DEVICE_ID),
+                _header_for_ack_ordering(),
+                b"x",
+                1,
+                DEV_DEVICE_ID,
+                asyncio.Lock(),
+                handler,
+                True,
+            )
+
+    handler.note_result_sent.assert_called_once_with(7, True)
+    handler.forget_result_sent.assert_called_once_with(7)
 
 
 def test_livez_and_healthz_endpoints():
@@ -67,6 +154,47 @@ def test_prometheus_metrics_requires_token_outside_dev(patched_settings):
         assert res_bearer.status_code == 200
 
 
+def test_phone_delivery_window_logs_only_aggregate_delta_metrics():
+    from akshrava_backend import main as main_mod
+    from akshrava_backend.metrics import Metrics
+
+    isolated = Metrics()
+    isolated.result_sent(acknowledgement_expected=True)
+    isolated.result_sent(acknowledgement_expected=True)
+    isolated.phone_result_acknowledged(fresh=True)
+    with patch.object(main_mod, "metrics", isolated), patch.object(main_mod.logger, "info") as info:
+        main_mod._log_phone_delivery_window()
+        info.assert_called_once()
+        extra = info.call_args.kwargs["extra"]
+        assert extra == {
+            "event": "phone_delivery_window",
+            "results_sent": 2,
+            "result_acknowledgements_expected": 2,
+            "phone_results_acknowledged": 1,
+            "phone_results_acknowledged_fresh": 1,
+            # The second result is still in flight, NOT missing. This field was previously
+            # derived as `expected - acknowledged` and reported 1 here -- a phantom failure for
+            # a perfectly healthy session, scaling with fleet size and permanently tripping the
+            # delivery alert. Only an explicit eviction counts as missing now.
+            "phone_results_acknowledged_missing": 0,
+        }
+        # Deltas are consumed, so a quiet period does not create a high-volume log stream.
+        main_mod._log_phone_delivery_window()
+        info.assert_called_once()
+
+
+def test_phone_delivery_window_reports_a_genuinely_unacknowledged_result():
+    from akshrava_backend import main as main_mod
+    from akshrava_backend.metrics import Metrics
+
+    isolated = Metrics()
+    isolated.result_sent(acknowledgement_expected=True)
+    isolated.phone_result_unacknowledged()
+    with patch.object(main_mod, "metrics", isolated), patch.object(main_mod.logger, "info") as info:
+        main_mod._log_phone_delivery_window()
+        assert info.call_args.kwargs["extra"]["phone_results_acknowledged_missing"] == 1
+
+
 @pytest.mark.asyncio
 async def test_retention_loop():
     stop_event = asyncio.Event()
@@ -76,9 +204,68 @@ async def test_retention_loop():
         await asyncio.sleep(0.05)
         stop_event.set()
 
-    with patch.object(store, "purge_alert_events_older_than", AsyncMock(return_value=5)) as mock_purge:
+    with patch.object(store, "purge_alert_events_if_leader", AsyncMock(return_value=5)) as mock_purge:
         await asyncio.gather(_retention_loop(stop_event), set_stop())
         mock_purge.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_retention_loop_goes_through_the_leader_elected_path_not_the_raw_purge():
+    """Every API instance runs this loop; only the advisory-lock holder may delete.
+
+    Calling purge_alert_events_older_than directly here would put N Cloud Run instances into the
+    same batched DELETE concurrently. Pin the call so that regression is caught.
+    """
+    stop_event = asyncio.Event()
+
+    async def set_stop():
+        await asyncio.sleep(0.05)
+        stop_event.set()
+
+    with patch.object(store, "purge_alert_events_if_leader", AsyncMock(return_value=None)) as leader, \
+         patch.object(store, "purge_alert_events_older_than", AsyncMock(return_value=99)) as raw:
+        await asyncio.gather(_retention_loop(stop_event), set_stop())
+
+    leader.assert_called()
+    raw.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_retention_loop_survives_a_failing_purge():
+    """A retention failure must be logged and retried later, never crash a live session process."""
+    stop_event = asyncio.Event()
+
+    async def set_stop():
+        await asyncio.sleep(0.05)
+        stop_event.set()
+
+    with patch.object(
+        store, "purge_alert_events_if_leader", AsyncMock(side_effect=RuntimeError("db gone"))
+    ) as mock_purge:
+        # Must not raise out of the loop.
+        await asyncio.gather(_retention_loop(stop_event), set_stop())
+
+    mock_purge.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_does_not_block_startup_on_a_retention_purge():
+    """Startup must not await the purge: it walks unbounded 5000-row batches.
+
+    Awaiting it before yielding made every cold start and scale-up event pay for a full retention
+    sweep before the instance could accept its first WebSocket -- a startup-deadline risk on the
+    exact autoscaling path that exists to absorb load. The loop still purges immediately on its
+    own first iteration, so nothing is skipped.
+    """
+    import inspect
+
+    from akshrava_backend import main as main_mod
+
+    source = inspect.getsource(main_mod.lifespan)
+    before_yield = source.split("yield")[0]
+    assert "purge_alert_events" not in before_yield, (
+        "lifespan must not await a retention purge before yielding"
+    )
 
 
 @pytest.mark.asyncio

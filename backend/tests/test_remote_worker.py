@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import contextlib
 import hashlib
 import hmac
 import json
@@ -493,3 +494,135 @@ def test_worker_settings_from_env_validation(monkeypatch):
             WorkerSettings.from_env()
 
 
+
+
+def _signing_fields(headers):
+    return (
+        headers["X-Akshrava-Timestamp"],
+        headers["X-Akshrava-Nonce"],
+        headers["X-Akshrava-Signature"],
+    )
+
+
+def test_sync_and_async_paths_sign_requests_identically():
+    """Both transports must produce a signature the worker will accept.
+
+    These were two independent copies of the signing scheme. Duplicated security code is the
+    worst kind to let drift: a fix applied to one copy silently leaves the other exploitable,
+    and this nonce/timestamp pair is what makes worker replay protection work at all.
+    """
+    detector = RemoteWorkerDetector("https://worker.internal/v1/infer", "s" * 32, 500)
+    body = b"jpeg-bytes"
+
+    sync_headers = detector._signed_headers(body)
+    async_headers = detector._signed_headers(body)
+
+    for headers in (sync_headers, async_headers):
+        timestamp, nonce, signature = _signing_fields(headers)
+        expected = hmac.new(
+            b"s" * 32,
+            timestamp.encode("ascii") + b"." + nonce.encode("ascii") + b"." + body,
+            hashlib.sha256,
+        ).hexdigest()
+        assert signature == expected
+        assert headers["Content-Type"] == "image/jpeg"
+        # Trace correlation must be present on both paths, not just the async one.
+        assert headers.get("traceparent")
+
+    # Nonces must never repeat across calls, or replay protection rejects the second frame.
+    assert sync_headers["X-Akshrava-Nonce"] != async_headers["X-Akshrava-Nonce"]
+
+
+@pytest.mark.asyncio
+async def test_async_remote_span_encloses_the_http_request(monkeypatch):
+    """The exported inference span must include I/O, not just trace-header construction."""
+    active = {"value": False}
+
+    @contextlib.contextmanager
+    def span(_name):
+        active["value"] = True
+        try:
+            yield
+        finally:
+            active["value"] = False
+
+    class Response:
+        status_code = 200
+        content = b'{"detections":[]}'
+
+        def raise_for_status(self):
+            assert active["value"], "the HTTP status must be handled inside the inference span"
+
+    class Client:
+        async def post(self, *_args, **_kwargs):
+            assert active["value"], "the HTTP request must run inside the inference span"
+            return Response()
+
+    import akshrava_backend.tracing as tracing_mod
+
+    monkeypatch.setattr(tracing_mod, "start_inference_span", span)
+    detector = RemoteWorkerDetector("https://worker.internal/v1/infer", "s" * 32, 500)
+
+    async def client():
+        return Client()
+
+    monkeypatch.setattr(detector, "_get_async_client", client)
+    monkeypatch.setattr(detector, "_signed_headers", lambda _body: {})
+
+    assert await detector.detect_async(JPEG) == []
+    assert active["value"] is False
+
+
+def test_sync_path_preserves_worker_saturation_like_the_async_path():
+    """A 503 must soft-shed one frame on BOTH transports.
+
+    The two paths disagreed: async mapped 503 to WorkerSaturatedError while sync flattened it
+    into a generic RemoteInferenceError, so identical worker overload produced a different
+    operational signal depending on which code path happened to run -- and the saturation metric
+    and its Cloud Monitoring alert silently under-counted.
+    """
+    from urllib.error import HTTPError
+
+    from akshrava_backend.detector import RemoteInferenceError, WorkerSaturatedError
+
+    detector = RemoteWorkerDetector("https://worker.internal/v1/infer", "s" * 32, 500)
+
+    def raise_status(status):
+        def opener(*args, **kwargs):
+            raise HTTPError("https://worker.internal/v1/infer", status, "err", {}, None)
+        return opener
+
+    import akshrava_backend.detector as detector_mod
+
+    original = detector_mod.build_opener
+    try:
+        detector_mod.build_opener = lambda *a, **k: type(
+            "O", (), {"open": staticmethod(raise_status(503))}
+        )()
+        with pytest.raises(WorkerSaturatedError):
+            detector.detect(b"jpeg")
+
+        detector_mod.build_opener = lambda *a, **k: type(
+            "O", (), {"open": staticmethod(raise_status(500))}
+        )()
+        with pytest.raises(RemoteInferenceError) as exc_info:
+            detector.detect(b"jpeg")
+        assert not isinstance(exc_info.value, WorkerSaturatedError)
+    finally:
+        detector_mod.build_opener = original
+
+
+def test_response_size_cap_is_enforced_once_for_both_transports():
+    """An unbounded worker response is a memory-exhaustion path on the control plane."""
+    from akshrava_backend.detector import RemoteInferenceError
+
+    detector = RemoteWorkerDetector("https://worker.internal/v1/infer", "s" * 32, 500)
+    oversized = b"x" * (RemoteWorkerDetector._MAX_RESPONSE_BYTES + 1)
+    with pytest.raises(RemoteInferenceError, match="too large"):
+        detector._detections_from_response(oversized)
+
+    # And a well-formed body still parses through the same shared helper.
+    payload = json.dumps({"detections": [{"label": "car", "confidence": 0.8, "box": [1, 2, 3, 4]}]})
+    assert detector._detections_from_response(payload.encode()) == [
+        Detection("car", 0.8, (1.0, 2.0, 3.0, 4.0))
+    ]

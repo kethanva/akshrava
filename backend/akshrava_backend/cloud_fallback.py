@@ -167,6 +167,27 @@ class CloudFallbackDetector(Detector):
             return [], True
         return detections, False
 
+    def inference_mode(self) -> str:
+        # Always async, matching the behaviour this replaced: the service previously detected a
+        # cloud-fallback wrapper by probing for `.provider` and `.local` and routed it down the
+        # async status path regardless of what the wrapped local detector was. Declaring it here
+        # keeps that dispatch identical while removing the introspection.
+        from .detector import INFERENCE_MODE_ASYNC
+
+        return INFERENCE_MODE_ASYNC
+
+    async def infer_async(self, device_id: str, jpeg: bytes):
+        """Carry the frame-local availability bit back with the detections.
+
+        This is why the port returns a value object rather than a bare list: the availability of
+        the cloud fallback is a property of THIS frame, not of the detector, and putting it on
+        the instance would let one phone read another phone's vendor outage.
+        """
+        from .detector import InferenceOutcome
+
+        detections, unavailable = await self.detect_async_with_status_for_device(device_id, jpeg)
+        return InferenceOutcome(detections, unavailable)
+
     def requires_serial_execution(self) -> bool:
         # Frame-local status is returned by detect_with_status(), so independent sessions no
         # longer share a mutable outcome flag and may use remote inference concurrently.

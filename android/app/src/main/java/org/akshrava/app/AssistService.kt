@@ -81,6 +81,21 @@ class AssistService : LifecycleService() {
          * safety net did not fire and no further frame will ever be sent.
          */
         internal const val FRAME_SLOT_WEDGED_MS = 15_000L
+
+        /**
+         * True when the analyzer has gone silent long enough to justify rebinding CameraX.
+         *
+         * Extracted as a pure function so the rule is unit-testable without a camera, a service,
+         * or a Handler -- the same treatment [FrameGate.shouldAnnounceBlur] and
+         * [ProtocolClient.shouldTickStaleInference] already get.
+         *
+         * The `lastAnalyzeAtMs > 0` term means "the camera is not bound yet", NOT "no frame has
+         * arrived yet". bindCamera() baselines the clock on a successful bind, so a HAL that
+         * accepts the configuration and then never delivers a frame is treated as a stall like
+         * any other silence. Before a bind there is nothing to recover, so 0 still means quiet.
+         */
+        internal fun shouldRebindForStall(nowMs: Long, lastAnalyzeAtMs: Long): Boolean =
+            lastAnalyzeAtMs > 0L && nowMs - lastAnalyzeAtMs > CAMERA_STALL_REBIND_MS
     }
 
     private var frameExecutor: ExecutorService? = null
@@ -133,8 +148,29 @@ class AssistService : LifecycleService() {
     private var lastCameraUnclearMs: Long? = null
     private var lastHeartbeatMs = 0L
     private var lastWakeLockRenewAtMs = 0L
-    private var lastAnalyzeAtMs = 0L
-    private var lastQualityRebindAtMs = 0L
+    /**
+     * When the analyzer last ran, in [SystemClock.elapsedRealtime].
+     *
+     * Volatile because this is genuinely cross-thread: it is written from the CameraX analyzer on
+     * [frameExecutor] and both read and written from [cameraStallCheck] on the main thread. There
+     * is no happens-before edge between those two, so without this the stall detector could read
+     * an arbitrarily stale value -- rebinding a healthy camera (a 1-2 s detection blackout the
+     * user experiences as intermittent failure) or failing to rebind a dead one.
+     *
+     * The other frame-pipeline counters nearby are safe without it: they are reset on the main
+     * thread in startAssistance() *before* setAnalyzer() hands them to the executor, and
+     * submitting to an executor establishes happens-before. Only these two escape that pattern.
+     */
+    @Volatile private var lastAnalyzeAtMs = 0L
+
+    /**
+     * Volatile for the same reason: [scheduleCameraRebind] is reached from ProtocolClient
+     * callbacks, which run on the OkHttp listener thread (onQuality / onRoundTripMs / onFrameSettled)
+     * and on the reconnect scheduler thread (onSettleTimeout) -- two different non-main threads
+     * doing read-modify-write on this rebind cooldown. [LinkQualityController] already marks all
+     * of its cross-thread state volatile; these two fields were the inconsistency.
+     */
+    @Volatile private var lastQualityRebindAtMs = 0L
     private var lastNotificationText: String? = null
     private var lastNotificationAtMs = 0L
     private var queuedNotificationText: String? = null
@@ -177,7 +213,7 @@ class AssistService : LifecycleService() {
             if (client != null) {
                 val now = SystemClock.elapsedRealtime()
                 val last = lastAnalyzeAtMs
-                if (last > 0L && now - last > CAMERA_STALL_REBIND_MS) {
+                if (shouldRebindForStall(now, last)) {
                     Log.w("AkshravaDebug", "camera_stall rebind after=${now - last}ms")
                     lastAnalyzeAtMs = now
                     framePending.set(false)
@@ -541,6 +577,17 @@ class AssistService : LifecycleService() {
                 analysis.setAnalyzer(exec) { image -> analyzeImage(image) }
                 provider.unbindAll()
                 provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+                // Start the stall clock at the moment frames become expected.
+                //
+                // This used to stay 0 until the FIRST frame arrived, and shouldRebindForStall
+                // ignores 0. A bind that succeeds but never delivers -- an OEM HAL that accepts
+                // the configuration and then emits nothing, which is exactly the failure this
+                // detector exists for -- therefore armed nothing at all: the camera looked bound,
+                // the socket stayed open, no drop or stall ever fired, and assistance was simply
+                // over with no recovery path but a manual Stop/Start the user cannot know to
+                // perform. Baselining here means silence from bind onwards counts, so the first
+                // frame never arriving is treated exactly like frames stopping later.
+                lastAnalyzeAtMs = SystemClock.elapsedRealtime()
                 // #region agent log
                 Log.i("AkshravaDebug", "camera_bound ok rotation=$rotation analysisSide=$analysisSide")
                 // #endregion

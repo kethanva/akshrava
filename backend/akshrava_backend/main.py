@@ -17,7 +17,12 @@ from .domain import SessionState
 from .gcp_storage import GcpDiagnosticStorage
 from .logging_util import configure_json_logging
 from .metrics import Metrics
-from .protocol import ProtocolError, quality_for_inference
+from .protocol import (
+    PROTOCOL_VERSION,
+    SERVER_CAPABILITIES,
+    ProtocolError,
+    quality_for_inference,
+)
 from .rate_limit import FrameRateLimiter
 from .service import BackgroundTaskTracker, InferenceCircuitOpenError, VisionService
 from .session_admission import session_admission_for
@@ -93,9 +98,15 @@ gcp_storage = GcpDiagnosticStorage(settings.gcp_diagnostics_bucket)
 @asynccontextmanager
 async def lifespan(app):
     await store.initialize()
-    await store.purge_alert_events_older_than(settings.alert_retention_days)
+    # Retention is NOT awaited here. _retention_loop purges immediately on its first iteration,
+    # so awaiting it before yielding only duplicated that work while holding up startup: the
+    # purge walks unbounded 5000-row batches, and every cold start and scale-up event paid for
+    # it before the instance could accept a single WebSocket. On a large backlog that is a
+    # startup-deadline risk on exactly the autoscaling path that exists to absorb load.
     retention_stop = asyncio.Event()
     retention_task = asyncio.create_task(_retention_loop(retention_stop))
+    delivery_metrics_stop = asyncio.Event()
+    delivery_metrics_task = asyncio.create_task(_phone_delivery_metrics_loop(delivery_metrics_stop))
     try:
         yield
     finally:
@@ -105,6 +116,8 @@ async def lifespan(app):
             await retention_task
         except asyncio.CancelledError:
             pass
+        delivery_metrics_stop.set()
+        await delivery_metrics_task
         # Drain alert writes before disposing the DB engine so background persists are not cut off.
         shutdown_async = getattr(vision, "shutdown_async", None)
         if shutdown_async is not None:
@@ -179,7 +192,9 @@ async def _retention_loop(stop: asyncio.Event):
     # sidecar. Errors are logged and retried later rather than crashing active phone sessions.
     while not stop.is_set():
         try:
-            deleted = await store.purge_alert_events_older_than(settings.alert_retention_days)
+            # Leader-elected: every instance runs this loop, but only the one holding the
+            # advisory lock does the deleting. None means another instance is already purging.
+            deleted = await store.purge_alert_events_if_leader(settings.alert_retention_days)
             if deleted:
                 logger.info("retention cleanup removed %s alert events", deleted)
         except Exception:
@@ -190,6 +205,50 @@ async def _retention_loop(stop: asyncio.Event):
             continue
 
 
+def _log_phone_delivery_window() -> None:
+    """Export aggregate delivery evidence through Cloud Logging, never per-frame logs."""
+    sent, expected, acknowledged, fresh, unacknowledged = metrics.take_phone_delivery_window()
+    if not sent and not acknowledged and not unacknowledged:
+        return
+    logger.info(
+        "phone delivery window",
+        extra={
+            "event": "phone_delivery_window",
+            "results_sent": sent,
+            "result_acknowledgements_expected": expected,
+            "phone_results_acknowledged": acknowledged,
+            "phone_results_acknowledged_fresh": fresh,
+            # Exact eviction count, not `expected - acknowledged`. The two totals are observed in
+            # different export windows for any frame in flight across a boundary, so the
+            # subtraction reported phantom failures proportional to fleet size.
+            "phone_results_acknowledged_missing": unacknowledged,
+        },
+    )
+
+
+async def _phone_delivery_metrics_loop(stop: asyncio.Event) -> None:
+    """Periodically export per-instance delivery deltas for Cloud Logging metrics.
+
+    Mirrors _retention_loop's error handling: a bad export must cost one window, not the loop
+    itself. Without the try/except here, an exception from _log_phone_delivery_window (a logging
+    backend hiccup, an unexpected counter state) would end this task silently -- delivery
+    telemetry would stop for the rest of the process lifetime with nothing in any log to explain
+    the gap.
+    """
+    while True:
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=60)
+            stopped = True
+        except asyncio.TimeoutError:
+            stopped = False
+        try:
+            _log_phone_delivery_window()
+        except Exception:
+            logger.exception("phone delivery metrics export failed")
+        if stopped:
+            return
+
+
 async def _analyze_and_reply(
     websocket: WebSocket,
     state: SessionState,
@@ -198,6 +257,8 @@ async def _analyze_and_reply(
     decode_ms: int,
     device_id: str,
     frame_lock: asyncio.Lock,
+    handler: FrameStreamHandler,
+    ack_expected: bool,
 ) -> None:
     """Analyse one already-validated frame and write its result back to the phone.
 
@@ -252,14 +313,30 @@ async def _analyze_and_reply(
             return
         stages = dict(result.get("pipeline_stage_ms", {}))
         stages["decode"] = decode_ms
-        metrics.observe_result(result["server_inference_ms"], result["hazard"] is not None, stages)
+        metrics.observe_result(
+            result["server_inference_ms"],
+            result["hazard"] is not None,
+            stages,
+        )
         if header.capture_epoch_ms is not None:
             frame_age_ms = int(result["server_received_epoch_ms"]) - header.capture_epoch_ms
             if 0 <= frame_age_ms <= 60_000:
                 metrics.observe_frame_age(frame_age_ms)
         if result.get("late_suppressed"):
             metrics.late_suppressed()
-        await websocket.send_json(result)
+        # Register before the await: the receive loop may process the handset's acknowledgement
+        # while this task is yielding inside send_json. Roll back the bounded entry if the write
+        # fails, so an unsent result cannot later be counted as handset receipt.
+        handler.note_result_sent(header.frame_id, ack_expected)
+        try:
+            await websocket.send_json(result)
+        except Exception:
+            handler.forget_result_sent(header.frame_id)
+            raise
+        # ``send_json`` only establishes that this process handed the result to its WebSocket
+        # transport. Handset receipt and the phone-owned freshness decision are counted later,
+        # only when the authenticated client acknowledges this exact frame.
+        metrics.result_sent(acknowledgement_expected=ack_expected)
         # Fail-closed: JWT consent + bucket are not enough until blur exists (Important Architecture.md, privacy).
         if (
             settings.diagnostic_uploads_enabled
@@ -399,6 +476,11 @@ async def session(websocket: WebSocket):
                 "detector": settings.detector,
                 "vision_enabled": settings.detector != "noop" or cloud_provider is not None,
                 "alert_max_age_ms": settings.alert_max_age_ms,
+                # Negotiated compatibility. A phone cannot be redeployed with the server, so it
+                # must be told what this revision supports instead of inferring it from a build
+                # number. Absent on an older server, which clients must read as "assume nothing".
+                "protocol_version": PROTOCOL_VERSION,
+                "capabilities": list(SERVER_CAPABILITIES),
             }
         )
         while True:
@@ -411,6 +493,12 @@ async def session(websocket: WebSocket):
                             await websocket.send_json(resp["response"])
                         await websocket.close(code=resp["code"])
                         return
+                    if resp.get("_action") == "result_ack":
+                        # Telemetry only, and already counted by handle_text_frame. A result_ack
+                        # is sent once per result the server already admitted, so it must not
+                        # touch the Redis lease again -- doing so doubled control-plane Redis
+                        # traffic per frame for no reason the lease needs.
+                        continue
                     # Keep admission lease alive on ping / control traffic.
                     if not await _renew_or_readmit(session_id):
                         await websocket.close(code=1013)
@@ -435,6 +523,11 @@ async def session(websocket: WebSocket):
                     # flight, and its single in-flight slot stays held until the 10 s settle
                     # timeout — a stall with no error anywhere to explain it. The tracker also
                     # logs exceptions that a bare task would swallow.
+                    # Snapshot now, not read from `handler` inside the task: with two frames in
+                    # flight (max_in_flight can be 2), the header for the NEXT frame can update
+                    # handler.result_acknowledgement_supported before this task's send_json runs,
+                    # attributing this frame's expectation to the wrong frame's capability flag.
+                    ack_expected = handler.result_acknowledgement_supported
                     frame_tasks.schedule(
                         _analyze_and_reply(
                             websocket,
@@ -444,6 +537,8 @@ async def session(websocket: WebSocket):
                             resp["decode_ms"],
                             device_id,
                             frame_lock,
+                            handler,
+                            ack_expected,
                         )
                     )
                 else:

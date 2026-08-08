@@ -158,19 +158,55 @@ class ProtocolClient(
         const val POSE_CDEG_MIN = -18_000
         const val POSE_CDEG_MAX = 18_000
         /**
-         * Live Cloud Run still runs an older parser that treats pose < -9000 as a fatal
-         * ProtocolError and closes the WebSocket (the unavailable↔restored flap). Until that
-         * revision is replaced, only emit pose values the old floor accepts. Geometry already
-         * treats |roll| > 12° as invalid, so omitting these extremes does not change alerts.
+         * Older server revisions treat pose < -9000 as a fatal ProtocolError and close the
+         * WebSocket (the unavailable↔restored flap the user hears as the app dying and coming
+         * back). Against such a revision, only emit pose values that old floor accepts. Geometry
+         * already treats |roll| > 12° as invalid, so omitting these extremes changes no alert.
+         *
+         * This clamp is now conditional on what the server actually advertises rather than
+         * unconditional. That is the whole point: previously the phone had no way to know which
+         * revision it was talking to, so the workaround could never be removed -- it would have
+         * outlived the bug by years, silently discarding valid pose data forever. Once no
+         * deployment without [CAPABILITY_POSE_CDEG_FULL_RANGE] remains, this constant and
+         * [wirePoseCdeg]'s parameter can be deleted with evidence instead of hope.
          */
         const val LEGACY_POSE_CDEG_FLOOR = -9_000
 
+        /** Server advertises it accepts the documented ±18000 pose range. */
+        const val CAPABILITY_POSE_CDEG_FULL_RANGE = "pose_cdeg_full_range"
+        /** Server accepts the optional, post-result acknowledgement control message. */
+        const val CAPABILITY_RESULT_ACKNOWLEDGEMENT = "result_acknowledgement"
+
         fun clampPoseCdeg(value: Int): Int = value.coerceIn(POSE_CDEG_MIN, POSE_CDEG_MAX)
 
-        /** Null means "omit from the frame header" for legacy-API compatibility. */
-        fun wirePoseCdeg(value: Int): Int? {
+        /**
+         * Null means "omit this field from the frame header".
+         *
+         * [serverAcceptsFullPoseRange] defaults to false so an unknown or older server -- and any
+         * caller that has not negotiated yet -- keeps the safe legacy behaviour. Failing closed
+         * here costs a little pose fidelity; failing open costs the session.
+         */
+        fun wirePoseCdeg(value: Int, serverAcceptsFullPoseRange: Boolean = false): Int? {
             val clamped = clampPoseCdeg(value)
+            if (serverAcceptsFullPoseRange) return clamped
             return if (clamped < LEGACY_POSE_CDEG_FLOOR) null else clamped
+        }
+
+        /**
+         * Read the `capabilities` array out of a `ready` payload.
+         *
+         * Tolerant by design: a malformed or absent array yields an empty set, which selects the
+         * conservative legacy behaviour everywhere. A capability list is an optimisation hint,
+         * so it must never be a reason to fail a connection a blind user is depending on.
+         */
+        fun parseCapabilities(payload: JSONObject): Set<String> {
+            val array = payload.optJSONArray("capabilities") ?: return emptySet()
+            val found = mutableSetOf<String>()
+            for (index in 0 until array.length()) {
+                val item = array.optString(index, "")
+                if (item.isNotBlank()) found.add(item)
+            }
+            return found
         }
 
         /** Sanitized class for operator logs; neither endpoint nor server body is retained. */
@@ -207,6 +243,17 @@ class ProtocolClient(
     @Volatile private var outageAnnounced = false
     @Volatile private var sessionReady = false
     @Volatile private var visionEnabled = false
+
+    /**
+     * What the currently-connected server revision says it supports.
+     *
+     * Connection-scoped and re-read from every `ready`: a reconnect can land on a different
+     * Cloud Run revision (including an older one during a rollout or rollback), so capabilities
+     * must never outlive the socket that advertised them. Empty = negotiate nothing, assume the
+     * oldest supported behaviour.
+     */
+    @Volatile private var serverCapabilities: Set<String> = emptySet()
+    @Volatile private var serverProtocolVersion = 0
     @Volatile private var reconnectAttempt = 0
     @Volatile private var cloudFallbackWarningAnnounced = false
     @Volatile private var pendingLookTimeout: ScheduledFuture<*>? = null
@@ -262,6 +309,29 @@ class ProtocolClient(
 
     /** True only after ready with a live detector — not transport-only noop bench mode. */
     fun canStream(): Boolean = streamEnabled(sessionReady, visionEnabled)
+
+    /** True only when the connected revision has explicitly said it accepts the full pose range. */
+    internal fun serverAcceptsFullPoseRange(): Boolean =
+        CAPABILITY_POSE_CDEG_FULL_RANGE in serverCapabilities
+
+    /** True only when this server explicitly understands the optional result acknowledgement. */
+    internal fun serverAcceptsResultAcknowledgements(): Boolean =
+        CAPABILITY_RESULT_ACKNOWLEDGEMENT in serverCapabilities
+
+    /** Protocol version advertised by the connected revision; 0 means "did not say". */
+    internal fun negotiatedProtocolVersion(): Int = serverProtocolVersion
+
+    /**
+     * Forget what the previous socket advertised.
+     *
+     * Called when a connection opens or ends, never on a soft in-session error: a reconnect may
+     * land on a different revision, and inheriting the old one's capabilities would send it
+     * values it closes the socket over -- reproducing the exact flap this negotiation removes.
+     */
+    private fun clearNegotiatedCapabilities() {
+        serverCapabilities = emptySet()
+        serverProtocolVersion = 0
+    }
 
     /**
      * True once this client can never recover on its own.
@@ -337,10 +407,14 @@ class ProtocolClient(
             .put("priority", look)
             .put("language", wireLanguage(language))
             .put("trace_id", "frame-$frameId-$captureMonoMs")
+            // New servers use this only to decide whether a missing acknowledgement is meaningful.
+            // Older parsers ignore additive frame fields, so this never changes their behaviour.
+            .put("result_acknowledgement", true)
         // Omit absent pose keys rather than sending JSON null. Values below the legacy -9000
         // floor are omitted so an undeployed/older API cannot fatal-close the walking session.
-        pose?.pitchCdeg?.let { raw -> wirePoseCdeg(raw)?.let { header.put("pitch_cdeg", it) } }
-        pose?.rollCdeg?.let { raw -> wirePoseCdeg(raw)?.let { header.put("roll_cdeg", it) } }
+        val fullPose = serverAcceptsFullPoseRange()
+        pose?.pitchCdeg?.let { raw -> wirePoseCdeg(raw, fullPose)?.let { header.put("pitch_cdeg", it) } }
+        pose?.rollCdeg?.let { raw -> wirePoseCdeg(raw, fullPose)?.let { header.put("roll_cdeg", it) } }
         pose?.ageMs?.let { header.put("pose_age_ms", it.coerceAtLeast(0L)) }
         
         if (debugTelemetry) {
@@ -440,6 +514,8 @@ class ProtocolClient(
         reconnectAttempt = 0
         sessionReady = false
         visionEnabled = false
+        // A new socket has negotiated nothing yet, even if the previous one had.
+        clearNegotiatedCapabilities()
         cloudFallbackWarningAnnounced = false
         connectedAtMonoMs = SystemClock.elapsedRealtime()
         logConnection("transport_open", mapOf("recovered" to recovered))
@@ -450,7 +526,7 @@ class ProtocolClient(
         onState("Transport connected; checking vision service")
     }
 
-    private fun handleMessage(text: String) {
+    private fun handleMessage(webSocket: WebSocket, text: String) {
         val payload = runCatching { JSONObject(text) }.getOrNull() ?: run {
             onState("Invalid server response")
             settleFrame()
@@ -463,10 +539,17 @@ class ProtocolClient(
                 val serverMaxAge = payload.optLong("alert_max_age_ms", STALE_ALERT_MS)
                 configuredStaleAlertMs = serverMaxAge.coerceAtLeast(STALE_ALERT_MS)
                 val advertised = payload.optInt("max_in_flight", 1).coerceIn(1, 2)
+                // Negotiate compatibility per connection. Re-read on every `ready` so a reconnect
+                // that lands on a different (possibly older) revision renegotiates rather than
+                // carrying the previous socket's assumptions into a server that cannot honour
+                // them. An absent field means an old server: assume nothing.
+                serverCapabilities = parseCapabilities(payload)
+                serverProtocolVersion = payload.optInt("protocol_version", 0)
                 Log.i(
                     "AkshravaDebug",
                     "ws_ready detector=${payload.optString("detector", "unknown")} vision_enabled=$visionEnabled " +
-                        "session_ready=$sessionReady max_in_flight=$advertised alert_max_age_ms=$configuredStaleAlertMs"
+                        "session_ready=$sessionReady max_in_flight=$advertised alert_max_age_ms=$configuredStaleAlertMs " +
+                        "protocol_version=$serverProtocolVersion capabilities=$serverCapabilities"
                 )
                 logConnection(
                     "vision_ready",
@@ -474,7 +557,9 @@ class ProtocolClient(
                         "detector" to payload.optString("detector", "unknown"),
                         "visionEnabled" to visionEnabled,
                         "maxInFlight" to advertised,
-                        "alertMaxAgeMs" to configuredStaleAlertMs
+                        "alertMaxAgeMs" to configuredStaleAlertMs,
+                        "protocolVersion" to serverProtocolVersion,
+                        "fullPoseRange" to serverAcceptsFullPoseRange()
                     )
                 )
                 // #region agent log
@@ -670,8 +755,36 @@ class ProtocolClient(
                     // Still surface detector output when speech was suppressed as late.
                     onState("Live · $labelHint (delayed)")
                 }
+                if (serverAcceptsResultAcknowledgements()) {
+                    acknowledgeResult(
+                        webSocket = webSocket,
+                        frameId = payload.optLong("frame_id", -1),
+                        fresh = age <= maxAge
+                    )
+                }
                 settleFrame()
             }
+        }
+    }
+
+    /**
+     * Tell the server that this specific result reached the phone and passed the phone-owned
+     * freshness gate. This is deliberately best-effort and has no user-facing failure path: an
+     * acknowledgement failure must never delay, suppress, or replace an awareness alert.
+     */
+    private fun acknowledgeResult(webSocket: WebSocket, frameId: Long, fresh: Boolean) {
+        if (frameId < 0L) return
+        val accepted = runCatching {
+            webSocket.send(
+                JSONObject()
+                    .put("type", "result_ack")
+                    .put("frame_id", frameId)
+                    .put("fresh", fresh)
+                    .toString()
+            )
+        }.getOrDefault(false)
+        if (!accepted) {
+            Log.i("AkshravaVision", "result_ack_not_sent frame=$frameId")
         }
     }
 
@@ -682,6 +795,7 @@ class ProtocolClient(
         cancelStaleInferenceWatchdog()
         sessionReady = false
         visionEnabled = false
+        clearNegotiatedCapabilities()
         closedByUser = true
         onState(message)
         alertManager.status(message)
@@ -707,6 +821,7 @@ class ProtocolClient(
         // #endregion
         sessionReady = false
         visionEnabled = false
+        clearNegotiatedCapabilities()
         logConnection(
             "transport_drop",
             mapOf(
@@ -842,6 +957,7 @@ class ProtocolClient(
         cancelStaleInferenceWatchdog()
         sessionReady = false
         visionEnabled = false
+        clearNegotiatedCapabilities()
         socket?.close(1000, "user stopped")
         socket?.cancel()
         socket = null
@@ -860,7 +976,7 @@ class ProtocolClient(
 
         override fun onMessage(webSocket: WebSocket, text: String) {
             if (!isCurrentGeneration(generation)) return
-            handleMessage(text)
+            handleMessage(webSocket, text)
         }
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {

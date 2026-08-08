@@ -111,6 +111,87 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
 
+  ios-artifact:
+    name: Build iOS release artifact
+    runs-on: macos-15
+    # The only platform with a signed, installable release artifact is Android. iOS is unsigned
+    # and experimental (see Important Architecture.md) -- a flaky macOS runner, a dropped Xcode
+    # image, or an iOS-only test regression must not block the Android release. continue-on-error
+    # makes this job's outcome neutral for `needs:` evaluation below; `publish` collects whatever
+    # this job produced (possibly nothing) rather than depending on it succeeding.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+      # Gate the artifact on the same suite the PR gate runs. An IPA that was never unit-tested
+      # is worse than no IPA: it looks like a release.
+      - name: Verify iOS
+        run: ./scripts/test_ios.sh
+      - name: Generate the Xcode project
+        run: |
+          brew install xcodegen
+          ./scripts/bootstrap_ios_app.sh
+      # `swift test` above runs against the macOS SDK, which compiles out every `#if os(iOS)`
+      # body. Gate the artifact on the simulator suite too, so an IPA is never published on the
+      # strength of a suite that never built the code the IPA actually contains.
+      - name: iOS simulator unit tests
+        run: |
+          set -euo pipefail
+          xcodebuild test \
+            -project ios/AkshravaApp.xcodeproj \
+            -scheme AkshravaApp \
+            -configuration Debug \
+            -destination 'platform=iOS Simulator,name=iPhone 16,OS=latest' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            -quiet
+      # Unsigned on purpose. No Apple signing identity is configured for this repository, and
+      # producing an "IPA" that cannot install is less honest than shipping a clearly-labelled
+      # unsigned archive that a maintainer re-signs with their own team. Never emit a file named
+      # like an installable build unless it actually is one.
+      - name: Archive (unsigned)
+        run: |
+          set -euo pipefail
+          xcodebuild archive \
+            -project ios/AkshravaApp.xcodeproj \
+            -scheme AkshravaApp \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/AkshravaApp.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            -quiet
+      - name: Package the unsigned payload and symbols
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          archive="$RUNNER_TEMP/AkshravaApp.xcarchive"
+          test -d "$archive/Products/Applications/AkshravaApp.app"
+          mkdir -p ios-release-assets "$RUNNER_TEMP/payload/Payload"
+          cp -R "$archive/Products/Applications/AkshravaApp.app" "$RUNNER_TEMP/payload/Payload/"
+          ( cd "$RUNNER_TEMP/payload" && zip -qry "$GITHUB_WORKSPACE/ios-release-assets/Akshrava-${version}-ios-unsigned.ipa" Payload )
+          # dSYMs are the only way to symbolicate a crash from a field device; they are not in
+          # the app bundle and are unrecoverable once the runner is gone.
+          if [ -d "$archive/dSYMs" ]; then
+            ( cd "$archive" && zip -qry "$GITHUB_WORKSPACE/ios-release-assets/Akshrava-${version}-ios-dSYMs.zip" dSYMs )
+          fi
+          # Write the manifest outside the directory being hashed: a redirect into it creates the
+          # target before the glob expands, and the checksum file would list itself as empty.
+          # Bare file names so `sha256sum -c` works for someone who downloaded them side by side.
+          ( cd ios-release-assets && shasum -a 256 * ) > "$RUNNER_TEMP/SHA256SUMS-ios.txt"
+          mv "$RUNNER_TEMP/SHA256SUMS-ios.txt" ios-release-assets/SHA256SUMS-ios.txt
+          ls -la ios-release-assets
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-release-assets
+          path: ios-release-assets
+          retention-days: 7
+          if-no-files-found: warn
+
   configuration:
     runs-on: ubuntu-latest
     steps:
@@ -125,7 +206,7 @@ jobs:
 
   publish:
     runs-on: ubuntu-latest
-    needs: [android-compatibility, configuration]
+    needs: [android-compatibility, ios-artifact, configuration]
     env:
       AKSHRAVA_ENV: development
       DEV_AUTH_BYPASS: "true"
@@ -178,6 +259,17 @@ jobs:
         run: |
           sdkmanager "platforms;android-36" "build-tools;36.0.0"
           ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleRelease
+      - name: Collect the iOS release artifact
+        # Best-effort: ios-artifact runs continue-on-error, so this artifact may legitimately not
+        # exist (a macOS runner hiccup, a dropped Xcode image, an iOS regression). Its absence
+        # must not fail the Android release.
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-release-assets
+          path: ios-release-assets
+      - name: Ensure the iOS assets directory exists (may be empty)
+        run: mkdir -p ios-release-assets
       - name: Package signed APK and checksums
         run: |
           mkdir -p release-assets
@@ -217,19 +309,47 @@ jobs:
               "database_schema_revision": alembic_head_revision(Path(".")),
               "detector_default": "noop",
               "yolo_weights_sha256": os.environ.get("YOLO_WEIGHTS_SHA256", ""),
+              # Derived from the file that was actually built, so the manifest cannot claim an iOS
+              # artifact the job did not produce.
+              "ios_ipa": next(
+                  (path.name for path in sorted(Path("ios-release-assets").glob("*.ipa"))),
+                  "",
+              ),
+              "ios_ipa_signed": False,
+              "ios_minimum_os_version": "14.0",
               "artifacts": [
                   "Akshrava signed universal APK (Android API 26–36)",
                   "SHA256SUMS.txt",
               ],
-              "notes": "Model weights are not published here; pin SHA in cloud/gcp/terraform.tfvars before detector=remote.",
+              "notes": (
+                  "Model weights are not published here; pin SHA in cloud/gcp/terraform.tfvars "
+                  "before detector=remote. The iOS payload is unsigned and cannot be installed "
+                  "as published — no Apple signing identity is configured for this repository."
+              ),
           }
+          # The iOS artifact job runs continue-on-error and may not have produced anything this
+          # release. List it only when it actually exists, so the manifest never claims an
+          # artifact this run did not build.
+          ios_assets = sorted(Path("ios-release-assets").glob("*"))
+          if ios_assets:
+              manifest["artifacts"].extend([
+                  "Akshrava UNSIGNED iOS payload (.ipa, iOS 14+) — re-sign with your own team before install",
+                  "Akshrava iOS dSYMs",
+                  "SHA256SUMS-ios.txt",
+              ])
           with open("release-manifest.json", "w", encoding="utf-8") as handle:
               json.dump(manifest, handle, indent=2)
               handle.write("\n")
           PY
+          # ios-release-assets/* is a glob, not a literal: if ios-artifact did not produce
+          # anything (continue-on-error), the directory exists but is empty and the glob expands
+          # to nothing rather than the literal pattern, so it is safe to include unconditionally.
+          shopt -s nullglob
+          ios_assets=(ios-release-assets/*)
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" --clobber \
               release-assets/* \
+              "${ios_assets[@]}" \
               SHA256SUMS.txt \
               release-manifest.json
           else
@@ -237,6 +357,7 @@ jobs:
               --title "Akshrava $GITHUB_REF_NAME" \
               --generate-notes \
               release-assets/* \
+              "${ios_assets[@]}" \
               SHA256SUMS.txt \
               release-manifest.json
           fi

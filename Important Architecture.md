@@ -27,7 +27,9 @@ Silence never means safety. The app must state `Camera is blurry. Wipe the lens.
 **Live supervised GCP pilot (2026-07):** Android `ProtocolClient` → Cloud Run
 `wss://<cloud-run-endpoint>/v1/session` (public invoker + RS256 JWT) → Redis
 admission → VPC connector → private DNS `worker.akshrava.internal:8443` (Caddy mTLS) → **CPU**
-YOLO worker (`worker_use_gpu=false`; GPU quota 0). Cloud SQL, Memorystore Redis (BASIC), Secret
+YOLO worker (`worker_use_gpu=false`; GPU quota 0). Cloud SQL (single-zone `ZONAL` by deployed
+state; `database_availability_type` now defaults to `REGIONAL` for new applies), Memorystore Redis
+(`STANDARD_HA` with `SERVER_AUTHENTICATION`, set via `redis_tier`/`redis_transit_encryption`), Secret
 Manager, Artifact Registry, diagnostics GCS, COS iptables `:8443`, and IAP SSH firewall are in
 Terraform; PKI PEMs live under `cloud/gcp/pki/` (`manage_pki_in_terraform=false`). This is **not**
 unsupervised field production and **not** a live L4 GPU claim. Operator diagrams and release
@@ -333,7 +335,25 @@ Stop a session after an unexpected urgent miss, repeated stale alerts, unannounc
 | 3 — supervised participant | Accessible onboarding, consent, controlled course then short guided route, incident/replay loop |
 | 4 — small monitored pilot | Approved-device inventory, support, rollout/rollback, privacy workflow and local failure labels; no scale or iOS promise until Android is stable |
 
-Deferred features remain an enforceable scope guard. They include GPS hazard memory, optical-flow/looming or local approach tracking, foveated native-resolution uploads, continuous OCR, iOS, broad language rollout and large-scale cloud operations. Revisit each only with a specific evidence, privacy, latency and operating-cost case.
+Deferred features remain an enforceable scope guard. They include GPS hazard memory, optical-flow/looming or local approach tracking, foveated native-resolution uploads, continuous OCR, broad language rollout and large-scale cloud operations. Revisit each only with a specific evidence, privacy, latency and operating-cost case.
+
+### iOS platform status (experimental, pre-alpha)
+
+An iOS client (`ios/`) exists in this branch but is not a release candidate and must not be
+distributed to a participant. It shares the Android app's wire protocol and safety boundary but
+not its production hardening:
+
+- **No background operation.** Unlike Android's foreground service + wake lock, iOS has no
+  `camera` background mode. `AVCaptureSession` is force-interrupted the moment the app leaves the
+  foreground (a side-button press, an incoming call, another app claiming the camera). The app
+  observes `AVCaptureSessionWasInterrupted` / `InterruptionEnded` / `RuntimeError` and announces
+  the transition (never goes silent), but assistance genuinely stops until the app is foregrounded
+  again — this is a platform ceiling, not a bug to be fixed later.
+- **`BGProcessingTaskRequest` recovery is opportunistic**, not a guaranteed interval like Android's
+  `AlarmManager` watchdog. iOS decides if/when it runs.
+- Camera permission, terminal-auth handling, and cross-thread session state have received the same
+  correctness pass as Android, but the iOS device-SDK path has not yet run on a physical phone in
+  a supervised trial. Treat it as a code-complete prototype, not a pilot artifact, until it has.
 
 Before Phase 1, name the NGO safety partner and stop authority; choose one familiar daylight route and first Tier-A phone; settle English/Hindi audio and retention defaults; obtain a recurring-cost owner and monthly shutoff policy; and define success as timely, comprehensible alerts for a narrow class set without increased cognitive load—not “AI navigation.”
 
