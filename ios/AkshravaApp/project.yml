@@ -17,6 +17,7 @@ targets:
         excludes:
           - project.yml
           - provision.json
+          - Info.plist
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: org.akshrava.app
       INFOPLIST_FILE: AkshravaApp/Info.plist
