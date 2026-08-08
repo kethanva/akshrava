@@ -4,7 +4,9 @@
 //
 
 import Foundation
+#if os(iOS)
 import CoreMotion
+#endif
 
 public protocol GestureDetectorDelegate: AnyObject {
     func gestureDetectorDidDetectManualTrigger(_ engine: GestureDetectorEngine)
@@ -16,13 +18,16 @@ public final class GestureDetectorEngine {
 
     public weak var delegate: GestureDetectorDelegate?
 
+    private var lastTriggerMs: Int64 = 0
+    #if os(iOS)
     private let motionManager = CMMotionManager()
     private let queue = OperationQueue()
-    private var lastTriggerMs: Int64 = 0
+    #endif
 
     public init() {}
 
     public func start() {
+        #if os(iOS)
         guard motionManager.isAccelerometerAvailable else { return }
         motionManager.accelerometerUpdateInterval = 0.05
         motionManager.startAccelerometerUpdates(to: queue) { [weak self] data, error in
@@ -36,12 +41,15 @@ public final class GestureDetectorEngine {
                 self.delegate?.gestureDetectorDidDetectManualTrigger(self)
             }
         }
+        #endif
     }
 
     public func stop() {
+        #if os(iOS)
         if motionManager.isAccelerometerActive {
             motionManager.stopAccelerometerUpdates()
         }
+        #endif
     }
 
     public static func shouldFire(nowMs: Int64, lastTriggerMs: Int64) -> Bool {

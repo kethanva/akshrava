@@ -89,8 +89,7 @@ public final class AssistSessionManager {
         gestureDetector.start()
         _ = screenKeepAlive.start()
 
-        ambientLightMonitor = AmbientLightMonitor { [weak self] level in
-            guard let self = self else { return }
+        ambientLightMonitor = AmbientLightMonitor { level in
             if AlertManager.shared.hazardSpokenWithin(ms: 2_500) { return }
             AlertManager.shared.speakStatus(AmbientLightMonitor.statusText(for: level), force: true)
         }
