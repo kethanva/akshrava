@@ -17,25 +17,14 @@ final class ScreenKeepAliveTests: XCTestCase {
 
     func testStartAndStopLifecycle() {
         let keepAlive = ScreenKeepAlive()
-        #if os(macOS)
-        // macOS stub always returns false and stays in .none mode
         let started = keepAlive.start()
-        XCTAssertFalse(started)
-        XCTAssertEqual(keepAlive.mode, .none)
-        XCTAssertFalse(keepAlive.isHoldingScreenOn())
-        keepAlive.stop()
-        XCTAssertEqual(keepAlive.mode, .none)
-        #else
-        // iOS: start should succeed (sets isIdleTimerDisabled = true)
-        let started = keepAlive.start()
-        XCTAssertTrue(started, "ScreenKeepAlive.start() must succeed on iOS")
+        XCTAssertTrue(started, "ScreenKeepAlive.start() must succeed")
         XCTAssertEqual(keepAlive.mode, .idleTimerDisabled)
         XCTAssertTrue(keepAlive.isHoldingScreenOn())
 
         keepAlive.stop()
         XCTAssertEqual(keepAlive.mode, .none)
         XCTAssertFalse(keepAlive.isHoldingScreenOn())
-        #endif
     }
 
     func testDoubleStartIsIdempotent() {

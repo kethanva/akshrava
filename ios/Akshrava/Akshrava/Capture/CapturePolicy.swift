@@ -6,20 +6,21 @@
 import Foundation
 
 public class CapturePolicy {
-    private var lastCaptureMonoMs: Int64 = 0
-    
+    /// `nil` means no capture has happened yet (first frame always passes).
+    private var lastCaptureMonoMs: Int64?
+
     public init() {}
-    
+
     public func shouldCapture(isMoving: Bool, currentMonoMs: Int64) -> Bool {
         let minInterval: Int64 = isMoving ? 500 : 5000 // 0.2 FPS stationary, 2 FPS moving
-        if currentMonoMs - lastCaptureMonoMs >= minInterval {
-            lastCaptureMonoMs = currentMonoMs
-            return true
+        if let last = lastCaptureMonoMs, currentMonoMs - last < minInterval {
+            return false
         }
-        return false
+        lastCaptureMonoMs = currentMonoMs
+        return true
     }
-    
+
     public func reset() {
-        lastCaptureMonoMs = 0
+        lastCaptureMonoMs = nil
     }
 }

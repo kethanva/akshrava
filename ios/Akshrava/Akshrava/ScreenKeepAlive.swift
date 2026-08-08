@@ -48,14 +48,28 @@ public class ScreenKeepAlive {
 
 #else
 
-/// macOS stub for SPM compilation.
+/// macOS stub for SPM compilation — tracks mode so unit tests exercise the same
+/// start/stop/idempotent contract without UIKit.
 public class ScreenKeepAlive {
     public enum Mode { case none, idleTimerDisabled }
     public private(set) var mode: Mode = .none
     public init() {}
-    @discardableResult public func start() -> Bool { return false }
-    public func stop() {}
-    public func isHoldingScreenOn() -> Bool { return false }
+
+    @discardableResult
+    public func start() -> Bool {
+        guard !isHoldingScreenOn() else { return true }
+        mode = .idleTimerDisabled
+        return true
+    }
+
+    public func stop() {
+        mode = .none
+    }
+
+    public func isHoldingScreenOn() -> Bool {
+        return mode == .idleTimerDisabled
+    }
+
     public func renew() {}
 }
 
