@@ -27,7 +27,7 @@ public class Watchdog {
         if #available(iOS 13.0, *) {
             BGTaskScheduler.shared.register(
                 forTaskWithIdentifier: Watchdog.taskIdentifier,
-                queue: nil
+                using: nil
             ) { task in
                 task.setTaskCompleted(success: true)
             }
