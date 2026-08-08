@@ -74,6 +74,45 @@ def expected_schema_revision(root: Path) -> str:
     return match.group(1)
 
 
+def ios_versions(root: Path) -> Dict[str, str]:
+    """Every place the iOS release version is declared, checked independently.
+
+    Three files decide what an installed build reports, and only one of them is Swift. The IPA's
+    user-visible version comes from Info.plist, the archive's from project.yml MARKETING_VERSION,
+    and the in-app / telemetry one from AppConfig.swift. Checking a single file would let a
+    release ship an IPA stamped with the previous version while this gate reported success.
+
+    There is deliberately no "iOS directory missing" fallback. An earlier version returned the
+    backend version when AppConfig.swift was absent, which made the gate pass by *not finding*
+    the thing it exists to verify -- a deleted or renamed iOS tree would have been reported as
+    parity rather than as the release-blocking problem it is.
+    """
+    sources = {
+        "ios-appconfig": (
+            "ios/Akshrava/Akshrava/AppConfig.swift",
+            r'public let appVersion: String = "([^"]+)"',
+        ),
+        "ios-infoplist": (
+            "ios/AkshravaApp/Info.plist",
+            r"<key>CFBundleShortVersionString</key>\s*<string>([^<]+)</string>",
+        ),
+        "ios-xcodegen": (
+            "ios/AkshravaApp/project.yml",
+            r"^\s*MARKETING_VERSION:\s*\"?([0-9][^\"\s]*)\"?\s*$",
+        ),
+    }
+    found = {}
+    for name, (relative, pattern) in sources.items():
+        path = root / relative
+        if not path.exists():
+            raise ValueError("iOS release file is missing: %s" % relative)
+        match = re.search(pattern, path.read_text(), re.M)
+        if not match:
+            raise ValueError("iOS release version is missing from %s" % relative)
+        found[name] = match.group(1)
+    return found
+
+
 def main() -> int:
     if len(sys.argv) != 2 or not re.fullmatch(r"v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", sys.argv[1]):
         print("usage: check_release_version.py vX.Y.Z", file=sys.stderr)
@@ -83,6 +122,7 @@ def main() -> int:
     versions = {
         "backend": version_from_backend(root),
         "android": version_from_android(root),
+        **ios_versions(root),
         **served_versions(root),
     }
     mismatched = {name: version for name, version in versions.items() if version != expected}
