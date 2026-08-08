@@ -138,7 +138,8 @@ jobs:
           ( cd "$RUNNER_TEMP/payload" && zip -qry \
             "$GITHUB_WORKSPACE/ios-pr-artifacts/Akshrava-pr-ios-unsigned.ipa" Payload )
           cp ios/AkshravaApp.xcodeproj/project.pbxproj ios-pr-artifacts/project.pbxproj
-          ( cd ios-pr-artifacts && shasum -a 256 * ) > "$RUNNER_TEMP/SHA256SUMS-ios-pr.txt"
+          ( cd ios-pr-artifacts && find . -type f -print0 | sort -z | xargs -0 shasum -a 256 ) \
+            > "$RUNNER_TEMP/SHA256SUMS-ios-pr.txt"
           mv "$RUNNER_TEMP/SHA256SUMS-ios-pr.txt" ios-pr-artifacts/SHA256SUMS-ios-pr.txt
           ls -la ios-pr-artifacts
       - uses: actions/upload-artifact@v4
