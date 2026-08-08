@@ -107,7 +107,7 @@ public final class AmbientLightMonitor {
     public static func approximateLux(iso: Float, exposureSeconds: Double) -> Float {
         let index = Double(iso) * exposureSeconds
         // Tuned so ISO×t ≈ 2.0 (prior low-light heuristic) lands near darkLux.
-        return Float(darkLux * 2.0 / max(index, 0.0001))
+        return Float(Double(darkLux) * 2.0 / max(index, 0.0001))
     }
 
     public static func statusText(for level: AmbientLightLevel) -> String {

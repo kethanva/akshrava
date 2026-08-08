@@ -3,11 +3,11 @@
 //  Akshrava iOS
 //
 //  Background watchdog using BGTaskScheduler — mirrors Android's WatchdogReceiver + AlarmManager.
-//  BackgroundTasks is iOS 13+ only; on macOS (CI/SPM swift test) the scheduler is a no-op.
+//  BGTaskScheduler is iOS-only; on macOS (CI/SPM swift test) registration is a no-op.
 //
 
 import Foundation
-#if canImport(BackgroundTasks)
+#if os(iOS)
 import BackgroundTasks
 #endif
 
@@ -23,7 +23,7 @@ public class Watchdog {
     private init() {}
 
     public func registerBackgroundTasks() {
-        #if canImport(BackgroundTasks)
+        #if os(iOS)
         if #available(iOS 13.0, *) {
             BGTaskScheduler.shared.register(
                 forTaskWithIdentifier: Watchdog.taskIdentifier,
@@ -33,6 +33,5 @@ public class Watchdog {
             }
         }
         #endif
-        // On macOS: no-op (BGTaskScheduler is not available)
     }
 }
