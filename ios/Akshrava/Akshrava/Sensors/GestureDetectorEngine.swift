@@ -4,11 +4,13 @@
 //
 
 import Foundation
-import CoreMotion
 
 public protocol GestureDetectorDelegate: AnyObject {
     func gestureDetectorDidDetectManualTrigger(_ engine: GestureDetectorEngine)
 }
+
+#if os(iOS)
+import CoreMotion
 
 public final class GestureDetectorEngine {
     public static let shakeThresholdG: Double = 2.8
@@ -48,3 +50,16 @@ public final class GestureDetectorEngine {
         lastTriggerMs == 0 || nowMs - lastTriggerMs >= debounceMs
     }
 }
+#else
+public final class GestureDetectorEngine {
+    public static let shakeThresholdG: Double = 2.8
+    public static let debounceMs: Int64 = 1_500
+    public weak var delegate: GestureDetectorDelegate?
+    public init() {}
+    public func start() {}
+    public func stop() {}
+    public static func shouldFire(nowMs: Int64, lastTriggerMs: Int64) -> Bool {
+        lastTriggerMs == 0 || nowMs - lastTriggerMs >= debounceMs
+    }
+}
+#endif

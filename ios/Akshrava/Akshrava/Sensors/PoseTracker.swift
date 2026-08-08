@@ -4,11 +4,13 @@
 //
 
 import Foundation
-import CoreMotion
 
 public protocol PoseTrackerDelegate: AnyObject {
     func poseTracker(_ tracker: PoseTracker, didDetectExtremeTilt pitchCdeg: Int)
 }
+
+#if os(iOS)
+import CoreMotion
 
 public class PoseTracker {
     public weak var delegate: PoseTrackerDelegate?
@@ -60,3 +62,15 @@ public class PoseTracker {
         poseAgeMs = Int(max(0, nowMs - lastUpdateMonoMs))
     }
 }
+#else
+public class PoseTracker {
+    public weak var delegate: PoseTrackerDelegate?
+    public private(set) var currentPitchCdeg: Int = 0
+    public private(set) var currentRollCdeg: Int = 0
+    public private(set) var poseAgeMs: Int = 999
+    public init() {}
+    public func start() {}
+    public func stop() {}
+    public func updateAge() { poseAgeMs = 0 }
+}
+#endif
