@@ -81,6 +81,21 @@ class AssistService : LifecycleService() {
          * safety net did not fire and no further frame will ever be sent.
          */
         internal const val FRAME_SLOT_WEDGED_MS = 15_000L
+
+        /**
+         * True when the analyzer has gone silent long enough to justify rebinding CameraX.
+         *
+         * Extracted as a pure function so the rule is unit-testable without a camera, a service,
+         * or a Handler -- the same treatment [FrameGate.shouldAnnounceBlur] and
+         * [ProtocolClient.shouldTickStaleInference] already get.
+         *
+         * The `lastAnalyzeAtMs > 0` term means "the camera is not bound yet", NOT "no frame has
+         * arrived yet". bindCamera() baselines the clock on a successful bind, so a HAL that
+         * accepts the configuration and then never delivers a frame is treated as a stall like
+         * any other silence. Before a bind there is nothing to recover, so 0 still means quiet.
+         */
+        internal fun shouldRebindForStall(nowMs: Long, lastAnalyzeAtMs: Long): Boolean =
+            lastAnalyzeAtMs > 0L && nowMs - lastAnalyzeAtMs > CAMERA_STALL_REBIND_MS
     }
 
     private var frameExecutor: ExecutorService? = null
@@ -92,6 +107,7 @@ class AssistService : LifecycleService() {
     private var calibrationId: String = ""
     private var headsetControls: HeadsetControls? = null
     private var gestureDetectorEngine: GestureDetectorEngine? = null
+    private var ambientLightMonitor: AmbientLightMonitor? = null
     private var reflexEngine: ReflexEngine = DisabledReflexEngine()
     private var wakeLock: PowerManager.WakeLock? = null
     private var cameraProvider: ProcessCameraProvider? = null
@@ -128,11 +144,33 @@ class AssistService : LifecycleService() {
     private var lastCaptureMs = 0L
     private var lastThermalCheckMs = 0L
     private var lastBatteryWarningMs = 0L
-    private var lastCameraUnclearMs = 0L
+    /** null = the wipe-lens prompt has not spoken this session; see FrameGate.shouldAnnounceBlur. */
+    private var lastCameraUnclearMs: Long? = null
     private var lastHeartbeatMs = 0L
     private var lastWakeLockRenewAtMs = 0L
-    private var lastAnalyzeAtMs = 0L
-    private var lastQualityRebindAtMs = 0L
+    /**
+     * When the analyzer last ran, in [SystemClock.elapsedRealtime].
+     *
+     * Volatile because this is genuinely cross-thread: it is written from the CameraX analyzer on
+     * [frameExecutor] and both read and written from [cameraStallCheck] on the main thread. There
+     * is no happens-before edge between those two, so without this the stall detector could read
+     * an arbitrarily stale value -- rebinding a healthy camera (a 1-2 s detection blackout the
+     * user experiences as intermittent failure) or failing to rebind a dead one.
+     *
+     * The other frame-pipeline counters nearby are safe without it: they are reset on the main
+     * thread in startAssistance() *before* setAnalyzer() hands them to the executor, and
+     * submitting to an executor establishes happens-before. Only these two escape that pattern.
+     */
+    @Volatile private var lastAnalyzeAtMs = 0L
+
+    /**
+     * Volatile for the same reason: [scheduleCameraRebind] is reached from ProtocolClient
+     * callbacks, which run on the OkHttp listener thread (onQuality / onRoundTripMs / onFrameSettled)
+     * and on the reconnect scheduler thread (onSettleTimeout) -- two different non-main threads
+     * doing read-modify-write on this rebind cooldown. [LinkQualityController] already marks all
+     * of its cross-thread state volatile; these two fields were the inconsistency.
+     */
+    @Volatile private var lastQualityRebindAtMs = 0L
     private var lastNotificationText: String? = null
     private var lastNotificationAtMs = 0L
     private var queuedNotificationText: String? = null
@@ -175,7 +213,7 @@ class AssistService : LifecycleService() {
             if (client != null) {
                 val now = SystemClock.elapsedRealtime()
                 val last = lastAnalyzeAtMs
-                if (last > 0L && now - last > CAMERA_STALL_REBIND_MS) {
+                if (shouldRebindForStall(now, last)) {
                     Log.w("AkshravaDebug", "camera_stall rebind after=${now - last}ms")
                     lastAnalyzeAtMs = now
                     framePending.set(false)
@@ -304,6 +342,7 @@ class AssistService : LifecycleService() {
         consecutiveBlurredFrames = 0
         consecutiveOccludedFrames = 0
         consecutiveGlaredFrames = 0
+        lastCameraUnclearMs = null
         extremeTiltSinceMs = null
         captureSuspendedForBattery = false
         captureSuspendedForFailure = false
@@ -361,6 +400,15 @@ class AssistService : LifecycleService() {
             poseTracker?.onAccelerometerSample = { x, y, z, nowMs ->
                 engine.onAccelerometerSample(x, y, z, nowMs)
             }
+        }
+        ambientLightMonitor = AmbientLightMonitor(this) { level ->
+            // Samples arrive on the sensor thread; status() speaks, so hop off it for the same
+            // reason the gesture engine does — PoseTracker shares that thread.
+            mainHandler.post { announceAmbientLightEdge(am, level) }
+        }.also { monitor ->
+            // A phone with no light sensor simply never gets this context. It is additive
+            // awareness, so its absence is logged, not spoken: it is not a fault the user can act on.
+            if (!monitor.start()) Log.i("AkshravaDebug", "ambient_light_sensor_unavailable")
         }
         // A session only survives a long walk if the display stays awake: many OEM ROMs stop
         // delivering CameraX frames once the screen sleeps, which ends the walk silently. The
@@ -428,6 +476,7 @@ class AssistService : LifecycleService() {
         // its own, so clearing the sink is what stops it being fed.
         poseTracker?.onAccelerometerSample = null
         gestureDetectorEngine = null
+        ambientLightMonitor?.stop(); ambientLightMonitor = null
         screenKeepAlive?.stop(); screenKeepAlive = null
         osLifecycleReceiver?.let {
             try { unregisterReceiver(it) } catch (e: Exception) {}
@@ -528,6 +577,17 @@ class AssistService : LifecycleService() {
                 analysis.setAnalyzer(exec) { image -> analyzeImage(image) }
                 provider.unbindAll()
                 provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+                // Start the stall clock at the moment frames become expected.
+                //
+                // This used to stay 0 until the FIRST frame arrived, and shouldRebindForStall
+                // ignores 0. A bind that succeeds but never delivers -- an OEM HAL that accepts
+                // the configuration and then emits nothing, which is exactly the failure this
+                // detector exists for -- therefore armed nothing at all: the camera looked bound,
+                // the socket stayed open, no drop or stall ever fired, and assistance was simply
+                // over with no recovery path but a manual Stop/Start the user cannot know to
+                // perform. Baselining here means silence from bind onwards counts, so the first
+                // frame never arriving is treated exactly like frames stopping later.
+                lastAnalyzeAtMs = SystemClock.elapsedRealtime()
                 // #region agent log
                 Log.i("AkshravaDebug", "camera_bound ok rotation=$rotation analysisSide=$analysisSide")
                 // #endregion
@@ -753,10 +813,13 @@ class AssistService : LifecycleService() {
                 consecutiveBlurredFrames += 1
                 // Blur never drops a frame. Persistent evidence only produces a bounded status
                 // prompt, because the cane/guide is primary when the camera cannot be trusted.
-                if (consecutiveBlurredFrames >= 5 && now - lastCameraUnclearMs >= 60_000L) {
+                if (FrameGate.shouldAnnounceBlur(now, consecutiveBlurredFrames, lastCameraUnclearMs)) {
                     lastCameraUnclearMs = now
-                    alertManager?.status("Camera view unclear. Use cane or guide.")
-                    updateNotification("Camera view unclear")
+                    // Name the fix first (F-72): a smeared lens on a pocket-carried donated phone
+                    // is usually a fingerprint, and "unclear" alone gave the user nothing to do
+                    // about it. The cane/guide fallback stays, because wiping may not help.
+                    alertManager?.status("Camera is blurry. Wipe the lens. Use cane or guide.")
+                    updateNotification("Camera is blurry — wipe the lens")
                 }
             } else {
                 consecutiveBlurredFrames = 0
@@ -928,6 +991,30 @@ class AssistService : LifecycleService() {
         Log.i("AkshravaDebug", "tilt_announced pitch_cdeg=$pitch")
     }
 
+    /**
+     * Speak one ambient light edge (F-71), or drop it.
+     *
+     * Dropped rather than deferred on purpose. This is the lowest tier of speech in the app: it
+     * describes the environment and makes no claim about what is ahead, so it must never cut off
+     * a hazard alert that is still landing. By the time a deferral would have expired the edge is
+     * old news, and the monitor has already adopted the new level, so nothing repeats later.
+     *
+     * No notification update either — the light changing is not a fault state to display.
+     */
+    private fun announceAmbientLightEdge(am: AlertManager, level: AmbientLightLevel) {
+        val now = SystemClock.elapsedRealtime()
+        if (am.hazardSpokenWithin(now)) {
+            Log.i("AkshravaDebug", "ambient_light_edge_skipped level=$level reason=alert_busy")
+            return
+        }
+        val text = when (level) {
+            AmbientLightLevel.DARK -> "Environment is dark."
+            AmbientLightLevel.BRIGHT -> "Brighter now."
+        }
+        am.status(text)
+        Log.i("AkshravaDebug", "ambient_light_edge level=$level")
+    }
+
     private fun captureIntervalMs(): Long {
         val now = SystemClock.elapsedRealtime()
         val motion: MotionState = poseTracker?.motionState() ?: MotionState.STATIONARY
@@ -1023,6 +1110,10 @@ class AssistService : LifecycleService() {
         cameraLifecycleOwner?.destroy(); cameraLifecycleOwner = null
         client?.close(); client = null
         poseTracker?.stop(); poseTracker = null
+        // Stop here, not just in teardown: the camera is already gone, and an ambient-light line
+        // arriving between now and the deferred stop would tell a user who cannot see the screen
+        // that something is still watching.
+        ambientLightMonitor?.stop(); ambientLightMonitor = null
         frameExecutor?.shutdownNow(); frameExecutor = null
         wakeLock?.let { if (it.isHeld) it.release(); wakeLock = null }
         // Capture generation before scheduling deferred stops. A Start that bumps

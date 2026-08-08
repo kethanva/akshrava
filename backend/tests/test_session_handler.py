@@ -17,7 +17,11 @@ from akshrava_backend.domain import FrameHeader, SessionState
 from akshrava_backend.metrics import Metrics
 from akshrava_backend.protocol import ProtocolError
 from akshrava_backend.rate_limit import FrameRateLimiter
-from akshrava_backend.session_handler import MAX_CONTROL_MESSAGE_BYTES, FrameStreamHandler
+from akshrava_backend.session_handler import (
+    MAX_CONTROL_MESSAGE_BYTES,
+    MAX_PENDING_RESULT_ACKS,
+    FrameStreamHandler,
+)
 
 DEVICE_ID = "test-device-123"
 
@@ -131,6 +135,77 @@ async def test_unknown_message_type_is_reported_not_fatal(handler):
     }
 
 
+async def test_result_ack_counts_only_one_matching_sent_result(handler):
+    """Delivery telemetry must be bounded and cannot be inflated by arbitrary control traffic."""
+    handler.note_result_sent(7, True)
+
+    assert await handler.handle_text_frame(
+        json.dumps({"type": "result_ack", "frame_id": 7, "fresh": True})
+    ) == {"_action": "result_ack"}
+    # Duplicates and unknown ids have no observable side effect.
+    assert await handler.handle_text_frame(
+        json.dumps({"type": "result_ack", "frame_id": 7, "fresh": True})
+    ) == {"_action": "result_ack"}
+    assert await handler.handle_text_frame(
+        json.dumps({"type": "result_ack", "frame_id": 8, "fresh": True})
+    ) == {"_action": "result_ack"}
+
+    rendered = handler.metrics.render()
+    assert "akshrava_phone_results_acknowledged_total 1" in rendered
+    assert "akshrava_phone_results_acknowledged_fresh_total 1" in rendered
+
+
+async def test_evicting_a_pending_ack_slot_counts_it_as_unacknowledged(handler):
+    """The delivery-failure metric is exact: it counts evictions, not window subtraction."""
+    handler.result_acknowledgement_supported = True
+    # One more result than the bounded pending set can hold; the oldest is pushed out unacked.
+    for frame_id in range(MAX_PENDING_RESULT_ACKS + 1):
+        handler.note_result_sent(frame_id, True)
+
+    assert "akshrava_phone_results_unacknowledged_total 1" in handler.metrics.render()
+
+
+async def test_results_still_in_flight_are_never_counted_as_unacknowledged(handler):
+    """Sent-but-not-yet-acknowledged is normal steady state, not a delivery failure."""
+    handler.result_acknowledgement_supported = True
+    for frame_id in range(MAX_PENDING_RESULT_ACKS):
+        handler.note_result_sent(frame_id, True)
+
+    assert "akshrava_phone_results_unacknowledged_total 0" in handler.metrics.render()
+
+
+async def test_legacy_phones_do_not_generate_unacknowledged_delivery_alarms(handler):
+    """An old client that never acks must not look like a fleet-wide delivery outage."""
+    handler.result_acknowledgement_supported = False
+    for frame_id in range(MAX_PENDING_RESULT_ACKS + 3):
+        handler.note_result_sent(frame_id, False)
+
+    assert "akshrava_phone_results_unacknowledged_total 0" in handler.metrics.render()
+
+
+async def test_pending_ack_eviction_uses_frame_snapshot_not_latest_header(handler):
+    """A later header must not relabel an older result's acknowledgement expectation."""
+    handler.note_result_sent(1, False)
+    for frame_id in range(2, MAX_PENDING_RESULT_ACKS + 5):
+        handler.note_result_sent(frame_id, True)
+
+    rendered = handler.metrics.render()
+    assert "akshrava_phone_results_unacknowledged_total 3" in rendered
+
+
+async def test_malformed_result_ack_is_soft_shed_and_does_not_change_delivery_metrics(handler, caplog):
+    for payload in (
+        {"type": "result_ack", "frame_id": -1, "fresh": True},
+        {"type": "result_ack", "frame_id": True, "fresh": True},
+        {"type": "result_ack", "frame_id": 1, "fresh": "yes"},
+    ):
+        assert await handler.handle_text_frame(json.dumps(payload)) == {"_action": "result_ack"}
+
+    assert "dropping malformed result acknowledgement" in caplog.text
+    rendered = handler.metrics.render()
+    assert "akshrava_phone_results_acknowledged_total 0" in rendered
+
+
 async def test_oversized_control_message_is_a_protocol_error(handler):
     oversized = json.dumps({"type": "ping", "pad": "x" * MAX_CONTROL_MESSAGE_BYTES})
     with pytest.raises(ProtocolError):
@@ -156,7 +231,13 @@ async def test_valid_header_is_held_pending_its_binary(handler):
 async def test_revoked_device_closes_the_socket(make_handler, store):
     store.is_device_revoked = AsyncMock(return_value=True)
     handler = make_handler()
-    assert await handler.handle_text_frame(frame_payload()) == {"_action": "close", "code": 4403}
+    resp = await handler.handle_text_frame(frame_payload())
+    assert resp["_action"] == "close"
+    assert resp["code"] == 4403
+    # A readable signal must accompany the close: iOS's public WebSocket API cannot represent an
+    # application close code outside 1000-1015, so the close code alone cannot tell a client
+    # "revoked" apart from an ordinary transport drop.
+    assert resp["response"] == {"type": "error", "code": "device_revoked", "detail": "Device revoked"}
 
 
 async def test_header_before_prior_binary_is_a_protocol_violation(handler):

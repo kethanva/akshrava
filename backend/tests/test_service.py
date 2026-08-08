@@ -319,18 +319,29 @@ async def test_spoken_output_uses_the_devices_own_provisioned_language():
 
 @pytest.mark.asyncio
 async def test_inference_circuit_is_per_device():
-    class SlowDetector:
+    # These now subclass Detector rather than being bare duck-typed objects. The service used to
+    # discover how to call its detector by probing for optional attributes, so anything with the
+    # right method names worked; it now goes through the declared port, which is the point --
+    # a detector that does not implement the contract fails loudly here instead of silently
+    # taking an unintended dispatch path in production.
+    class SlowDetector(Detector):
         def requires_serial_execution(self):
             return False
+
+        def detect(self, jpeg):
+            return self.detect_for_device("", jpeg)
 
         def detect_for_device(self, device_id, jpeg):
             import time as _time
             _time.sleep(0.05)
             return []
 
-    class PeerDetector:
+    class PeerDetector(Detector):
         def requires_serial_execution(self):
             return False
+
+        def detect(self, jpeg):
+            return []
 
         def detect_for_device(self, device_id, jpeg):
             return []
@@ -474,3 +485,139 @@ async def test_cancel_all_is_safe_when_nothing_is_in_flight():
     from akshrava_backend.service import BackgroundTaskTracker
 
     await BackgroundTaskTracker("test-empty").cancel_all()
+
+
+@pytest.mark.asyncio
+async def test_a_new_detector_needs_no_change_to_visionservice():
+    """The OCP property this port exists for.
+
+    VisionService used to branch on `isinstance(detector, RemoteWorkerDetector)` and probe five
+    optional attributes, so the application core knew every adapter by name and adding one meant
+    editing the service. This detector type did not exist when _detect was written; it must work
+    anyway, purely by declaring how it wants to be driven.
+    """
+    from akshrava_backend.detector import INFERENCE_MODE_ASYNC, InferenceOutcome
+
+    class BrandNewAsyncDetector(Detector):
+        def requires_serial_execution(self):
+            return False
+
+        def detect(self, jpeg):
+            raise AssertionError("async adapters must not be driven through the sync path")
+
+        def inference_mode(self):
+            return INFERENCE_MODE_ASYNC
+
+        async def infer_async(self, device_id, jpeg):
+            return InferenceOutcome([Detection("person", 0.9, (0.0, 0.0, 1.0, 1.0))], None)
+
+    service = VisionService(BrandNewAsyncDetector(), RecordingStore())
+    detections, unavailable = await service._detect("device-1", b"jpeg")
+    assert [item.label for item in detections] == ["person"]
+    assert unavailable is None
+
+
+@pytest.mark.asyncio
+async def test_sync_detectors_run_off_the_event_loop_on_the_bounded_pool():
+    """A blocking detector must never execute on the event loop.
+
+    If it did, one slow model call would stall every other session on the instance -- not just
+    the phone that sent the frame. The bound on the pool is what makes a hung model fail closed
+    instead of consuming every worker.
+    """
+    import threading
+
+    loop_thread = threading.current_thread().name
+    seen = {}
+
+    class BlockingDetector(Detector):
+        def requires_serial_execution(self):
+            return False
+
+        def detect(self, jpeg):
+            seen["thread"] = threading.current_thread().name
+            return []
+
+    service = VisionService(BlockingDetector(), RecordingStore(), inference_executor_workers=2)
+    await service._detect("device-1", b"jpeg")
+    assert seen["thread"] != loop_thread
+    assert seen["thread"].startswith("akshrava-local-infer")
+
+
+@pytest.mark.asyncio
+async def test_cloud_fallback_availability_is_per_frame_not_per_detector():
+    """Two phones sharing one detector must not read each other's vendor-outage bit."""
+    from akshrava_backend.detector import INFERENCE_MODE_ASYNC, InferenceOutcome
+
+    class PerFrameFallbackDetector(Detector):
+        def __init__(self):
+            self.calls = 0
+
+        def requires_serial_execution(self):
+            return False
+
+        def detect(self, jpeg):
+            return []
+
+        def inference_mode(self):
+            return INFERENCE_MODE_ASYNC
+
+        async def infer_async(self, device_id, jpeg):
+            self.calls += 1
+            # Vendor is down for the first frame only.
+            return InferenceOutcome([], self.calls == 1)
+
+    service = VisionService(PerFrameFallbackDetector(), RecordingStore())
+    _first, first_unavailable = await service._detect("phone-a", b"jpeg")
+    _second, second_unavailable = await service._detect("phone-b", b"jpeg")
+    assert first_unavailable is True
+    assert second_unavailable is False
+
+
+def test_visionservice_does_not_import_concrete_detector_adapters():
+    """Guard the dependency direction: the core must not know its adapters by name.
+
+    A re-introduced isinstance check here is how the OCP/DIP violation grows back.
+    """
+    import ast
+    import inspect
+
+    import akshrava_backend.service as service_mod
+
+    tree = ast.parse(inspect.getsource(service_mod))
+
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            imported.update(alias.name for alias in node.names)
+
+    for adapter in ("RemoteWorkerDetector", "RegistryRemoteWorkerDetector", "CloudFallbackDetector"):
+        assert adapter not in imported, (
+            "service.py imports the concrete adapter %s; the core must depend on the port only"
+            % adapter
+        )
+
+    # Parse rather than grep so the assertion cannot be satisfied or broken by prose in a comment
+    # or docstring -- only by real code.
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+    for call in calls:
+        if isinstance(call.func, ast.Name) and call.func.id == "isinstance":
+            source_of_args = ast.dump(call)
+            for adapter in ("RemoteWorkerDetector", "RegistryRemoteWorkerDetector"):
+                assert adapter not in source_of_args, (
+                    "service.py dispatches on concrete adapter %s" % adapter
+                )
+        # No probing the detector for optional methods to decide how to call it.
+        if isinstance(call.func, ast.Name) and call.func.id == "getattr" and call.args:
+            target = call.args[0]
+            is_detector = (
+                isinstance(target, ast.Attribute)
+                and target.attr == "detector"
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "self"
+            )
+            if is_detector and len(call.args) > 1 and isinstance(call.args[1], ast.Constant):
+                assert not str(call.args[1].value).startswith("detect"), (
+                    "service.py probes self.detector for %r instead of using the port"
+                    % call.args[1].value
+                )

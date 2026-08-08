@@ -66,6 +66,140 @@ def test_iac_database_structure():
     assert 'resource "google_sql_user" "db_user"' in tf_content, "Database user is missing"
     assert 'resource "random_password" "db_password"' in tf_content, "Database password generation is missing"
 
+
+def get_tf_code():
+    """Terraform content with `#` comments stripped.
+
+    Needed for "this expression must NOT appear" assertions: a comment explaining why an old
+    expression was removed otherwise reads as the expression still being present.
+    """
+    lines = []
+    for line in get_all_tf_content().splitlines():
+        stripped = line.split("#", 1)[0]
+        if stripped.strip():
+            lines.append(stripped)
+    return "\n".join(lines)
+
+
+def variable_block(name):
+    """Return the body of one top-level `variable "<name>"` declaration.
+
+    Splits on a newline-anchored `variable "` so prose inside a comment (e.g. the phrase
+    "variable validation blocks") cannot truncate the block early.
+    """
+    content = get_all_tf_content()
+    match = re.search(
+        r'^variable\s+"%s"\s*\{(.*?)^\}' % re.escape(name),
+        content,
+        re.DOTALL | re.MULTILINE,
+    )
+    assert match, "variable %s is missing" % name
+    return match.group(1)
+
+
+def test_cloud_sql_declares_availability_explicitly_and_defaults_to_regional():
+    """The provider default is ZONAL, so omitting availability_type buys a single-zone database.
+
+    A zone event then takes Postgres down, /readyz fails on store.ping(), every API instance is
+    removed from service, and assistance ends for every connected phone at once. The value must
+    be stated in code (not inherited) and must default to REGIONAL.
+    """
+    tf_content = get_all_tf_content()
+    assert "availability_type = var.database_availability_type" in tf_content, (
+        "google_sql_database_instance must set availability_type explicitly"
+    )
+    block = variable_block("database_availability_type")
+    assert re.search(r'default\s*=\s*"REGIONAL"', block), (
+        "database_availability_type must default to REGIONAL"
+    )
+
+
+def test_redis_availability_is_not_decided_by_the_transit_encryption_toggle():
+    """Availability and encryption are separate decisions and must stay separately expressible.
+
+    These were once one control (`tier = var.redis_transit_encryption ? "STANDARD_HA" : "BASIC"`),
+    so turning TLS off for a bench also removed failover from Redis -- which backs session
+    admission, frame rate limiting and worker replay protection. Nobody disabling TLS intends
+    that.
+    """
+    tf_code = get_tf_code()
+    assert re.search(r"tier\s*=\s*var\.redis_tier", tf_code), (
+        "google_redis_instance must take its tier from redis_tier"
+    )
+    assert 'var.redis_transit_encryption ? "STANDARD_HA"' not in tf_code, (
+        "Redis tier must not be derived from the transit-encryption toggle"
+    )
+    block = variable_block("redis_tier")
+    assert re.search(r'default\s*=\s*"STANDARD_HA"', block), (
+        "redis_tier must default to the failover pair, not single-node BASIC"
+    )
+
+
+def test_redis_tls_on_basic_tier_is_rejected_at_plan_time():
+    """BASIC cannot terminate TLS; fail with an actionable message rather than an API error."""
+    tf_code = get_tf_code()
+    assert "precondition" in tf_code, "Redis TLS/tier invariant must be enforced by a precondition"
+    assert 'var.redis_transit_encryption && var.redis_tier == "BASIC"' in tf_code, (
+        "the TLS-requires-STANDARD_HA invariant is missing"
+    )
+
+
+def test_availability_variable_descriptions_match_their_actual_defaults():
+    """A stale docstring on an availability control is how an operator believes they have HA.
+
+    enable_worker_ha shipped with `default = true` while its own description said "Default false",
+    which is exactly the kind of drift that makes a reviewer (or an on-call engineer) reason about
+    the wrong topology. Assert the two agree.
+    """
+    for name in ("enable_worker_ha", "redis_tier", "database_availability_type"):
+        block = variable_block(name)
+        default = re.search(r"default\s*=\s*(\S+)", block)
+        assert default, "variable %s has no default" % name
+        value = default.group(1).strip('"')
+        description = re.search(r'description\s*=\s*"(.*?)"\s*$', block, re.DOTALL | re.MULTILINE)
+        assert description, "variable %s has no description" % name
+        text = description.group(1).lower()
+        contradiction = "default %s" % ("true" if value == "false" else "false")
+        assert contradiction not in text, (
+            "variable %s has default=%s but its description claims '%s'"
+            % (name, value, contradiction)
+        )
+
+
+def test_worker_ha_defaults_on_because_a_single_worker_is_a_fleet_wide_spof():
+    """One worker VM silences every connected phone at once when its host has an event.
+
+    The cheaper single-VM bench posture must be the option that requires a deliberate opt-out.
+    """
+    block = variable_block("enable_worker_ha")
+    assert re.search(r"default\s*=\s*true", block), "enable_worker_ha must default to true"
+
+
+def test_api_deployment_can_configure_otlp_export_without_embedding_credentials():
+    """A configured collector must reach an image that actually includes the exporter."""
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+    with open(os.path.join(root, "backend", "Dockerfile")) as handle:
+        dockerfile = handle.read()
+    assert ".[otel]" in dockerfile, "API image must install the OTLP exporter extra"
+
+    tf_content = get_all_tf_content()
+    block = variable_block("otlp_exporter_endpoint")
+    assert re.search(r'default\s*=\s*""', block)
+    assert "OTEL_EXPORTER_OTLP_ENDPOINT" in tf_content
+
+
+def test_phone_delivery_metrics_are_exported_as_aggregate_log_metrics_with_an_alert():
+    tf_content = get_all_tf_content()
+    for name in (
+        "akshrava_results_sent",
+        "akshrava_result_acknowledgements_expected",
+        "akshrava_phone_results_acknowledged",
+        "akshrava_phone_results_acknowledged_fresh",
+        "akshrava_phone_results_acknowledged_missing",
+    ):
+        assert name in tf_content
+    assert 'resource "google_monitoring_alert_policy" "phone_result_ack_missing"' in tf_content
+
 def test_iac_storage_structure():
     tf_content = get_all_tf_content()
     assert 'resource "google_storage_bucket" "diagnostics"' in tf_content, "Storage bucket is missing"

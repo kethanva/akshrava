@@ -1,4 +1,5 @@
 import base64
+import contextlib
 import json
 import asyncio
 import time
@@ -81,6 +82,12 @@ def test_revoked_device_is_closed_before_its_next_frame(monkeypatch):
                     "jpeg_bytes": len(JPEG), "camera_calibration_id": "test-r0",
                 }
             )
+            # A readable error body precedes the close: iOS's public WebSocket API cannot
+            # represent a close code outside 1000-1015 (it collapses to a generic "invalid" value
+            # and the number is lost), so the close code alone cannot tell a client "revoked"
+            # apart from an ordinary transport drop.
+            revoked_message = websocket.receive_json()
+            assert revoked_message == {"type": "error", "code": "device_revoked", "detail": "Device revoked"}
             with pytest.raises(WebSocketDisconnect) as disconnect:
                 websocket.receive_json()
     assert disconnect.value.code == 4403
@@ -604,3 +611,144 @@ def test_malformed_frame_header_is_soft_rejected(monkeypatch):
             })
             websocket.send_bytes(JPEG)
             assert websocket.receive_json()["type"] == "result"
+
+def test_ready_frame_advertises_protocol_version_and_capabilities():
+    """The phone cannot be redeployed with the server, so compatibility must be negotiated.
+
+    Without this, a client has no way to tell which server revision it is talking to and must
+    carry permanent, unremovable compatibility shims (see ProtocolClient.LEGACY_POSE_CDEG_FLOOR).
+    Dropping these fields silently pushes every connected phone back onto the legacy path.
+    """
+    from akshrava_backend.protocol import (
+        POSE_CDEG_FULL_RANGE,
+        PROTOCOL_VERSION,
+        SERVER_CAPABILITIES,
+    )
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/session?token=dev-device-token") as websocket:
+            ready = websocket.receive_json()
+
+    assert ready["type"] == "ready"
+    assert ready["protocol_version"] == PROTOCOL_VERSION
+    assert isinstance(ready["capabilities"], list)
+    assert set(ready["capabilities"]) == set(SERVER_CAPABILITIES)
+    # This server's parser accepts the full documented pose range, so it must say so.
+    assert POSE_CDEG_FULL_RANGE in ready["capabilities"]
+
+
+def test_advertised_pose_capability_matches_what_the_parser_actually_accepts():
+    """An advertised capability the parser does not honour is worse than none at all.
+
+    A client that trusts POSE_CDEG_FULL_RANGE stops clamping and starts sending values near
+    +/-18000. If the parser still rejected those, every such frame would raise ProtocolError and
+    the session would be torn down -- reintroducing the exact unavailable/restored flap the
+    capability exists to end, but now for clients that upgraded.
+    """
+    from akshrava_backend.protocol import (
+        POSE_CDEG_FULL_RANGE,
+        SERVER_CAPABILITIES,
+        parse_frame_header,
+    )
+
+    assert POSE_CDEG_FULL_RANGE in SERVER_CAPABILITIES
+
+    for pose in (-18_000, -12_000, -9_001, 0, 9_001, 18_000):
+        header = parse_frame_header(
+            {
+                "type": "frame",
+                "id": 1,
+                "capture_mono_ms": 1,
+                "w": 1,
+                "h": 1,
+                "jpeg_bytes": 1,
+                "pitch_cdeg": pose,
+                "roll_cdeg": pose,
+            }
+        )
+        assert header.pitch_cdeg == pose
+        assert header.roll_cdeg == pose
+
+
+def test_phone_acknowledgement_is_required_for_phone_freshness_metrics():
+    """A successful WebSocket send is not handset delivery; only a matching ack counts it."""
+    from akshrava_backend.main import metrics
+
+    def delivery_counts():
+        rendered = metrics.render()
+        sent = expected = acknowledged = fresh = None
+        for line in rendered.splitlines():
+            if line.startswith("akshrava_results_sent_total "):
+                sent = int(line.rsplit(" ", 1)[1])
+            elif line.startswith("akshrava_result_acknowledgements_expected_total "):
+                expected = int(line.rsplit(" ", 1)[1])
+            elif line.startswith("akshrava_phone_results_acknowledged_total "):
+                acknowledged = int(line.rsplit(" ", 1)[1])
+            elif line.startswith("akshrava_phone_results_acknowledged_fresh_total "):
+                fresh = int(line.rsplit(" ", 1)[1])
+        return sent, expected, acknowledged, fresh
+
+    before_sent, before_expected, before_acknowledged, before_fresh = delivery_counts()
+
+    # The rule is `late_suppressed = inference_ms > alert_max_age_ms`, and the noop detector
+    # returns in ~0 ms, so a budget of 0 is not exceeded. -1 forces every result late regardless
+    # of how fast inference is, which is the condition under test.
+    with patched_alert_max_age(-1):
+        with TestClient(app) as client:
+            with client.websocket_connect("/v1/session?token=dev-device-token") as websocket:
+                assert websocket.receive_json()["type"] == "ready"
+                websocket.send_text(
+                    json.dumps(
+                        {
+                            "type": "frame",
+                            "id": 1,
+                            "capture_mono_ms": 1000,
+                            "w": 1,
+                            "h": 1,
+                            "jpeg_bytes": len(JPEG),
+                            "result_acknowledgement": True,
+                        }
+                    )
+                )
+                websocket.send_bytes(JPEG)
+                result = websocket.receive_json()
+                assert result["type"] == "result"
+                assert result["late_suppressed"] is True
+                # No acknowledgement yet: a result accepted by the server transport must not be
+                # described as received by the phone.
+                sent, expected, acknowledged, fresh = delivery_counts()
+                assert sent == before_sent + 1
+                assert expected == before_expected + 1
+                assert acknowledged == before_acknowledged
+                assert fresh == before_fresh
+                websocket.send_text(json.dumps({"type": "result_ack", "frame_id": 1, "fresh": False}))
+                # A ping orders the no-response acknowledgement before an observable pong.
+                websocket.send_text(json.dumps({"type": "ping"}))
+                # The quality hint was scheduled with the result and can arrive before the pong.
+                for _ in range(2):
+                    if websocket.receive_json() == {"type": "pong"}:
+                        break
+                else:
+                    assert False, "result acknowledgement was not processed before the ping"
+
+    after_sent, after_expected, after_acknowledged, after_fresh = delivery_counts()
+    assert after_sent == before_sent + 1
+    assert after_expected == before_expected + 1
+    assert after_acknowledged == before_acknowledged + 1
+    assert after_fresh == before_fresh
+
+
+@contextlib.contextmanager
+def patched_alert_max_age(value):
+    """Override the frozen process-wide Settings for one block, restoring on failure too."""
+    from akshrava_backend.main import settings, vision
+
+    original_setting = settings.alert_max_age_ms
+    original_vision = vision.alert_max_age_ms
+    object.__setattr__(settings, "alert_max_age_ms", value)
+    vision.alert_max_age_ms = value
+    try:
+        yield
+    finally:
+        object.__setattr__(settings, "alert_max_age_ms", original_setting)
+        vision.alert_max_age_ms = original_vision

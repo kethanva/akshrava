@@ -114,4 +114,28 @@ object FrameGate {
     }
 
     fun isGlared(current: IntArray): Boolean = isGlared(current, meanLuma(current))
+
+    /** Consecutive blurred frames before the wipe-lens prompt is worth saying (F-72). */
+    const val BLUR_FRAMES_BEFORE_ANNOUNCE = 5
+
+    /** Gap between repeats of the wipe-lens prompt. */
+    const val BLUR_ANNOUNCE_COOLDOWN_MS = 60_000L
+
+    /**
+     * Whether the wipe-lens prompt may speak now (F-72).
+     *
+     * Blur never drops a frame, so this gates speech only. The evidence bar stays at several
+     * consecutive frames because one smeared frame is ordinary on a bouncing lanyard, and a
+     * prompt for it teaches the user to ignore the prompt that matters.
+     *
+     * [lastAnnounceMs] is null when nothing has been said yet this session, rather than 0. These
+     * timestamps are `SystemClock.elapsedRealtime()` — time since boot — so a 0 sentinel reads as
+     * "announced at boot" and swallows the first prompt entirely on a phone that started
+     * assistance within the cooldown of powering on.
+     */
+    fun shouldAnnounceBlur(nowMs: Long, consecutiveBlurredFrames: Int, lastAnnounceMs: Long?): Boolean {
+        if (consecutiveBlurredFrames < BLUR_FRAMES_BEFORE_ANNOUNCE) return false
+        val last = lastAnnounceMs ?: return true
+        return nowMs - last >= BLUR_ANNOUNCE_COOLDOWN_MS
+    }
 }

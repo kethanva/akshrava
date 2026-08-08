@@ -27,6 +27,10 @@ _POOL_RECYCLE_SECONDS = int(os.getenv("DB_POOL_RECYCLE_SECONDS", "1800"))
 # Cap the in-memory revocation cache so a long-lived process with token rotation (a fresh
 # device_id per re-provisioning) cannot grow it without bound. LRU-evict the oldest entries.
 _REVOCATION_CACHE_MAX = int(os.getenv("REVOCATION_CACHE_MAX", "10000"))
+# Arbitrary but stable 32-bit key identifying the alert-retention purge across API instances.
+# Postgres advisory locks share one global namespace, so this must not collide with any other
+# advisory lock taken against the same database.
+_RETENTION_ADVISORY_LOCK_KEY = 0x616B7368  # "aksh"
 
 
 class Base(DeclarativeBase):
@@ -101,6 +105,7 @@ class Store:
         self.bootstrap_schema = bootstrap_schema
         self.redis_url = redis_url
         self._redis_client = None
+        self._is_sqlite = url.startswith("sqlite")
         # OrderedDict for O(1) LRU eviction: device_id -> (revoked_bool, expiry_timestamp).
         self._revocation_cache = OrderedDict()
         self._cache_ttl = 15.0
@@ -336,6 +341,76 @@ class Store:
                 result = await session.execute(delete(AlertEvent).where(AlertEvent.id.in_(ids)))
                 await session.commit()
                 deleted += result.rowcount or 0
+
+    async def purge_alert_events_if_leader(self, retention_days: int) -> int | None:
+        """Purge retention only on the one instance that wins a cross-instance advisory lock.
+
+        Every API instance runs its own retention loop, so on a fleet of N Cloud Run instances the
+        same expired rows were scanned and deleted N times concurrently -- wasted DB work and
+        needless lock contention on `alert_events` during a window when phones are streaming.
+
+        A Postgres session-level advisory lock makes exactly one instance do the work; the others
+        return None immediately and wait for their next interval. Duplicate purging is wasteful
+        rather than incorrect (the delete is idempotent), so a lock that cannot be taken is never
+        an error -- it just means somebody else is already doing it.
+
+        The lock is deliberately session-level, not transaction-level: a transaction-scoped lock
+        would have to stay open for the whole batched delete, leaving a long-lived idle
+        transaction that blocks vacuum on exactly the table being purged. Because a session lock
+        outlives the transaction, it MUST be released explicitly -- the connection returns to the
+        pool rather than closing, and a leaked lock would silently disable retention for the life
+        of the process.
+
+        The advisory-lock connection is intentionally separate from the short-lived sessions
+        used by ``purge_alert_events_older_than``. This holds two pool slots while the leader is
+        purging: one preserves the session-scoped lock; the other commits each delete batch. Do
+        not fold the lock into the batch session unless the lock lifetime is redesigned too.
+        """
+        if self._is_sqlite:
+            # No advisory-lock support and no multi-instance deployment to coordinate.
+            return await self.purge_alert_events_older_than(retention_days)
+        connection = await self.engine.connect()
+        invalidate_connection = False
+        try:
+            # AUTOCOMMIT: the lock is session-scoped, so no transaction needs to stay open.
+            # Bind the result to a separate name rather than rebinding `connection`: SQLAlchemy
+            # returns self today, but if that ever changed, the finally below would close the
+            # wrong object and return a pooled connection still holding the advisory lock --
+            # which disables retention for the life of the process. `connection` stays the thing
+            # that gets closed.
+            session = await connection.execution_options(isolation_level="AUTOCOMMIT")
+            acquired = (
+                await session.execute(
+                    text("SELECT pg_try_advisory_lock(:key)"),
+                    {"key": _RETENTION_ADVISORY_LOCK_KEY},
+                )
+            ).scalar()
+            if not acquired:
+                logger.debug("alert retention skipped; another instance holds the lock")
+                return None
+            try:
+                return await self.purge_alert_events_older_than(retention_days)
+            finally:
+                try:
+                    await session.execute(
+                        text("SELECT pg_advisory_unlock(:key)"),
+                        {"key": _RETENTION_ADVISORY_LOCK_KEY},
+                    )
+                except Exception:
+                    # A normal AsyncConnection.close() returns the physical PostgreSQL session to
+                    # SQLAlchemy's pool. Session advisory locks survive that return, so merely
+                    # logging here could strand the leader lock on a pooled connection. Invalidate
+                    # it instead: the pool discards the DBAPI connection and PostgreSQL releases
+                    # all session locks. Preserve the purge outcome either way.
+                    logger.warning("failed to release alert retention advisory lock", exc_info=True)
+                    invalidate_connection = True
+        finally:
+            if invalidate_connection:
+                try:
+                    await connection.invalidate()
+                except Exception:
+                    logger.warning("failed to invalidate retention advisory-lock connection", exc_info=True)
+            await connection.close()
 
     async def record_alert(self, device_id, frame_id, hazard):
         async with self.sessions() as session:

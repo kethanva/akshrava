@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "akshrava-backend"
-version = "0.2.13"
+version = "0.2.14"
 description = "Safety-bounded WebSocket backend for the Akshrava assistive vision pilot"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,6 +30,10 @@ yolo = ["ultralytics>=8.3,<9"]
 aws = ["boto3>=1.35,<2"]
 gcp = ["google-cloud-vision>=3.8,<4", "google-cloud-secret-manager>=2.16,<3", "google-cloud-storage>=2.10,<3"]
 azure = ["azure-ai-vision-imageanalysis>=1.0,<2"]
+# Span export. Without this the SDK builds spans and drops them: tracing code runs, costs
+# request-path CPU, and produces nothing an operator can read. Install in any deployment where
+# OTEL_EXPORTER_OTLP_ENDPOINT is set.
+otel = ["opentelemetry-exporter-otlp-proto-http>=1.20,<2"]
 dev = ["pytest>=9.0.3,<10", "pytest-asyncio>=1.3,<2", "pytest-cov>=5.0,<7", "ruff>=0.5,<1"]
 
 [tool.pytest.ini_options]

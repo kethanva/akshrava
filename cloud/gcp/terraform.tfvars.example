@@ -15,8 +15,20 @@ api_invoker_members = ["serviceAccount:edge@PROJECT.iam.gserviceaccount.com"]
 # Temporary public pilot edge only (discouraged):
 # api_allow_unauthenticated = true
 
-# Memorystore in-transit TLS (upgrades to STANDARD_HA + rediss://):
+# Memorystore in-transit TLS (rediss:// URLs). Requires redis_tier = "STANDARD_HA".
 # redis_transit_encryption = true
+
+# --- Availability controls (defaults are the SAFE values; opt OUT deliberately) ---
+# Redis backs session admission, frame rate limiting and worker replay protection: losing it
+# ends assistance for every connected phone, so the default is a failover pair.
+# redis_tier = "STANDARD_HA"   # "BASIC" is single-node, development-only
+#
+# Cloud SQL: REGIONAL keeps a synchronous standby in a second zone. ZONAL makes a zone event
+# fail /readyz and remove every API instance from service.
+# database_availability_type = "REGIONAL"   # "ZONAL" is development-only
+#
+# Worker: a single VM is a fleet-wide SPOF for the whole vision path.
+# enable_worker_ha = true
 
 # External PKI is the default (manage_pki_in_terraform=false).
 # Place PEMs under cloud/gcp/pki/ (gitignored). tls.tf loads them via file("${path.module}/pki/...").

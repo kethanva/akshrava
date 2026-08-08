@@ -7,6 +7,41 @@ class ProtocolError(ValueError):
     pass
 
 
+# Wire protocol version, independent of the release version of any artifact.
+#
+# The Android versionName / backend pyproject version are deliberately kept in lockstep for
+# artifact traceability, but they are NOT a compatibility statement: Cloud Run redeploys in
+# minutes while a donated phone may never be updated again, so the two ends are permanently
+# free to be different builds. Compatibility therefore has to be negotiated, not assumed from a
+# build number.
+#
+# Bump this only for a genuinely breaking framing change. Additive behaviour gets a capability
+# below instead, so an old client keeps working.
+PROTOCOL_VERSION = 1
+
+# Behaviours a client may not assume are present, advertised in the `ready` frame.
+#
+# This exists because of a concrete, still-live problem: an older deployed revision treated a
+# pose value below -9000 centidegrees as a fatal ProtocolError and closed the socket, which the
+# user heard as an "assistance unavailable / restored" loop. The phone works around it with a
+# permanent LEGACY_POSE_CDEG_FLOOR clamp keyed on nothing but hope -- it has no way to know which
+# revision it is talking to, so the workaround can never be removed safely.
+#
+# Advertising the fixed behaviour makes that removable: a client that sees the capability sends
+# the full range, a client that does not keeps clamping, and the shim can be deleted for real
+# once no un-upgraded server remains. Absence of the field means "old server", never "broken".
+POSE_CDEG_FULL_RANGE = "pose_cdeg_full_range"
+# A phone sends this only after a result, so absence must remain harmless for an older server.
+# It establishes handset receipt/freshness telemetry; it never alters awareness policy or speech.
+RESULT_ACKNOWLEDGEMENT = "result_acknowledgement"
+
+SERVER_CAPABILITIES: tuple[str, ...] = (
+    # parse_frame_header below accepts the documented +/-18000 range.
+    POSE_CDEG_FULL_RANGE,
+    RESULT_ACKNOWLEDGEMENT,
+)
+
+
 # Server-rendered speech (spoken_preview, look_summary) must match the phone's own provisioned
 # language (plan §6.2 — language is a per-device setting), not a fleet-wide server default.
 # Allowlisted rather than free text: an unrecognised value silently falls back to English in

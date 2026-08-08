@@ -27,3 +27,20 @@ def test_json_log_includes_optional_correlation_fields_when_present():
     assert out["trace_id"] == "abc123"
     assert out["status"] == 504
     assert out["severity"] == "WARNING"
+
+
+def test_json_log_includes_only_aggregate_phone_delivery_fields():
+    record = logging.LogRecord("akshrava", logging.INFO, __file__, 1, "delivery", None, None)
+    record.event = "phone_delivery_window"
+    record.results_sent = 3
+    record.result_acknowledgements_expected = 2
+    record.phone_results_acknowledged = 2
+    record.phone_results_acknowledged_fresh = 1
+    record.phone_results_acknowledged_missing = 1
+    out = _format(record)
+    assert out["event"] == "phone_delivery_window"
+    assert out["results_sent"] == 3
+    assert out["result_acknowledgements_expected"] == 2
+    assert out["phone_results_acknowledged"] == 2
+    assert out["phone_results_acknowledged_fresh"] == 1
+    assert out["phone_results_acknowledged_missing"] == 1

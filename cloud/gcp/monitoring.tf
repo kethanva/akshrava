@@ -74,7 +74,106 @@ resource "google_monitoring_alert_policy" "worker_saturated_slo" {
   }
 }
 
+# The API emits one aggregate, identifier-free delivery window per minute rather than a log entry
+# for every frame. These DELTA metrics establish whether successful server-side WebSocket writes
+# are being acknowledged by phones and whether those phones still accept results within their own
+# freshness gate. Cloud Run does not scrape the API's private /metrics endpoint automatically.
+resource "google_logging_metric" "api_results_sent" {
+  name            = "akshrava_results_sent"
+  description     = "Aggregate results accepted by the API WebSocket transport. This is not handset delivery."
+  filter          = "resource.type=\"cloud_run_revision\" AND jsonPayload.event=\"phone_delivery_window\""
+  value_extractor = "EXTRACT(jsonPayload.results_sent)"
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+    unit        = "1"
+  }
+}
+
+resource "google_logging_metric" "api_phone_results_acknowledged" {
+  name            = "akshrava_phone_results_acknowledged"
+  description     = "Aggregate results explicitly processed by authenticated phones."
+  filter          = "resource.type=\"cloud_run_revision\" AND jsonPayload.event=\"phone_delivery_window\""
+  value_extractor = "EXTRACT(jsonPayload.phone_results_acknowledged)"
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+    unit        = "1"
+  }
+}
+
+resource "google_logging_metric" "api_result_acknowledgements_expected" {
+  name            = "akshrava_result_acknowledgements_expected"
+  description     = "Aggregate sent results for phones that advertise result acknowledgement support."
+  filter          = "resource.type=\"cloud_run_revision\" AND jsonPayload.event=\"phone_delivery_window\""
+  value_extractor = "EXTRACT(jsonPayload.result_acknowledgements_expected)"
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+    unit        = "1"
+  }
+}
+
+resource "google_logging_metric" "api_phone_results_acknowledged_fresh" {
+  name            = "akshrava_phone_results_acknowledged_fresh"
+  description     = "Aggregate phone-acknowledged results inside the phone freshness gate."
+  filter          = "resource.type=\"cloud_run_revision\" AND jsonPayload.event=\"phone_delivery_window\""
+  value_extractor = "EXTRACT(jsonPayload.phone_results_acknowledged_fresh)"
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+    unit        = "1"
+  }
+}
+
+resource "google_logging_metric" "api_phone_results_acknowledged_missing" {
+  name            = "akshrava_phone_results_acknowledged_missing"
+  description     = "Sent results whose bounded acknowledgement slot was evicted with no acknowledgement ever received. Exact count, not a window subtraction."
+  filter          = "resource.type=\"cloud_run_revision\" AND jsonPayload.event=\"phone_delivery_window\""
+  value_extractor = "EXTRACT(jsonPayload.phone_results_acknowledged_missing)"
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+    unit        = "1"
+  }
+}
+
+resource "google_monitoring_alert_policy" "phone_result_ack_missing" {
+  display_name = "akshrava-phone-result-acknowledgements-missing"
+  combiner     = "OR"
+
+  # The underlying metric is now an EXACT count of results whose acknowledgement slot was evicted
+  # without ever being acknowledged (see Metrics.phone_result_unacknowledged). It was previously
+  # derived as `expected - acknowledged` per 60s export window, which counted every frame merely
+  # in flight across a window boundary as a failure -- permanently nonzero at any real fleet size.
+  # Because the signal is now exact, a plain threshold is both correct and, unlike an MQL query,
+  # fully validated by `terraform plan` before it can reach production.
+  conditions {
+    display_name = "Phone acknowledgements missing"
+    condition_threshold {
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.api_phone_results_acknowledged_missing.name}\" AND resource.type=\"cloud_run_revision\""
+      duration        = "900s"
+      comparison      = "COMPARISON_GT"
+      threshold_value = 10
+      aggregations {
+        alignment_period     = "300s"
+        per_series_aligner   = "ALIGN_SUM"
+        cross_series_reducer = "REDUCE_SUM"
+      }
+    }
+  }
+
+  documentation {
+    content   = "Results were sent to phones that advertised acknowledgement support and were never acknowledged, sustained over 15 minutes. Check API revisions, WebSocket transport, and handset connectivity. This signal reports receipt/freshness processing, not TTS playback."
+    mime_type = "text/markdown"
+  }
+}
+
 # DB pool / custom-service SLO alerts require metrics that only appear after the new API revision
 # scrapes Prometheus and a GCLB/Cloud Run monitored service type. Keep them out of the default
 # apply path so pilot deploys are not blocked by missing metric descriptors.
-

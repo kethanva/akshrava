@@ -256,6 +256,13 @@ resource "google_cloud_run_v2_service" "api" {
         name  = "AKSHRAVA_ENV"
         value = var.environment
       }
+      dynamic "env" {
+        for_each = var.otlp_exporter_endpoint != "" ? [var.otlp_exporter_endpoint] : []
+        content {
+          name  = "OTEL_EXPORTER_OTLP_ENDPOINT"
+          value = env.value
+        }
+      }
       env {
         name  = "DETECTOR"
         value = var.detector

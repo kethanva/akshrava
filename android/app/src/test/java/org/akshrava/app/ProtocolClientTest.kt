@@ -1,13 +1,85 @@
 package org.akshrava.app
 
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.mockito.Mockito.mock
 
 class ProtocolClientTest {
+
+    // ---- protocol capability negotiation (A-7) ----
+    //
+    // The phone cannot be redeployed with the server, so compatibility has to be negotiated per
+    // connection rather than inferred from a build number. Everything here fails CLOSED: an
+    // unknown server gets the conservative legacy behaviour.
+
+    @Test
+    fun `capabilities are parsed from the ready payload`() {
+        val payload = JSONObject(
+            """{"type":"ready","protocol_version":1,"capabilities":["pose_cdeg_full_range","result_acknowledgement","other"]}"""
+        )
+        val parsed = ProtocolClient.parseCapabilities(payload)
+        assertTrue(parsed.contains(ProtocolClient.CAPABILITY_POSE_CDEG_FULL_RANGE))
+        assertTrue(parsed.contains(ProtocolClient.CAPABILITY_RESULT_ACKNOWLEDGEMENT))
+        assertTrue(parsed.contains("other"))
+    }
+
+    @Test
+    fun `a ready payload without capabilities negotiates nothing`() {
+        // This is the old-server case and must stay the safe default forever.
+        val payload = JSONObject("""{"type":"ready","vision_enabled":true}""")
+        assertTrue(ProtocolClient.parseCapabilities(payload).isEmpty())
+    }
+
+    @Test
+    fun `a malformed capabilities field never fails the connection`() {
+        // A capability list is an optimisation hint. Refusing to connect over one would take
+        // assistance away from a user for a cosmetic reason.
+        for (raw in listOf(
+            """{"capabilities":"not-an-array"}""",
+            """{"capabilities":[]}""",
+            """{"capabilities":[""," "]}""",
+            """{"capabilities":null}"""
+        )) {
+            assertTrue(
+                "malformed capabilities $raw must degrade to empty, not throw",
+                ProtocolClient.parseCapabilities(JSONObject(raw)).isEmpty()
+            )
+        }
+    }
+
+    @Test
+    fun `pose is clamped to the legacy floor when the server has not advertised full range`() {
+        // Below the old floor the legacy server closes the socket, which the user hears as
+        // assistance dying and coming back. Omit the field instead.
+        assertNull(ProtocolClient.wirePoseCdeg(-12_000, serverAcceptsFullPoseRange = false))
+        assertEquals(-9_000, ProtocolClient.wirePoseCdeg(-9_000, serverAcceptsFullPoseRange = false))
+        assertEquals(4_500, ProtocolClient.wirePoseCdeg(4_500, serverAcceptsFullPoseRange = false))
+    }
+
+    @Test
+    fun `pose uses the full documented range once the server advertises support`() {
+        assertEquals(-12_000, ProtocolClient.wirePoseCdeg(-12_000, serverAcceptsFullPoseRange = true))
+        // Still clamped to the documented wire bounds, capability or not.
+        assertEquals(
+            ProtocolClient.POSE_CDEG_MIN,
+            ProtocolClient.wirePoseCdeg(-99_000, serverAcceptsFullPoseRange = true)
+        )
+        assertEquals(
+            ProtocolClient.POSE_CDEG_MAX,
+            ProtocolClient.wirePoseCdeg(99_000, serverAcceptsFullPoseRange = true)
+        )
+    }
+
+    @Test
+    fun `wirePoseCdeg defaults to legacy behaviour when the caller does not negotiate`() {
+        // Fail closed: an un-negotiated caller must not be the one that reintroduces the flap.
+        assertNull(ProtocolClient.wirePoseCdeg(-12_000))
+    }
     @Test
     fun revokedAndInvalidTokensDoNotRetryAsNetworkDrops() {
         assertTrue(ProtocolClient.isPermanentAccessClose(4401))

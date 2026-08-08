@@ -14,9 +14,12 @@ COPY migrations ./migrations
 COPY alembic.ini ./
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
+# The API always includes the OTLP exporter. Export remains disabled until Terraform (or an
+# operator) supplies OTEL_EXPORTER_OTLP_ENDPOINT, but a configured endpoint must never yield a
+# production image that can only warn that its exporter is missing.
 RUN pip install --upgrade "pip>=26.1.2" "setuptools>=83" && \
     pip install "gunicorn>=23,<24" && \
-    if [ "$INSTALL_YOLO" = "true" ]; then pip install '.[yolo]'; else pip install .; fi && \
+    if [ "$INSTALL_YOLO" = "true" ]; then pip install '.[yolo,otel]'; else pip install '.[otel]'; fi && \
     case "$INSTALL_CLOUD_PROVIDER" in \
       none) ;; \
       aws) pip install '.[aws]' ;; \

@@ -88,7 +88,41 @@ variable "api_invoker_members" {
 variable "redis_transit_encryption" {
   type        = bool
   default     = false
-  description = "When true, use Memorystore STANDARD_HA with SERVER_AUTHENTICATION and rediss:// URLs. BASIC AUTH remains redis://."
+  description = "When true, use SERVER_AUTHENTICATION transit encryption and rediss:// URLs. Requires redis_tier=STANDARD_HA (BASIC cannot terminate TLS)."
+}
+
+# Availability and encryption are separate decisions and must be separately expressible.
+#
+# These were previously one control: `tier = var.redis_transit_encryption ? "STANDARD_HA" : "BASIC"`.
+# That made a *security* toggle silently decide an *availability* property, so
+# `redis_transit_encryption = false` also meant "single-node Redis with no failover" -- and Redis
+# is a hard dependency of session admission, frame rate limiting, and worker replay protection.
+# Losing it takes assistance away from every connected phone at once. Nobody turning off TLS for a
+# local bench intends to also remove failover from the fleet's most critical dependency.
+variable "redis_tier" {
+  type        = string
+  default     = "STANDARD_HA"
+  description = "Memorystore tier. STANDARD_HA provides a failover replica and is required for transit encryption; BASIC is single-node with no failover and is only appropriate for a throwaway development project."
+
+  validation {
+    condition     = contains(["BASIC", "STANDARD_HA"], var.redis_tier)
+    error_message = "redis_tier must be BASIC or STANDARD_HA."
+  }
+
+  # The cross-variable invariant (TLS requires STANDARD_HA) is enforced by a lifecycle
+  # precondition on google_redis_instance.cache in database.tf: variable validation blocks
+  # cannot reference another variable on the pinned Terraform 1.5.x used by CI.
+}
+
+variable "database_availability_type" {
+  type        = string
+  default     = "REGIONAL"
+  description = "Cloud SQL availability. REGIONAL keeps a synchronous standby in a second zone with automatic failover; ZONAL is single-zone and makes the database a fleet-wide SPOF (readiness fails, all sessions end). Only development should use ZONAL."
+
+  validation {
+    condition     = contains(["ZONAL", "REGIONAL"], var.database_availability_type)
+    error_message = "database_availability_type must be ZONAL or REGIONAL."
+  }
 }
 
 variable "manage_pki_in_terraform" {
@@ -165,9 +199,15 @@ check "cloud_armor_requires_domain" {
 # Checks on variables removed because local file fallback natively validates existence at plan time.
 
 variable "enable_worker_ha" {
-  type        = bool
+  type = bool
+  # Defaults ON: a single worker VM is a fleet-wide single point of failure for the whole vision
+  # path -- one host event silences every connected phone at once. An operator who deliberately
+  # wants the cheaper single-VM bench posture must opt OUT in tfvars, so the unsafe configuration
+  # is the one that requires a decision. (This description previously claimed "default false"
+  # while the default was already true; a stale docstring on an availability control is how an
+  # operator ends up believing they have HA when they do not.)
   default     = true
-  description = "When true, replace the single-VM GPU/CPU worker with a regional Managed Instance Group behind an internal L4 LB with auto-healing (see worker_ha.tf). Default false preserves the documented single-VM pilot posture; review a terraform plan before enabling against a live project."
+  description = "When true, replace the single-VM GPU/CPU worker with a regional Managed Instance Group behind an internal L4 LB with auto-healing (see worker_ha.tf). Default true because a single worker VM is a fleet-wide SPOF; set false only for a deliberately single-VM bench/pilot posture, and review a terraform plan before changing it against a live project."
 }
 
 variable "worker_ha_target_size" {
@@ -191,6 +231,12 @@ variable "enable_worker_saturation_log_metric" {
   type        = bool
   default     = false
   description = "Create a Cloud Monitoring alert on elevated worker_saturated soft-shed rates (requires a log-based metric named akshrava_worker_saturated)."
+}
+
+variable "otlp_exporter_endpoint" {
+  type        = string
+  default     = ""
+  description = "Optional OTLP/HTTP trace collector endpoint for the API, for example an in-VPC collector URL ending in /v1/traces. Leave empty to retain traceparent-only correlation. Do not place credentials in this value; use collector workload identity or a separately managed OTEL header secret."
 }
 
 variable "cloud_armor_domain" {
