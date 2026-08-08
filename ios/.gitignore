@@ -1,0 +1,10 @@
+# Generated / local — never commit
+.build/
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+AkshravaApp/provision.json
+*.ipa
+*.xcarchive
+*.dSYM.zip

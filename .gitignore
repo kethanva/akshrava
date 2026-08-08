@@ -1,0 +1,93 @@
+# Operating-system and editor metadata
+.DS_Store
+.android-sdk-matrix/
+.android-avd-matrix/
+.mcp.json
+**/settings.local.json
+.claude/
+**/.claude/
+CLAUDE.md
+**/CLAUDE.md
+.claudeignore
+# Agent scratch metadata (BRIEFING/progress/handoff); reserved for agent runs, never product docs
+.agents/
+**/.claudeignore
+.cursor/
+**/.cursor/
+.cursorrules
+**/.cursorrules
+.antigravity/
+**/.antigravity/
+.gemini/
+**/.gemini/
+AGENTS.md
+**/AGENTS.md
+akshrava-debug.apk
+outputs/
+
+# Local configuration and secrets (commit only the *.example templates)
+.env
+**/.env
+android/local.properties
+android/app/src/debug/assets/provision.json
+cloud/local/.env
+cloud/gcp/terraform.tfvars
+cloud/gcp/pki/
+ios/AkshravaApp/provision.json
+
+# Python, Gradle, test, and generated build output
+**/.gradle/
+**/.kotlin/
+**/build/
+# SwiftPM writes .build/ (dot-prefixed), which **/build/ above does NOT match. Without this the
+# 80+ MB module cache under ios/Akshrava/.build lands in the first commit that adds ios/.
+**/.build/
+# Xcode: the project is generated from ios/AkshravaApp/project.yml by xcodegen, never committed.
+ios/AkshravaApp.xcodeproj/
+ios/*.xcodeproj/
+**/*.xcworkspace/
+**/xcuserdata/
+**/DerivedData/
+ios/build/
+*.ipa
+*.xcarchive
+*.dSYM.zip
+**/dist/
+**/.venv/
+**/.ruff_cache/
+**/.pytest_cache/
+**/*.egg-info/
+**/__pycache__/
+**/*.py[cod]
+**/.coverage
+**/coverage.json
+**/coverage.xml
+**/htmlcov/
+akshrava-debug.apk
+*.apk
+
+# Capture / soak recordings (combined_720p.mp4 alone is ~92 MB)
+*.mp4
+*.mov
+
+# Local application state and downloaded model weights
+*.db
+*.db-shm
+*.db-wal
+backend/yolo*.pt
+
+# Terraform local state and provider cache
+cloud/gcp/.terraform/
+cloud/gcp/*.tfstate
+cloud/gcp/*.tfstate.*
+
+# Generated analysis output and local recovery artefacts
+graphify-out/
+**/graphify-out/
+BACKUP/
+detection_log.txt
+*.log
+**/*.log
+*.ndjson
+**/*.ndjson
+recent_agent.ndjson
