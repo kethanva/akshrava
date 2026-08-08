@@ -19,7 +19,7 @@ targets:
           - provision.json
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: org.akshrava.app
-      INFOPLIST_FILE: Info.plist
+      INFOPLIST_FILE: AkshravaApp/Info.plist
       TARGETED_DEVICE_FAMILY: "1"
       CURRENT_PROJECT_VERSION: 13
       MARKETING_VERSION: "0.2.13"
