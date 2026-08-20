@@ -55,6 +55,11 @@ public class CaptureController: NSObject, AVCaptureVideoDataOutputSampleBufferDe
     // (Timer scheduling requires it) and is deliberately not covered by this lock.
     private let stateLock = NSLock()
     private var _isRunning = false
+    private var _desiredRunning = false
+    // Read/written only on sessionQueue. AVCaptureSession retains its inputs/outputs across
+    // stopRunning(); adding them again on every Start makes canAddInput fail on the second
+    // session, so configuration is a one-time operation for this controller instance.
+    private var isConfigured = false
     private var _lastFrameTime: Date = Date()
     private var _stallRecoveries = 0
     private var stallCheckTimer: Timer?
@@ -62,6 +67,11 @@ public class CaptureController: NSObject, AVCaptureVideoDataOutputSampleBufferDe
     private var isRunning: Bool {
         get { stateLock.lock(); defer { stateLock.unlock() }; return _isRunning }
         set { stateLock.lock(); _isRunning = newValue; stateLock.unlock() }
+    }
+
+    private var desiredRunning: Bool {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _desiredRunning }
+        set { stateLock.lock(); _desiredRunning = newValue; stateLock.unlock() }
     }
 
     public override init() {
@@ -96,17 +106,20 @@ public class CaptureController: NSObject, AVCaptureVideoDataOutputSampleBufferDe
     @objc private func sessionInterruptionEnded(_ note: Notification) {
         AgentDebugLog.log(message: "capture_session_interruption_ended")
         sessionQueue.async { [weak self] in
-            guard let self = self, self.isRunning, !self.captureSession.isRunning else { return }
-            self.captureSession.startRunning()
-        }
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.delegate?.captureControllerDidResumeFromInterruption(self)
+            guard let self = self, self.desiredRunning, self.isRunning else { return }
+            if !self.captureSession.isRunning {
+                self.captureSession.startRunning()
+            }
+            guard self.desiredRunning, self.captureSession.isRunning else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.delegate?.captureControllerDidResumeFromInterruption(self)
+            }
         }
     }
 
     @objc private func sessionRuntimeError(_ note: Notification) {
-        AgentDebugLog.log(message: "capture_session_runtime_error")
+        AgentDebugLog.error(event: "capture_session_runtime_error")
         DispatchQueue.main.async { [weak self] in
             self?.checkForStall(force: true)
         }
@@ -116,12 +129,14 @@ public class CaptureController: NSObject, AVCaptureVideoDataOutputSampleBufferDe
     /// restricted camera must fail closed and tell the delegate, never run an input-less session
     /// that looks connected but will never deliver a frame.
     public func startCapture() {
+        desiredRunning = true
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
             beginSession()
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
                 guard let self = self else { return }
+                guard self.desiredRunning else { return }
                 if granted {
                     self.beginSession()
                 } else {
@@ -136,10 +151,14 @@ public class CaptureController: NSObject, AVCaptureVideoDataOutputSampleBufferDe
     }
 
     public func stopCapture() {
+        // Publish intent synchronously before the queued stop. A permission callback or queued
+        // beginSession that arrives after Stop must see this and decline to start the camera.
+        desiredRunning = false
         sessionQueue.async { [weak self] in
             guard let self = self else { return }
-            if !self.isRunning { return }
-            self.captureSession.stopRunning()
+            if self.captureSession.isRunning {
+                self.captureSession.stopRunning()
+            }
             self.isRunning = false
             DispatchQueue.main.async {
                 self.stallCheckTimer?.invalidate()
@@ -151,11 +170,12 @@ public class CaptureController: NSObject, AVCaptureVideoDataOutputSampleBufferDe
     private func beginSession() {
         sessionQueue.async { [weak self] in
             guard let self = self else { return }
-            if self.isRunning { return }
-            guard self.setupCamera() else {
+            guard self.desiredRunning, !self.isRunning else { return }
+            guard self.isConfigured || self.setupCamera() else {
                 self.failClosed(reason: "camera_unavailable")
                 return
             }
+            guard self.desiredRunning else { return }
             self.captureSession.startRunning()
             // Baseline the stall clock at the moment frames become expected, not on the first
             // frame: a configuration that is accepted and then never delivers is exactly the
@@ -176,7 +196,11 @@ public class CaptureController: NSObject, AVCaptureVideoDataOutputSampleBufferDe
     /// Apple does not specify) and from sessionQueue, while the delegate ultimately drives UIKit
     /// (ScreenKeepAlive) and speech — neither is safe to touch off the main thread.
     private func failClosed(reason: String) {
-        AgentDebugLog.log(message: "capture_unavailable reason=\(reason)")
+        AgentDebugLog.error(event: "capture_unavailable", detail: reason)
+        stateLock.lock()
+        _desiredRunning = false
+        _isRunning = false
+        stateLock.unlock()
         let error = NSError(
             domain: "org.akshrava.camera",
             code: 403,
@@ -194,6 +218,11 @@ public class CaptureController: NSObject, AVCaptureVideoDataOutputSampleBufferDe
     private func setupCamera() -> Bool {
         captureSession.beginConfiguration()
         captureSession.sessionPreset = .vga640x480
+
+        // Recover cleanly from any earlier partial configuration (for example input succeeded
+        // but output attachment failed). This runs only while sessionQueue owns configuration.
+        for input in captureSession.inputs { captureSession.removeInput(input) }
+        for output in captureSession.outputs { captureSession.removeOutput(output) }
 
         guard let backCamera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
               let input = try? AVCaptureDeviceInput(device: backCamera),
@@ -214,6 +243,7 @@ public class CaptureController: NSObject, AVCaptureVideoDataOutputSampleBufferDe
         captureSession.addOutput(videoOutput)
 
         captureSession.commitConfiguration()
+        isConfigured = true
         return true
     }
 
@@ -246,7 +276,8 @@ public class CaptureController: NSObject, AVCaptureVideoDataOutputSampleBufferDe
     private func decideStall(force: Bool) -> StallDecision {
         stateLock.lock()
         defer { stateLock.unlock() }
-        guard _isRunning, force || Date().timeIntervalSince(_lastFrameTime) > 4.0 else {
+        guard _desiredRunning, _isRunning,
+              force || Date().timeIntervalSince(_lastFrameTime) > 4.0 else {
             return .healthy
         }
         // Re-arm the window immediately: this is the single owner of restart decisions, and
@@ -284,10 +315,11 @@ public class CaptureController: NSObject, AVCaptureVideoDataOutputSampleBufferDe
 
     private func restartCamera() {
         sessionQueue.async { [weak self] in
-            guard let self = self else { return }
+            guard let self = self, self.desiredRunning, self.isRunning else { return }
             if self.captureSession.isRunning {
                 self.captureSession.stopRunning()
             }
+            guard self.desiredRunning else { return }
             self.captureSession.startRunning()
         }
     }

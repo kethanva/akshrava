@@ -9,6 +9,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.util.Log
 import java.util.ArrayDeque
 import java.util.Locale
 import java.util.concurrent.Executors
@@ -51,6 +52,8 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
          */
         const val ENGINE_REBUILD_MAX_STREAK = 4
         const val ENGINE_REBUILD_MIN_INTERVAL_MS = 4_000L
+        /** A headset mute is deliberately short and always announces its own expiry. */
+        const val MUTE_AUTO_EXPIRE_MS = 120_000L
 
         /** Remaining wait before a gap-blocked caution may speak; null if it may speak now. */
         fun deferralDelayMs(nowMs: Long, lastUtteranceMs: Long, gapMs: Long = MIN_UTTERANCE_GAP_MS): Long? {
@@ -63,9 +66,242 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
         fun engineRebuildAllowed(nowMs: Long, lastRebuildMs: Long, streak: Int): Boolean =
             streak < ENGINE_REBUILD_MAX_STREAK &&
                 (lastRebuildMs == 0L || nowMs - lastRebuildMs >= ENGINE_REBUILD_MIN_INTERVAL_MS)
+
+        /** Double-press toggles an active mute off; otherwise starts one bounded mute window. */
+        fun nextMuteUntil(nowMs: Long, currentUntilMs: Long, durationMs: Long): Long =
+            if (currentUntilMs > nowMs) 0L else nowMs + durationMs.coerceAtLeast(1L)
+
+        fun speechSuppressedByMute(nowMs: Long, mutedUntilMs: Long, bypassMute: Boolean): Boolean =
+            !bypassMute && nowMs < mutedUntilMs
+
+        /**
+         * Operational TTS keyed by stable ids, not English sentences. Unknown keys return empty
+         * so a missing translation can never be spoken as a raw machine key.
+         */
+        fun operationalText(key: String, languageCode: String): String = when (key) {
+            "op_connected" -> when (languageCode) {
+                "hi" -> "दृष्टि सहायता जुड़ गई"; "ta" -> "பார்வை உதவி இணைந்தது"; "kn" -> "ದೃಷ್ಟಿ ಸಹಾಯ ಸಂಪರ್ಕಗೊಂಡಿದೆ"
+                "ml" -> "കാഴ്ച സഹായം ബന്ധിപ്പിച്ചു"; "te" -> "దృష్టి సహాయం అనుసంధానమైంది"; else -> "Vision assistance connected"
+            }
+            "op_restored" -> when (languageCode) {
+                "hi" -> "कनेक्शन बहाल हो गया"; "ta" -> "இணைப்பு மீண்டும் வந்தது"; "kn" -> "ಸಂಪರ್ಕ ಮರುಸ್ಥಾಪಿತವಾಗಿದೆ"
+                "ml" -> "ബന്ധം വീണ്ടും ലഭിച്ചു"; "te" -> "కనెక్షన్ తిరిగి వచ్చింది"; else -> "Connection restored"
+            }
+            "op_link_lost" -> when (languageCode) {
+                "hi" -> "दृष्टि सहायता उपलब्ध नहीं। बेंत या गाइड का उपयोग करें।"
+                "ta" -> "பார்வை உதவி கிடைக்கவில்லை. கோல் அல்லது வழிகாட்டியைப் பயன்படுத்தவும்."
+                "kn" -> "ದೃಷ್ಟಿ ಸಹಾಯ ಲಭ್ಯವಿಲ್ಲ. ಕೋಲು ಅಥವಾ ಮಾರ್ಗದರ್ಶಕ ಬಳಸಿ."
+                "ml" -> "കാഴ്ച സഹായം ലഭ്യമല്ല. വടി അല്ലെങ്കിൽ ഗൈഡ് ഉപയോഗിക്കുക."
+                "te" -> "దృష్టి సహాయం అందుబాటులో లేదు. కర్ర లేదా గైడ్ ఉపయోగించండి."
+                else -> "Vision assistance unavailable. Use cane or guide."
+            }
+            "op_vision_unavailable" -> when (languageCode) {
+                "hi" -> "दृष्टि सहायता उपलब्ध नहीं। बेंत या गाइड का उपयोग करें।"
+                "ta" -> "பார்வை உதவி கிடைக்கவில்லை. கோல் அல்லது வழிகாட்டியைப் பயன்படுத்தவும்."
+                "kn" -> "ದೃಷ್ಟಿ ಸಹಾಯ ಲಭ್ಯವಿಲ್ಲ. ಕೋಲು ಅಥವಾ ಮಾರ್ಗದರ್ಶಕ ಬಳಸಿ."
+                "ml" -> "കാഴ്ച സഹായം ലഭ്യമല്ല. വടി അല്ലെങ്കിൽ ഗൈഡ് ഉപയോഗിക്കുക."
+                "te" -> "దృష్టి సహాయం అందుబాటులో లేదు. కర్ర లేదా గైడ్ ఉపయోగించండి."
+                else -> "Vision assistance unavailable. Use cane or guide."
+            }
+            "op_model_unavailable" -> when (languageCode) {
+                "hi" -> "दृष्टि मॉडल उपलब्ध नहीं। बेंत या गाइड का उपयोग करें।"
+                "ta" -> "பார்வை மாதிரி கிடைக்கவில்லை. கோல் அல்லது வழிகாட்டியைப் பயன்படுத்தவும்."
+                "kn" -> "ದೃಷ್ಟಿ ಮಾದರಿ ಲಭ್ಯವಿಲ್ಲ. ಕೋಲು ಅಥವಾ ಮಾರ್ಗದರ್ಶಕ ಬಳಸಿ."
+                "ml" -> "കാഴ്ച മാതൃക ലഭ്യമല്ല. വടി അല്ലെങ്കിൽ ഗൈഡ് ഉപയോഗിക്കുക."
+                "te" -> "దృష్టి నమూనా అందుబాటులో లేదు. కర్ర లేదా గైడ్ ఉపయోగించండి."
+                else -> "Vision model unavailable. Use cane or guide."
+            }
+            "op_cloud_fallback_unavailable" -> when (languageCode) {
+                "hi" -> "दूरस्थ दृष्टि विकल्प उपलब्ध नहीं। बेंत या गाइड का उपयोग करें।"
+                "ta" -> "மேகப் பார்வை மாற்று வழி கிடைக்கவில்லை. கோல் அல்லது வழிகாட்டியைப் பயன்படுத்தவும்."
+                "kn" -> "ಮೇಘ ದೃಷ್ಟಿ ಪರ್ಯಾಯ ಲಭ್ಯವಿಲ್ಲ. ಕೋಲು ಅಥವಾ ಮಾರ್ಗದರ್ಶಕ ಬಳಸಿ."
+                "ml" -> "വിദൂര കാഴ്ച മറ്റൊരു വഴി ലഭ്യമല്ല. വടി അല്ലെങ്കിൽ ഗൈഡ് ഉപയോഗിക്കുക."
+                "te" -> "దూరపు దృష్టి ప్రత్యామ్నాయం అందుబాటులో లేదు. కర్ర లేదా గైడ్ ఉపయోగించండి."
+                else -> "Cloud vision fallback unavailable. Use cane or guide."
+            }
+            "op_server_shedding" -> when (languageCode) {
+                "hi" -> "सर्वर व्यस्त है। बेंत या गाइड का उपयोग करें।"
+                "ta" -> "சேவையகம் பணிமிகுதியில் உள்ளது. கோல் அல்லது வழிகாட்டியைப் பயன்படுத்தவும்."
+                "kn" -> "ಪೂರೈಕೆಗಣಕ ಕಾರ್ಯನಿರತ. ಕೋಲು ಅಥವಾ ಮಾರ್ಗದರ್ಶಕ ಬಳಸಿ."
+                "ml" -> "സെർവർ തിരക്കിലാണ്. വടി അല്ലെങ്കിൽ ഗൈഡ് ഉപയോഗിക്കുക."
+                "te" -> "సర్వర్ బిజీగా ఉంది. కర్ర లేదా గైడ్ ఉపయోగించండి."
+                else -> "Server busy. Use cane or guide."
+            }
+            "op_camera_dark" -> when (languageCode) {
+                "hi" -> "कैमरा अँधेरा है। पीछे का लेंस खोलें।"
+                "ta" -> "கேமரா இருட்டாக உள்ளது. பின்புற வில்லையைத் திறக்கவும்."
+                "kn" -> "ಕ್ಯಾಮೆರಾ ಕತ್ತಲಾಗಿದೆ. ಹಿಂದಿನ ಮಸೂರವನ್ನು ತೆರೆಯಿರಿ."
+                "ml" -> "ക്യാമറ ഇരുണ്ടതാണ്. പിന്നിലെ ലെൻസ് തുറന്ന് വയ്ക്കുക."
+                "te" -> "కెమెరా చీకటిగా ఉంది. వెనుక లెన్స్‌ను తెరవండి."
+                else -> "Camera is dark. Uncover the rear lens."
+            }
+            "op_camera_glare" -> when (languageCode) {
+                "hi" -> "कैमरे पर तेज़ रोशनी है। थोड़ा मुड़ें।"
+                "ta" -> "கேமரா ஒளியால் மறைந்துள்ளது. சற்று திரும்பவும்."
+                "kn" -> "ಕ್ಯಾಮೆರಾ ಬೆಳಕಿನಿಂದ ಕುರುಡಾಗಿದೆ. ಸ್ವಲ್ಪ ತಿರುಗಿ."
+                "ml" -> "ക്യാമറ വെളിച്ചത്താൽ തിളങ്ങുന്നു. അൽപ്പം തിരിയുക."
+                "te" -> "కెమెరా వెలుతురుతో కప్పబడింది. కొద్దిగా తిరగండి."
+                else -> "Camera blinded by light. Turn slightly."
+            }
+            "op_camera_blurry" -> when (languageCode) {
+                "hi" -> "कैमरा धुँधला है। लेंस पोंछें। बेंत या गाइड का उपयोग करें।"
+                "ta" -> "கேமரா மங்கலாக உள்ளது. வில்லையைத் துடைக்கவும். கோல் அல்லது வழிகாட்டியைப் பயன்படுத்தவும்."
+                "kn" -> "ಕ್ಯಾಮೆರಾ ಮಬ್ಬಾಗಿದೆ. ಮಸೂರವನ್ನು ಒರೆಸಿ. ಕೋಲು ಅಥವಾ ಮಾರ್ಗದರ್ಶಕ ಬಳಸಿ."
+                "ml" -> "ക്യാമറ മങ്ങിയിരിക്കുന്നു. ലെൻസ് തുടയ്ക്കുക. വടി അല്ലെങ്കിൽ ഗൈഡ് ഉപയോഗിക്കുക."
+                "te" -> "కెమెరా మసకగా ఉంది. లెన్స్ తుడవండి. కర్ర లేదా గైడ్ ఉపయోగించండి."
+                else -> "Camera is blurry. Wipe the lens. Use cane or guide."
+            }
+            "op_camera_failed" -> when (languageCode) {
+                "hi" -> "पीछे का कैमरा उपलब्ध नहीं। बेंत या गाइड का उपयोग करें।"
+                "ta" -> "பின்புற கேமரா கிடைக்கவில்லை. கோல் அல்லது வழிகாட்டியைப் பயன்படுத்தவும்."
+                "kn" -> "ಹಿಂದಿನ ಕ್ಯಾಮೆರಾ ಲಭ್ಯವಿಲ್ಲ. ಕೋಲು ಅಥವಾ ಮಾರ್ಗದರ್ಶಕ ಬಳಸಿ."
+                "ml" -> "പിൻ ക്യാമറ ലഭ്യമല്ല. വടി അല്ലെങ്കിൽ ഗൈഡ് ഉപയോഗിക്കുക."
+                "te" -> "వెనుక కెమెరా అందుబాటులో లేదు. కర్ర లేదా గైడ్ ఉపయోగించండి."
+                else -> "Rear camera unavailable. Use cane or guide."
+            }
+            "op_camera_stalled" -> when (languageCode) {
+                "hi" -> "कैमरा रुक गया। पुनर्प्राप्ति हो रही है।"
+                "ta" -> "கேமரா நின்றது. மீட்டெடுக்கிறது."
+                "kn" -> "ಕ್ಯಾಮೆರಾ ನಿಂತಿದೆ. ಮರುಪಡೆಯಲಾಗುತ್ತಿದೆ."
+                "ml" -> "ക്യാമറ നിന്നു. വീണ്ടെടുക്കുന്നു."
+                "te" -> "కెమెరా ఆగింది. పునరుద్ధరిస్తోంది."
+                else -> "Camera stalled. Recovering."
+            }
+            "op_analyze_failed" -> when (languageCode) {
+                "hi" -> "कैमरा प्रसंस्करण त्रुटि। बेंत या गाइड का उपयोग करें।"
+                "ta" -> "கேமரா செயலாக்க பிழை. கோல் அல்லது வழிகாட்டியைப் பயன்படுத்தவும்."
+                "kn" -> "ಕ್ಯಾಮೆರಾ ಸಂಸ್ಕರಣೆ ದೋಷ. ಕೋಲು ಅಥವಾ ಮಾರ್ಗದರ್ಶಕ ಬಳಸಿ."
+                "ml" -> "ക്യാമറ പ്രോസസ്സ് പിശക്. വടി അല്ലെങ്കിൽ ഗൈഡ് ഉപയോഗിക്കുക."
+                "te" -> "కెమెరా ప్రాసెసింగ్ లోపం. కర్ర లేదా గైడ్ ఉపయోగించండి."
+                else -> "Camera processing error. Use cane or guide."
+            }
+            "op_access_revoked" -> when (languageCode) {
+                "hi" -> "डिवाइस की पहुँच रद्द कर दी गई है। स्वयंसेवक से इस फ़ोन को प्रावधान करवाएँ।"
+                "ta" -> "சாதன அணுகல் ரத்து செய்யப்பட்டது. தன்னார்வலரிடம் இந்த தொலைபேசியை அமைக்கச் சொல்லவும்."
+                "kn" -> "ಸಾಧನದ ಪ್ರವೇಶ ರದ್ದಾಗಿದೆ. ಸ್ವಯಂಸೇವಕರಿಂದ ಈ ದೂರವಾಣಿಯನ್ನು ಸಿದ್ಧಪಡಿಸಿ."
+                "ml" -> "ഉപകരണ പ്രവേശനം റദ്ദാക്കി. സന്നദ്ധപ്രവർത്തകനോട് ഈ ഫോൺ ക്രമീകരിക്കാൻ പറയുക."
+                "te" -> "పరికర ప్రవేశం రద్దు చేయబడింది. స్వచ్ఛంద సేవకునితో ఈ ఫోన్‌ను సిద్ధం చేయించండి."
+                else -> "Device access has been revoked. Ask a volunteer to provision this phone."
+            }
+            "op_auth_failed" -> when (languageCode) {
+                "hi" -> "डिवाइस प्रमाणीकरण विफल। स्वयंसेवक से नया टोकन प्रावधान करवाएँ।"
+                "ta" -> "சாதன அங்கீகாரம் தோல்வியடைந்தது. தன்னார்வலரிடம் புதிய அடையாளத்தை அமைக்கச் சொல்லவும்."
+                "kn" -> "ಸಾಧನ ದೃಢೀಕರಣ ವಿಫಲ. ಸ್ವಯಂಸೇವಕರಿಂದ ಹೊಸ ಚೀಟಿ ಸಿದ್ಧಪಡಿಸಿ."
+                "ml" -> "ഉപകരണ ആധികാരികത പരാജയപ്പെട്ടു. സന്നദ്ധപ്രവർത്തകനോട് പുതിയ ടോക്കൺ ക്രമീകരിക്കാൻ പറയുക."
+                "te" -> "పరికర ప్రామాణీకరణ విఫలమైంది. స్వచ్ఛంద సేవకునితో కొత్త టోకెన్ సిద్ధం చేయించండి."
+                else -> "Device authentication failed. Ask a volunteer to provision a new token."
+            }
+            "op_session_taken_over" -> when (languageCode) {
+                "hi" -> "सत्र दूसरे डिवाइस पर ले लिया गया। बेंत या गाइड का उपयोग करें।"
+                "ta" -> "அமர்வு வேறு சாதனத்தில் எடுக்கப்பட்டது. கோல் அல்லது வழிகாட்டியைப் பயன்படுத்தவும்."
+                "kn" -> "ಅಧಿವೇಶನವನ್ನು ಬೇರೆ ಸಾಧನದಲ್ಲಿ ತೆಗೆದುಕೊಳ್ಳಲಾಗಿದೆ. ಕೋಲು ಅಥವಾ ಮಾರ್ಗದರ್ಶಕ ಬಳಸಿ."
+                "ml" -> "സെഷൻ മറ്റൊരു ഉപകരണത്തിൽ എടുത്തു. വടി അല്ലെങ്കിൽ ഗൈഡ് ഉപയോഗിക്കുക."
+                "te" -> "సెషన్ మరో పరికరంపై తీసుకోబడింది. కర్ర లేదా గైడ్ ఉపయోగించండి."
+                else -> "Session taken over on another device. Use cane or guide."
+            }
+            "op_look_unavailable" -> when (languageCode) {
+                "hi" -> "लुक उपलब्ध नहीं। बेंत या गाइड का उपयोग करें।"
+                "ta" -> "பார்வை கிடைக்கவில்லை. கோல் அல்லது வழிகாட்டியைப் பயன்படுத்தவும்."
+                "kn" -> "ನೋಟ ಲಭ್ಯವಿಲ್ಲ. ಕೋಲು ಅಥವಾ ಮಾರ್ಗದರ್ಶಕ ಬಳಸಿ."
+                "ml" -> "നോട്ട് ലഭ്യമല്ല. വടി അല്ലെങ്കിൽ ഗൈഡ് ഉപയോഗിക്കുക."
+                "te" -> "చూపు అందుబాటులో లేదు. కర్ర లేదా గైడ్ ఉపయోగించండి."
+                else -> "Look unavailable. Use cane or guide."
+            }
+            "op_starting" -> when (languageCode) {
+                "hi" -> "सहायता शुरू हो रही है"; "ta" -> "உதவி தொடங்குகிறது"; "kn" -> "ಸಹಾಯ ಪ್ರಾರಂಭವಾಗುತ್ತಿದೆ"
+                "ml" -> "സഹായം ആരംഭിക്കുന്നു"; "te" -> "సహాయం ప్రారంభమవుతోంది"; else -> "Assistance starting"
+            }
+            "op_starting_no_cpu_keepalive" -> when (languageCode) {
+                "hi" -> "सहायता शुरू हो रही है। पावर चालू रखने की सुविधा उपलब्ध नहीं। फ़ोन सोया तो सहायता रुक सकती है। बेंत या गाइड का उपयोग करें।"
+                "ta" -> "உதவி தொடங்குகிறது. மின்சாரம் விழித்திருக்க வைக்கும் வசதி கிடைக்கவில்லை. தொலைபேசி உறங்கினால் உதவி நிற்கலாம். கோல் அல்லது வழிகாட்டியைப் பயன்படுத்தவும்."
+                "kn" -> "ಸಹಾಯ ಪ್ರಾರಂಭವಾಗುತ್ತಿದೆ. ವಿದ್ಯುತ್ ಎಚ್ಚರವಿರಿಸುವ ಸೌಲಭ್ಯ ಲಭ್ಯವಿಲ್ಲ. ದೂರವಾಣಿ ನಿದ್ರೆಗೆ ಹೋದರೆ ಸಹಾಯ ನಿಲ್ಲಬಹುದು. ಕೋಲು ಅಥವಾ ಮಾರ್ಗದರ್ಶಕ ಬಳಸಿ."
+                "ml" -> "സഹായം ആരംഭിക്കുന്നു. പവർ ഉണർന്നിരിക്കാൻ സഹായം ലഭ്യമല്ല. ഫോൺ ഉറങ്ങിയാൽ സഹായം നിൽക്കാം. വടി അല്ലെങ്കിൽ ഗൈഡ് ഉപയോഗിക്കുക."
+                "te" -> "సహాయం ప్రారంభమవుతోంది. పవర్ మేల్కొని ఉంచే సౌకర్యం లేదు. ఫోన్ నిద్రపోతే సహాయం ఆగవచ్చు. కర్ర లేదా గైడ్ ఉపయోగించండి."
+                else -> "Assistance starting. Power keep-alive unavailable. Assistance may stop if the phone sleeps. Use cane or guide."
+            }
+            "op_starting_no_screen_keepalive" -> when (languageCode) {
+                "hi" -> "सहायता शुरू हो रही है। स्क्रीन चालू रखें, नहीं तो सोने पर सहायता रुक जाएगी। स्वयंसेवक से अन्य ऐप्स के ऊपर प्रदर्शन की अनुमति माँगें।"
+                "ta" -> "உதவி தொடங்குகிறது. திரையை இயக்கத்தில் வையுங்கள், இல்லையெனில் உறங்கும்போது உதவி நிற்கும். பிற செயலிகளுக்கு மேல் காட்ட அனுமதி தன்னார்வலரிடம் கேளுங்கள்."
+                "kn" -> "ಸಹಾಯ ಪ್ರಾರಂಭವಾಗುತ್ತಿದೆ. ತೆರೆಯನ್ನು ಆನ್ ಇರಿಸಿ, ಇಲ್ಲದಿದ್ದರೆ ನಿದ್ರೆಯಲ್ಲಿ ಸಹಾಯ ನಿಲ್ಲುತ್ತದೆ. ಇತರ ಅನ್ವಯಗಳ ಮೇಲೆ ತೋರಿಸಲು ಸ್ವಯಂಸೇವಕರಿಂದ ಅನುಮತಿ ಕೇಳಿ."
+                "ml" -> "സഹായം ആരംഭിക്കുന്നു. സ്ക്രീൻ ഓണായി വയ്ക്കുക, അല്ലെങ്കിൽ ഉറങ്ങുമ്പോൾ സഹായം നിൽക്കും. മറ്റ് ആപ്പുകൾക്ക് മുകളിൽ കാണിക്കാൻ സന്നദ്ധപ്രവർത്തകനോട് അനുവാദം ചോദിക്കുക."
+                "te" -> "సహాయం ప్రారంభమవుతోంది. స్క్రీన్ ఆన్‌లో ఉంచండి, లేకపోతే నిద్రపోతే సహాయం ఆగుతుంది. ఇతర యాప్‌లపై చూపడానికి స్వచ్ఛంద సేవకుని అనుమతి అడగండి."
+                else -> "Assistance starting. Keep the screen on, or assistance will stop when it sleeps. Ask a volunteer to allow Display over other apps."
+            }
+            "op_phone_tilted" -> when (languageCode) {
+                "hi" -> "फ़ोन झुका है। कैमरा आगे की ओर रखें।"
+                "ta" -> "தொலைபேசி சாய்ந்துள்ளது. கேமராவை முன்னே காட்டுங்கள்."
+                "kn" -> "ದೂರವಾಣಿ ಓರೆಯಾಗಿದೆ. ಕ್ಯಾಮೆರಾವನ್ನು ಮುಂದಕ್ಕೆ ಇರಿಸಿ."
+                "ml" -> "ഫോൺ ചായ്‌ന്നിരിക്കുന്നു. ക്യാമറ മുന്നോട്ട് വയ്ക്കുക."
+                "te" -> "ఫోన్ వంగి ఉంది. కెమెరాను ముందుకు ఉంచండి."
+                else -> "Phone tilted. Point camera forward."
+            }
+            "op_thermal_slow" -> when (languageCode) {
+                "hi" -> "फ़ोन ठंडा होने के लिए धीमा चल रहा है"
+                "ta" -> "தொலைபேசி குளிர்வடைய மெதுவாக இயங்குகிறது"
+                "kn" -> "ದೂರವಾಣಿ ತಣ್ಣಗಾಗಲು ನಿಧಾನವಾಗಿ ಚಾಲನೆಯಲ್ಲಿದೆ"
+                "ml" -> "ഫോൺ തണുക്കാൻ മന്ദഗതിയിൽ പ്രവർത്തിക്കുന്നു"
+                "te" -> "ఫోన్ చల్లబడటానికి నెమ్మదిగా నడుస్తోంది"
+                else -> "Phone is running slower to cool down"
+            }
+            "op_battery_low" -> when (languageCode) {
+                "hi" -> "बैटरी कम है। दृष्टि अलर्ट जल्द रुक सकते हैं।"
+                "ta" -> "மின்கலம் குறைவு. பார்வை எச்சரிக்கைகள் விரைவில் நிற்கலாம்."
+                "kn" -> "ಬ್ಯಾಟರಿ ಕಡಿಮೆ. ದೃಷ್ಟಿ ಎಚ್ಚರಿಕೆಗಳು ಶೀಘ್ರದಲ್ಲೇ ನಿಲ್ಲಬಹುದು."
+                "ml" -> "ബാറ്ററി കുറവാണ്. കാഴ്ച മുന്നറിയിപ്പുകൾ ഉടൻ നിൽക്കാം."
+                "te" -> "బ్యాటరీ తక్కువ. దృష్టి హెచ్చరికలు త్వరలో ఆగవచ్చు."
+                else -> "Battery low. Vision alerts may stop soon."
+            }
+            "op_battery_critical" -> when (languageCode) {
+                "hi" -> "बैटरी गंभीर रूप से कम है। दृष्टि सहायता रुकी। बेंत या गाइड का उपयोग करें।"
+                "ta" -> "மின்கலம் மிகவும் குறைவு. பார்வை உதவி நின்றது. கோல் அல்லது வழிகாட்டியைப் பயன்படுத்தவும்."
+                "kn" -> "ಬ್ಯಾಟರಿ ತೀವ್ರವಾಗಿ ಕಡಿಮೆ. ದೃಷ್ಟಿ ಸಹಾಯ ನಿಂತಿದೆ. ಕೋಲು ಅಥವಾ ಮಾರ್ಗದರ್ಶಕ ಬಳಸಿ."
+                "ml" -> "ബാറ്ററി ഗുരുതരമായി കുറവാണ്. കാഴ്ച സഹായം നിന്നു. വടി അല്ലെങ്കിൽ ഗൈഡ് ഉപയോഗിക്കുക."
+                "te" -> "బ్యాటరీ తీవ్రంగా తక్కువ. దృష్టి సహాయం ఆగింది. కర్ర లేదా గైడ్ ఉపయోగించండి."
+                else -> "Battery critical. Vision assistance stopped. Use cane or guide."
+            }
+            "op_power_keepalive_lost" -> when (languageCode) {
+                "hi" -> "पावर चालू रखने की सुविधा उपलब्ध नहीं। फ़ोन सोया तो सहायता रुक सकती है। बेंत या गाइड का उपयोग करें।"
+                "ta" -> "மின்சாரம் விழித்திருக்க வைக்கும் வசதி கிடைக்கவில்லை. தொலைபேசி உறங்கினால் உதவி நிற்கலாம். கோல் அல்லது வழிகாட்டியைப் பயன்படுத்தவும்."
+                "kn" -> "ವಿದ್ಯುತ್ ಎಚ್ಚರವಿರಿಸುವ ಸೌಲಭ್ಯ ಲಭ್ಯವಿಲ್ಲ. ದೂರವಾಣಿ ನಿದ್ರೆಗೆ ಹೋದರೆ ಸಹಾಯ ನಿಲ್ಲಬಹುದು. ಕೋಲು ಅಥವಾ ಮಾರ್ಗದರ್ಶಕ ಬಳಸಿ."
+                "ml" -> "പവർ ഉണർന്നിരിക്കാൻ സഹായം ലഭ്യമല്ല. ഫോൺ ഉറങ്ങിയാൽ സഹായം നിൽക്കാം. വടി അല്ലെങ്കിൽ ഗൈഡ് ഉപയോഗിക്കുക."
+                "te" -> "పవర్ మేల్కొని ఉంచే సౌకర్యం లేదు. ఫోన్ నిద్రపోతే సహాయం ఆగవచ్చు. కర్ర లేదా గైడ్ ఉపయోగించండి."
+                else -> "Power keep-alive unavailable. Assistance may stop if the phone sleeps. Use cane or guide."
+            }
+            "op_headset_disconnected" -> when (languageCode) {
+                "hi" -> "हेडसेट डिस्कनेक्ट हो गया। अलर्ट अब स्पीकर पर बजेंगे।"
+                "ta" -> "ஹெட்செட் துண்டிக்கப்பட்டது. எச்சரிக்கைகள் இப்போது ஸ்பீக்கரில் ஒலிக்கும்."
+                "kn" -> "ಹೆಡ್‌ಸೆಟ್ ಸಂಪರ್ಕ ಕಡಿತಗೊಂಡಿದೆ. ಎಚ್ಚರಿಕೆಗಳು ಈಗ ಸ್ಪೀಕರ್‌ನಲ್ಲಿ ನುಡಿಯುತ್ತವೆ."
+                "ml" -> "ഹെഡ്‌സെറ്റ് വിച്ഛേദിച്ചു. മുന്നറിയിപ്പുകൾ ഇപ്പോൾ സ്പീക്കറിൽ കേൾക്കും."
+                "te" -> "హెడ్‌సెట్ డిస్‌కనెక్ట్ అయింది. హెచ్చరికలు ఇప్పుడు స్పీకర్‌లో వినిపిస్తాయి."
+                else -> "Headset disconnected. Alerts now play on the speaker."
+            }
+            "op_env_dark" -> when (languageCode) {
+                "hi" -> "आसपास अँधेरा है।"
+                "ta" -> "சுற்றுப்புறம் இருட்டாக உள்ளது."
+                "kn" -> "ಸುತ್ತಲೂ ಕತ್ತಲಾಗಿದೆ."
+                "ml" -> "ചുറ്റുപാട് ഇരുണ്ടതാണ്."
+                "te" -> "చుట్టూ చీకటిగా ఉంది."
+                else -> "Environment is dark."
+            }
+            "op_env_bright" -> when (languageCode) {
+                "hi" -> "अब ज़्यादा रोशनी है।"
+                "ta" -> "இப்போது வெளிச்சம் அதிகம்."
+                "kn" -> "ಈಗ ಹೆಚ್ಚು ಬೆಳಕಿದೆ."
+                "ml" -> "ഇപ്പോൾ കൂടുതൽ വെളിച്ചമുണ്ട്."
+                "te" -> "ఇప్పుడు ఎక్కువ వెలుతురు ఉంది."
+                else -> "Brighter now."
+            }
+            else -> ""
+        }
     }
 
-    private data class PendingStatus(val text: String, val onComplete: (() -> Unit)?)
+    private enum class SpeechPriority(val rank: Int) { STATUS(0), AWARENESS(1), CONTROL_OR_URGENT(2) }
+    private data class PendingSpeech(
+        val text: String,
+        val onComplete: (() -> Unit)?,
+        val priority: SpeechPriority,
+        val bypassMute: Boolean
+    )
     private data class PendingAnnounce(val messageKey: String, val bearing: String, val haptic: String)
 
     private val api = Executors.newSingleThreadScheduledExecutor()
@@ -77,9 +313,10 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
     // onInit synchronously from the TTS constructor.
     private val completionLock = Any()
     private val completionCallbacks = mutableMapOf<String, () -> Unit>()
-    private var pendingStatus: PendingStatus? = null
+    private var pendingStatus: PendingSpeech? = null
     private var pendingAnnounce: PendingAnnounce? = null
     private var pendingAnnounceFuture: ScheduledFuture<*>? = null
+    private var pendingMuteExpiryFuture: ScheduledFuture<*>? = null
     private var statusSequence = 0L
     @Volatile private var ready = false
     private val lastSpoken = mutableMapOf<String, Long>()
@@ -129,7 +366,16 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
                     // for completionCallbacks rather than relying on @Volatile visibility alone, since
                     // this is a read-then-clear that must not race a concurrent status() write.
                     val toSpeak = synchronized(completionLock) { pendingStatus.also { pendingStatus = null } }
-                    toSpeak?.let { speak(it.text, flush = true, id = nextStatusId(), onComplete = it.onComplete) }
+                    toSpeak?.let {
+                        speak(
+                            it.text,
+                            flush = true,
+                            id = nextStatusId(),
+                            onComplete = it.onComplete,
+                            bypassMute = it.bypassMute,
+                            priority = it.priority
+                        )
+                    }
                 } else if (engineRebuildAllowed(
                         SystemClock.elapsedRealtime() + ENGINE_REBUILD_MIN_INTERVAL_MS,
                         lastEngineRebuildMs,
@@ -145,6 +391,12 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
                             ENGINE_REBUILD_MIN_INTERVAL_MS,
                             TimeUnit.MILLISECONDS
                         )
+                    }.onFailure {
+                        Log.e("AkshravaVision", "TTS rebuild scheduling failed", it)
+                        val toDrop = synchronized(completionLock) {
+                            pendingStatus.also { pendingStatus = null }
+                        }
+                        toDrop?.onComplete?.invoke()
                     }
                 } else {
                     val toDrop = synchronized(completionLock) { pendingStatus.also { pendingStatus = null } }
@@ -156,7 +408,9 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
 
     private fun runApi(block: () -> Unit) {
         if (closed || api.isShutdown) return
-        runCatching { api.execute(block) }
+        runCatching { api.execute(block) }.onFailure {
+            Log.e("AkshravaVision", "speech operation scheduling failed", it)
+        }
     }
 
     fun announce(messageKey: String, bearing: String, urgent: Boolean, haptic: String) {
@@ -249,7 +503,12 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
         // instead of flushing, so the head of the first warning is always comprehensible.
         val protectingUrgentHead = urgent && now - lastUrgentSpokenAtMs < URGENT_PROTECT_MS
         if (urgent) lastUrgentSpokenAtMs = now
-        speak(text, flush = urgent && !protectingUrgentHead, id = cooldownKey)
+        speak(
+            text,
+            flush = urgent && !protectingUrgentHead,
+            id = cooldownKey,
+            priority = if (urgent) SpeechPriority.CONTROL_OR_URGENT else SpeechPriority.AWARENESS
+        )
     }
 
     private fun scheduleDeferredCaution(pending: PendingAnnounce, delayMs: Long) {
@@ -269,22 +528,63 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
         pendingAnnounce = null
     }
 
-    /** Double-press headset mute. Auto-unmutes after [durationMs] so it can never be left silently dead. */
-    fun muteFor(durationMs: Long) {
+    /** Double-press headset mute. A second double-press resumes early; expiry also speaks. */
+    fun toggleMute(durationMs: Long = MUTE_AUTO_EXPIRE_MS) {
         runApi {
-            mutedUntilMs = SystemClock.elapsedRealtime() + durationMs
+            val now = SystemClock.elapsedRealtime()
+            val nextUntil = nextMuteUntil(now, mutedUntilMs, durationMs)
+            pendingMuteExpiryFuture?.cancel(false)
+            pendingMuteExpiryFuture = null
+            mutedUntilMs = nextUntil
+            if (nextUntil == 0L) {
+                speak(
+                    muteResumedText(), flush = true, id = nextStatusId(), bypassMute = true,
+                    priority = SpeechPriority.CONTROL_OR_URGENT
+                )
+                return@runApi
+            }
             speak(
-                when (languageCode) {
-                    "hi" -> "पंद्रह मिनट के लिए म्यूट"
-                    "ta" -> "பதினைந்து நிமிடங்களுக்கு ஒலி நிறுத்தப்பட்டது"
-                    "kn" -> "ಹದಿನೈದು ನಿಮಿಷಗಳ ಕಾಲ ಮ್ಯೂಟ್ ಮಾಡಲಾಗಿದೆ"
-                    "ml" -> "പതിനഞ്ച് മിനിറ്റിലേക്ക് മ്യൂട്ട് ചെയ്തു"
-                    "te" -> "పదిహేను నిమిషాల పాటు మ్యూట్ చేయబడింది"
-                    else -> "Muted for fifteen minutes"
-                },
-                flush = true, id = nextStatusId()
+                mutedText(), flush = true, id = nextStatusId(), bypassMute = true,
+                priority = SpeechPriority.CONTROL_OR_URGENT
             )
+            pendingMuteExpiryFuture = runCatching {
+                api.schedule({
+                    if (mutedUntilMs != nextUntil) return@schedule
+                    mutedUntilMs = 0L
+                    pendingMuteExpiryFuture = null
+                    speak(
+                        muteResumedText(), flush = true, id = nextStatusId(), bypassMute = true,
+                        priority = SpeechPriority.CONTROL_OR_URGENT
+                    )
+                }, (nextUntil - now).coerceAtLeast(1L), TimeUnit.MILLISECONDS)
+            }.getOrElse {
+                mutedUntilMs = 0L
+                Log.e("AkshravaVision", "mute expiry scheduling failed", it)
+                speak(
+                    muteResumedText(), flush = true, id = nextStatusId(), bypassMute = true,
+                    priority = SpeechPriority.CONTROL_OR_URGENT
+                )
+                null
+            }
         }
+    }
+
+    private fun mutedText(): String = when (languageCode) {
+        "hi" -> "दो मिनट के लिए म्यूट"
+        "ta" -> "இரண்டு நிமிடங்களுக்கு ஒலி நிறுத்தப்பட்டது"
+        "kn" -> "ಎರಡು ನಿಮಿಷಗಳ ಕಾಲ ಮ್ಯೂಟ್ ಮಾಡಲಾಗಿದೆ"
+        "ml" -> "രണ്ട് മിനിറ്റേക്ക് മ്യൂട്ട് ചെയ്തു"
+        "te" -> "రెండు నిమిషాల పాటు మ్యూట్ చేయబడింది"
+        else -> "Muted for two minutes"
+    }
+
+    private fun muteResumedText(): String = when (languageCode) {
+        "hi" -> "आवाज़ फिर चालू"
+        "ta" -> "பேச்சு மீண்டும் தொடங்கியது"
+        "kn" -> "ಮಾತು ಮತ್ತೆ ಆರಂಭವಾಗಿದೆ"
+        "ml" -> "സംസാരം വീണ്ടും തുടങ്ങി"
+        "te" -> "మాటలు మళ్లీ ప్రారంభమయ్యాయి"
+        else -> "Speech resumed"
     }
 
     /** Single-press headset repeat: replays the last spoken alert if it is still recent. */
@@ -295,11 +595,15 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
             if (text == null || now - lastAlertAtMs > REPEATABLE_WINDOW_MS) {
                 speak(
                     if (isHindi) "कोई हाल का अलर्ट नहीं" else "No recent alert",
-                    flush = true, id = nextStatusId()
+                    flush = true, id = nextStatusId(),
+                    priority = SpeechPriority.CONTROL_OR_URGENT
                 )
                 return@runApi
             }
-            speak(text, flush = true, id = nextStatusId())
+            speak(
+                text, flush = true, id = nextStatusId(),
+                priority = SpeechPriority.CONTROL_OR_URGENT
+            )
         }
     }
 
@@ -315,18 +619,22 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
     fun hazardSpokenWithin(nowMs: Long, windowMs: Long = MIN_UTTERANCE_GAP_MS): Boolean =
         lastAlertAtMs != 0L && nowMs - lastAlertAtMs < windowMs
 
+    fun operationalText(key: String): String = Companion.operationalText(key, languageCode)
+
     fun status(text: String, haptic: Boolean = false, onComplete: (() -> Unit)? = null) {
         runApi {
             if (haptic) vibrate("single")
-            if (ready) {
-                speak(text, flush = true, id = nextStatusId(), onComplete = onComplete)
-            } else {
-                val replaced = synchronized(completionLock) {
-                    pendingStatus.also { pendingStatus = PendingStatus(text, onComplete) }
-                }
-                replaced?.onComplete?.invoke()
-            }
+            speak(text, flush = true, id = nextStatusId(), onComplete = onComplete)
         }
+    }
+
+    fun statusKey(key: String, haptic: Boolean = false, onComplete: (() -> Unit)? = null) {
+        val text = operationalText(key)
+        if (text.isEmpty()) {
+            Log.e("AkshravaVision", "missing_operational_speech key=$key")
+            return
+        }
+        status(text, haptic, onComplete)
     }
 
     /** Speak then run [onDone] (camera-failure teardown, etc.). */
@@ -334,12 +642,27 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
         status(text, onComplete = onDone)
     }
 
+    fun speakThenKey(key: String, onDone: () -> Unit) {
+        val text = operationalText(key)
+        if (text.isEmpty()) {
+            Log.e("AkshravaVision", "missing_operational_speech key=$key")
+            onDone()
+            return
+        }
+        speakThen(text, onDone = onDone)
+    }
+
     /** User-pulled look summary: flush and bypass object cooldown / busy collapse. */
     fun speakComposed(text: String, urgent: Boolean = true) {
         runApi {
             val now = SystemClock.elapsedRealtime()
             markUtterance(now)
-            speak(text, flush = urgent, id = "look-${++statusSequence}")
+            speak(
+                text,
+                flush = urgent,
+                id = "look-${++statusSequence}",
+                priority = if (urgent) SpeechPriority.CONTROL_OR_URGENT else SpeechPriority.AWARENESS
+            )
         }
     }
 
@@ -347,7 +670,7 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
      * an answer -- send failure, or no priority result within its timeout -- must not resolve
      * into silence just because nothing came back. */
     fun announceLookFailed() {
-        speakComposed(if (isHindi) "लुक विफल, फिर कोशिश करें" else "Look failed, try again")
+        speakComposed(operationalText("op_look_unavailable"))
     }
 
     /** Immediate confirmation that a long-press was registered, independent of network state --
@@ -360,9 +683,9 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
         if (now - lastSummaryMs < SUMMARY_COOLDOWN_MS) return
         lastSummaryMs = now
         markUtterance(now)
-        val text = if (isHindi) "व्यस्त रास्ता, ध्यान से" else "Busy road, careful"
+        val text = template("busy_road", "ahead")
         vibrate("single")
-        speak(text, flush = true, id = "summary")
+        speak(text, flush = true, id = "summary", priority = SpeechPriority.AWARENESS)
     }
 
     private fun pruneRecent(now: Long) {
@@ -381,15 +704,25 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
         recentUtterances.addLast(now)
     }
 
-    private fun speak(text: String, flush: Boolean, id: String, onComplete: (() -> Unit)? = null) {
+    private fun speak(
+        text: String,
+        flush: Boolean,
+        id: String,
+        onComplete: (() -> Unit)? = null,
+        bypassMute: Boolean = false,
+        priority: SpeechPriority = SpeechPriority.STATUS
+    ) {
+        if (speechSuppressedByMute(SystemClock.elapsedRealtime(), mutedUntilMs, bypassMute)) {
+            // Deliberate mute covers every TTS entry point, not only hazard templates. Completion
+            // callbacks still run so a muted teardown/status flow can never hang waiting for speech.
+            onComplete?.let { mainHandler.post(it) }
+            return
+        }
         if (!ready) {
             // Engine is (re)connecting. Keep the NEWEST utterance for delivery after init —
             // onInit speaks pendingStatus on success — instead of dropping it into silence.
             // For a blind user a late warning still beats no warning.
-            val replaced = synchronized(completionLock) {
-                pendingStatus.also { pendingStatus = PendingStatus(text, onComplete) }
-            }
-            replaced?.onComplete?.invoke()
+            retainPendingSpeech(PendingSpeech(text, onComplete, priority, bypassMute))
             return
         }
         if (onComplete != null) synchronized(completionLock) { completionCallbacks[id] = onComplete }
@@ -415,7 +748,21 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
             "H7", "AlertManager.speak:engineDead", "tts_speak_failed",
             mapOf("id" to id, "streak" to engineRebuildStreak)
         )
-        rebuildEngine(text, onComplete)
+        rebuildEngine(text, onComplete, priority, bypassMute)
+    }
+
+    /** Keep one reconnecting-engine utterance without letting status replace awareness. */
+    private fun retainPendingSpeech(candidate: PendingSpeech) {
+        val dropped = synchronized(completionLock) {
+            val existing = pendingStatus
+            if (existing == null || candidate.priority.rank >= existing.priority.rank) {
+                pendingStatus = candidate
+                existing
+            } else {
+                candidate
+            }
+        }
+        dropped?.onComplete?.invoke()
     }
 
     /**
@@ -425,20 +772,43 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
      * paths depend on it) and haptics remain the surviving alert channel — deliverAnnounce
      * vibrates before speaking, so S1 buzzes continue even with speech gone.
      */
-    private fun rebuildEngine(text: String?, onComplete: (() -> Unit)?) {
+    private fun rebuildEngine(
+        text: String?,
+        onComplete: (() -> Unit)?,
+        priority: SpeechPriority = SpeechPriority.STATUS,
+        bypassMute: Boolean = false
+    ) {
         if (closed) {
             onComplete?.invoke()
             return
         }
         ready = false
         if (text != null) {
-            val replaced = synchronized(completionLock) {
-                pendingStatus.also { pendingStatus = PendingStatus(text, onComplete) }
-            }
-            replaced?.onComplete?.invoke()
+            retainPendingSpeech(PendingSpeech(text, onComplete, priority, bypassMute))
         }
         val now = SystemClock.elapsedRealtime()
-        if (!engineRebuildAllowed(now, lastEngineRebuildMs, engineRebuildStreak)) return
+        if (engineRebuildStreak >= ENGINE_REBUILD_MAX_STREAK) {
+            Log.e("AkshravaVision", "TTS rebuild limit reached")
+            val toDrop = synchronized(completionLock) { pendingStatus.also { pendingStatus = null } }
+            toDrop?.onComplete?.invoke()
+            return
+        }
+        val elapsed = if (lastEngineRebuildMs == 0L) Long.MAX_VALUE else now - lastEngineRebuildMs
+        if (elapsed < ENGINE_REBUILD_MIN_INTERVAL_MS) {
+            val retryAfterMs = ENGINE_REBUILD_MIN_INTERVAL_MS - elapsed
+            runCatching {
+                api.schedule(
+                    { rebuildEngine(null, null) }, retryAfterMs, TimeUnit.MILLISECONDS
+                )
+            }.onFailure {
+                Log.e("AkshravaVision", "TTS rebuild retry scheduling failed", it)
+                val toDrop = synchronized(completionLock) {
+                    pendingStatus.also { pendingStatus = null }
+                }
+                toDrop?.onComplete?.invoke()
+            }
+            return
+        }
         lastEngineRebuildMs = now
         engineRebuildStreak += 1
         AgentDebugLog.log(
@@ -539,6 +909,9 @@ class AlertManager(private val context: Context, languageTag: String) : TextToSp
     fun shutdown() {
         closed = true
         cancelDeferredCaution()
+        pendingMuteExpiryFuture?.cancel(false)
+        pendingMuteExpiryFuture = null
+        mutedUntilMs = 0L
         focusHoldCount.set(0)
         AlertAudioFocus.abandon(audioManager, focusRequest)
         val pending = synchronized(completionLock) {

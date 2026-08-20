@@ -45,6 +45,16 @@ def test_worker_processing_does_not_fabricate_phone_delivery_metrics():
     assert "akshrava_frames_processed_total 1" in rendered
 
 
+def test_sustained_inference_outages_are_distinct_from_transient_worker_saturation():
+    metrics = Metrics()
+    metrics.worker_saturated()
+    metrics.inference_circuit_open()
+
+    rendered = metrics.render()
+    assert "akshrava_worker_saturated_total 1" in rendered
+    assert "akshrava_inference_circuit_open_total 1" in rendered
+
+
 def test_legacy_phone_results_are_not_expected_to_acknowledge():
     metrics = Metrics()
     metrics.result_sent(acknowledgement_expected=False)

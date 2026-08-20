@@ -1,8 +1,15 @@
 import glob
 import os
 import re
+from pathlib import Path
 
 IAC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../cloud/gcp"))
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _repo_text(*parts: str) -> str:
+    return REPO_ROOT.joinpath(*parts).read_text(encoding="utf-8")
+
 
 def get_all_tf_content():
     """Reads all .tf files in the IAC_DIR and returns their concatenated content."""
@@ -175,6 +182,19 @@ def test_worker_ha_defaults_on_because_a_single_worker_is_a_fleet_wide_spof():
     assert re.search(r"default\s*=\s*true", block), "enable_worker_ha must default to true"
 
 
+def test_worker_autohealing_checks_application_readiness_not_only_an_open_port():
+    """A wedged detector keeps Caddy listening, so a TCP check would leave it in service forever."""
+    tf_content = get_all_tf_content()
+    assert 'http_health_check {' in tf_content
+    assert 'request_path = "/readyz"' in tf_content
+    assert 'ports    = ["8001"]' in tf_content
+    startup = os.path.join(IAC_DIR, "scripts", "worker-startup.sh.tftpl")
+    with open(startup) as handle:
+        script = handle.read()
+    assert "-p 8001:8000" in script
+    assert "130.211.0.0/22 35.191.0.0/16" in script
+
+
 def test_api_deployment_can_configure_otlp_export_without_embedding_credentials():
     """A configured collector must reach an image that actually includes the exporter."""
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
@@ -186,6 +206,34 @@ def test_api_deployment_can_configure_otlp_export_without_embedding_credentials(
     block = variable_block("otlp_exporter_endpoint")
     assert re.search(r'default\s*=\s*""', block)
     assert "OTEL_EXPORTER_OTLP_ENDPOINT" in tf_content
+
+
+def test_api_transport_and_instance_concurrency_bound_websocket_buffering():
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+    with open(os.path.join(root, "backend", "Dockerfile")) as handle:
+        dockerfile = handle.read()
+    assert "akshrava_backend.gunicorn_worker.BoundedUvicornWorker" in dockerfile
+    with open(os.path.join(root, "backend", "akshrava_backend", "gunicorn_worker.py")) as handle:
+        worker = handle.read()
+    assert '"ws_max_size": 1_048_576' in worker
+    assert '"ws_max_queue": 8' in worker
+    assert "max_instance_request_concurrency = 20" in get_all_tf_content()
+
+
+def test_deployment_never_widens_the_shared_result_freshness_ceiling():
+    """Slow CPU inference is diagnostic-only once it exceeds the 2.5 s phone speech budget."""
+    app_path = os.path.join(IAC_DIR, "app.tf")
+    with open(app_path) as handle:
+        app = handle.read()
+    alert_age = re.search(
+        r'name\s*=\s*"ALERT_MAX_AGE_MS"(.*?)^\s*\}',
+        app,
+        re.DOTALL | re.MULTILINE,
+    )
+    assert alert_age, "ALERT_MAX_AGE_MS environment block is missing"
+    assert re.search(r'value\s*=\s*"2500"', alert_age.group(1)), (
+        "all deployment profiles must keep the shared 2.5 s freshness ceiling"
+    )
 
 
 def test_phone_delivery_metrics_are_exported_as_aggregate_log_metrics_with_an_alert():
@@ -211,3 +259,85 @@ def test_iac_iam_structure():
     assert 'resource "google_secret_manager_secret_iam_member" "worker_secret_accessor"' in tf_content, "Worker Secret IAM binding missing"
     assert 'resource "google_storage_bucket_iam_member" "api_storage_creator"' in tf_content, "Storage Creator IAM binding missing"
     assert 'roles/artifactregistry.reader' in tf_content, "Artifact Registry reader role missing"
+
+
+def test_api_service_declares_a_startup_probe_on_readyz():
+    tf_content = get_all_tf_content()
+    assert "startup_probe" in tf_content
+    assert re.search(r'path\s*=\s*"/readyz"', tf_content)
+    assert "liveness_probe" in tf_content
+    assert re.search(r'path\s*=\s*"/livez"', tf_content)
+
+
+def test_every_alert_policy_declares_notification_channels():
+    tf_content = get_all_tf_content()
+    assert tf_content.count("notification_channels = var.monitoring_notification_channels") >= 3
+
+
+def test_production_requires_a_notification_channel():
+    tf_content = get_all_tf_content()
+    assert "monitoring_notification_channels" in tf_content
+    assert 'var.environment != "production"' in tf_content or "environment != \"production\"" in tf_content
+    assert "notificationChannels" in _repo_text("scripts", "gcp_preflight.sh")
+
+
+def test_database_deletion_protection_is_on_outside_development():
+    tf_content = get_tf_code()
+    assert 'deletion_protection = var.environment != "development"' in tf_content
+
+
+def test_worker_deadline_check_references_the_api_remote_timeout():
+    tf_content = get_all_tf_content()
+    assert 'check "worker_deadline_below_api_deadline"' in tf_content
+    assert "remote_inference_timeout_ms" in tf_content
+    assert "worker_infer_timeout_seconds" in tf_content
+
+
+def test_migrate_then_deploy_targets_the_job_before_the_full_apply():
+    script = _repo_text("scripts", "gcp_migrate_then_deploy.sh")
+    assert "-target=google_cloud_run_v2_job.migrate" in script
+    job_idx = script.index("gcloud run jobs execute akshrava-migrate")
+    full_apply_idx = script.rindex("terraform")
+    assert job_idx < full_apply_idx
+    assert script.index("-target=google_cloud_run_v2_job.migrate") < job_idx
+
+
+def test_operations_md_exists_and_covers_the_referenced_sections():
+    path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../OPERATIONS.md"))
+    assert os.path.isfile(path)
+    text = _repo_text("OPERATIONS.md")
+    for heading in (
+        "Current pilot configuration",
+        "Migrate before traffic",
+        "Rollback",
+        "Revoke a device",
+        "Rotate the JWT signing key",
+        "Who is paged",
+        "Remote state",
+        "Expected metric shifts after this release",
+    ):
+        assert heading in text, heading
+
+
+def test_ci_runs_the_ios_test_steps_on_main_pushes():
+    ci = _repo_text(".github", "workflows", "ci.yml")
+    assert "\n  ios:\n    if: github.event_name == 'pull_request'" not in ci
+    assert "./scripts/test_ios.sh" in ci
+    assert "Build the unsigned archive artifact" in ci
+    archive_block = ci.split("Build the unsigned archive artifact", 1)[1]
+    assert "if: github.event_name == 'pull_request'" in archive_block.split("run:", 1)[0]
+
+
+def test_ci_runs_android_unit_tests_on_main_pushes():
+    ci = _repo_text(".github", "workflows", "ci.yml")
+    assert "\n  android:\n    if: github.event_name == 'pull_request'" not in ci
+    assert ":app:testDebugUnitTest" in ci
+
+
+def test_compose_gpu_worker_deadline_is_below_api_remote():
+    compose = _repo_text("cloud", "local", "docker-compose.yml")
+    remote_ms = float(re.search(r"REMOTE_INFERENCE_TIMEOUT_MS:-\s*(\d+)", compose).group(1))
+    worker_s = float(re.search(r"WORKER_INFER_TIMEOUT_SECONDS:-\s*([0-9.]+)", compose).group(1))
+    assert worker_s * 1000 < remote_ms
+
+

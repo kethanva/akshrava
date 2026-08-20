@@ -53,4 +53,4 @@ USER appuser
 EXPOSE 8000
 
 # Use Gunicorn to manage Uvicorn workers
-CMD ["gunicorn", "akshrava_backend.main:app", "--workers", "1", "--worker-class", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8000", "--timeout", "30", "--graceful-timeout", "30", "--access-logfile", "-", "--error-logfile", "-"]
+CMD ["gunicorn", "akshrava_backend.main:app", "--workers", "1", "--worker-class", "akshrava_backend.gunicorn_worker.BoundedUvicornWorker", "--bind", "0.0.0.0:8000", "--timeout", "30", "--graceful-timeout", "30", "--access-logfile", "-", "--error-logfile", "-"]

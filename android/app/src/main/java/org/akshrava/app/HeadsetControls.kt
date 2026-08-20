@@ -14,7 +14,7 @@ import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
 import android.view.KeyEvent
 
-/** Headset button via MediaSession: single=repeat, double=mute 15m, long-press=look. */
+/** Headset button via MediaSession: single=repeat, double=toggle bounded mute, long-press=look. */
 class HeadsetControls(
     context: Context,
     private val onRepeat: () -> Unit,

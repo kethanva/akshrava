@@ -52,6 +52,28 @@ def test_parses_priority_flag_and_mode():
     assert by_mode.mode == "priority"
 
 
+@pytest.mark.parametrize(
+    "field,value,message",
+    [
+        ("priority", "false", "priority must be a boolean"),
+        ("debug_telemetry", 1, "debug_telemetry must be a boolean"),
+        ("mode", "turbo", "mode must be normal or priority"),
+    ],
+)
+def test_rejects_truthy_non_boolean_flags_and_unknown_modes(field, value, message):
+    payload = {
+        "type": "frame",
+        "id": 4,
+        "capture_mono_ms": 44,
+        "w": 640,
+        "h": 480,
+        "jpeg_bytes": 10,
+    }
+    payload[field] = value
+    with pytest.raises(ProtocolError, match=message):
+        parse_frame_header(payload)
+
+
 def test_rejects_invalid_frame_header():
     with pytest.raises(ProtocolError):
         parse_frame_header({"type": "frame", "id": -1})

@@ -63,7 +63,11 @@ public enum SessionFlags {
         } else {
             last = 0
         }
-        return currentWallClockMs() - last > staleAfterMs
+        let now = currentWallClockMs()
+        // Missing/corrupt data and a wall clock that moved backwards both fail toward recovery.
+        // The latter can happen after manual clock correction; treating a future heartbeat as
+        // fresh forever would silently disable the watchdog until real time caught back up.
+        return last <= 0 || now < last || now - last > staleAfterMs
     }
 
     /// Wall-clock milliseconds, NOT `ProcessInfo.systemUptime`. This value is persisted across

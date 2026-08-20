@@ -23,17 +23,20 @@ class CameraLifecycleOwner : LifecycleOwner {
         get() = registry
 
     fun resume() {
-        handler.post {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
             registry.currentState = Lifecycle.State.CREATED
             registry.currentState = Lifecycle.State.STARTED
             registry.currentState = Lifecycle.State.RESUMED
+        } else {
+            handler.post { resume() }
         }
     }
 
     fun destroy() {
-        handler.post {
-            if (registry.currentState == Lifecycle.State.INITIALIZED) return@post
+        if (Looper.myLooper() == Looper.getMainLooper()) {
             registry.currentState = Lifecycle.State.DESTROYED
+        } else {
+            handler.post { destroy() }
         }
     }
 }

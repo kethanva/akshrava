@@ -1,9 +1,12 @@
+import logging
 from pathlib import Path
 from typing import NamedTuple
 
 import jwt
 
 from .config import Settings
+
+logger = logging.getLogger(__name__)
 
 
 class AuthError(ValueError):
@@ -50,7 +53,7 @@ def _verification_keys(settings: Settings) -> list[str]:
                 keys.append(prev_pem)
         except AuthError:
             # Previous key missing mid-rotation is non-fatal; current key remains authoritative.
-            pass
+            logger.warning("previous JWT verification key is unavailable", exc_info=True)
     return keys
 
 
@@ -83,6 +86,11 @@ def device_claims_from_token(token: str | None, settings: Settings) -> DeviceCla
     subject = claims.get("sub")
     if not isinstance(subject, str) or not subject:
         raise AuthError("token missing subject")
+    if len(subject) > 128:
+        # devices.device_id is VARCHAR(128). Reject at the auth boundary rather than accepting a
+        # signed identity that can connect but fails its first DB upsert and loses the session as
+        # an opaque inference error.
+        raise AuthError("token subject is too long")
     consent = claims.get("diagnostic_consent", False)
     if not isinstance(consent, bool):
         consent = False

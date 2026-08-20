@@ -122,7 +122,7 @@ sequenceDiagram
     Cmp->>WS: {message_key, bearing, level, severity, haptic,<br/>range_valid, spoken_preview, motion_evidence:"insufficient"}
     Note over WS: late_suppressed frames send NO hazard;<br/>a priority look sends look_summary instead
     WS-->>PC: result (echoes capture_mono_ms)
-    PC->>PC: age = elapsedRealtime - capture_mono_ms<br/>reject if > speak budget<br/>(CPU pilot ~9s; GPU target 2.5s)
+    PC->>PC: age = elapsedRealtime - capture_mono_ms<br/>reject if > speak budget<br/>(2.5s ceiling; urgent 1.5s)
     alt priority look
         PC->>AM: speakComposed(look_summary)
     else hazard present and fresh
@@ -134,9 +134,9 @@ sequenceDiagram
     AM->>Out: TTS speak (QUEUE_FLUSH urgent / QUEUE_ADD caution)
 ```
 
-**Why the split.** The composer emits `message_key + bearing` (e.g. `vehicle_nearby` / `right`) plus a `spoken_preview` string. The phone re-renders from its own offline template table (`AlertManager.template`), so speech works with the network dead, a Hindi phone always gets Hindi, and an unknown future `message_key` degrades to a safe `Assistance is limited` rather than mis-speaking. `spoken_preview`/`look_summary` are used verbatim only for the on-demand look, which is composed for that single frame.
+**Why the split.** The composer emits `message_key + bearing` (e.g. `vehicle_nearby` / `right`) plus a `spoken_preview` string. The phone re-renders from its own offline template table (`AlertManager.template`), so a Hindi phone gets Hindi and known messages remain available offline. An unknown future `message_key` is logged and suppressed rather than spoken as a machine token. `spoken_preview`/`look_summary` are used verbatim only for the on-demand look, which is composed for that single frame.
 
-**Freshness and honesty gates on the return leg.** The phone computes age with its own `elapsedRealtime()` clock against the echoed `capture_mono_ms` (never a server clock) and drops any result older than the speak budget. Live **CPU remote** pilot uses ~8.5 s (server `ALERT_MAX_AGE_MS=8500`, advertised to the phone in the WebSocket `ready` payload so both ends share one speak budget); GPU / noop keep the tight 2500 ms target. A `late_suppressed` frame carries no hazard at all — the server skips scoring rather than speak an old detection — and a look answered past budget says *"could not check just now"*, never *"no hazard"*.
+**Freshness and honesty gates on the return leg.** The phone computes age with its own `elapsedRealtime()` clock against the echoed `capture_mono_ms` (never a server clock) and drops any result older than the speak budget. Every deployment profile advertises at most 2500 ms; the phone treats that as a ceiling and applies a tighter 1500 ms cap to urgent results. Slow CPU-remote work is shed rather than widening this boundary, and a sustained inability to answer is announced as an inference outage. A `late_suppressed` frame carries no hazard at all — the server skips scoring rather than speak an old detection — and a look answered past budget says *"could not check just now"*, never *"no hazard"*.
 
 **The single speaking lane (`AlertManager`).** Every caller — cloud alert, on-demand look, mode/status message, headset repeat — is serialised onto one worker thread so cooldown maps and the TTS queue stay consistent. Rules enforced there: a 5 s per-object cooldown; one utterance per 2 s (a gap-blocked caution is deferred once, not dropped, so a server admit is not wasted as silence); three alerts in ten seconds collapse to a single *"busy road, careful"*; an S1 urgent phrase flushes a caution mid-word but its own first 350 ms is protected from a following urgent; **haptics always fire, even while muted**, because the buzz is the channel a muted user still relies on — the server's `haptic` pattern when it sends one, otherwise a left/ahead/right bearing cue from `HapticFeedbackEngine` (F-01). Mute auto-expires after 15 minutes so it can never be left silently dead, and single-press repeat replays the last alert if it is under 30 s old.
 
@@ -150,7 +150,7 @@ sequenceDiagram
 | Network round trip | normally 40–220 ms | Discard late work; do not replay it after reconnect |
 | Decode, inference, tracking, scoring | 45–80 ms target | Shed load through server quality guidance; bounded worker queue only |
 | Result validation and audio start | 60–110 ms | Urgent haptic can lead; stale speech is dropped |
-| Glass-to-audio p95 | **CPU pilot under ~9 s; GPU target under 2500 ms** | Speak only within the configured freshness boundary; late results remain diagnostics only |
+| Glass-to-audio p95 | **under 2500 ms for every user-facing profile** | Shed or announce outage; never widen freshness for a slow worker |
 
 Every header includes monotonically increasing `id`, phone-local `capture_mono_ms`, dimensions, JPEG byte count, calibration ID, filtered pitch/roll and pose age. The phone calculates age with its own elapsed-realtime clock and rejects a result if it is too old; it never relies on server-clock comparison. The backend also rejects headers that arrive too quickly and consumes their JPEG companion so the stream remains aligned.
 
@@ -226,7 +226,7 @@ Ground-plane geometry may derive a rough band from a verified mount height, pitc
 
 ### Conservative hazard decision
 
-The scorer considers class, detector confidence, valid proximity, central path corridor and multi-frame stability. S1 urgent output is reserved for a validated nearby central obstruction (`range_valid` plus confidence); S2/caution requires repeated evidence. Vehicle language is awareness-only. On-demand **priority look** (`FrameHeader.priority` or `mode=priority`) skips alert cooldowns / device rate limits and returns a `look_summary` for that frame; the phone speaks it only within the configured speak budget (`ALERT_MAX_AGE_MS=8500` for CPU remote pilot, `2500` for GPU/noop, advertised in the WebSocket `ready` payload). Look never invents approach or crossing advice. MediaSession long-press can request a priority frame after device-specific testing.
+The scorer considers class, detector confidence, valid proximity, central image corridor and multi-frame stability. S1 urgent output is reserved for a validated nearby central obstruction (`range_valid` plus confidence); S2/caution requires repeated evidence. Vehicle language is awareness-only. On-demand **priority look** (`FrameHeader.priority` or `mode=priority`) skips alert cooldowns, uses its own bounded admission bucket, and returns a `look_summary` for that frame; the phone speaks it only within the shared 2500 ms ceiling advertised in the WebSocket `ready` payload. Look returns only bounded awareness from that frame. MediaSession long-press can request a priority frame after device-specific testing.
 
 | Condition | Permitted response | Never infer |
 |---|---|---|
@@ -297,7 +297,8 @@ Run the repository verification baseline with:
 **Phase-0 policy replay** over ≥50 synthetic events in `datasets/phase0/`), and ruff when
 installed. That replay proves fail-closed speech contracts (`motion_evidence`, no approach/cross
 language)—**not** street perception. A green suite is not field-use approval. CI runs the same
-backend gate, Compose config, `gcp_preflight`, and Android unit/APK assembly. See
+backend gate, Compose config, `gcp_preflight`, Android unit/APK assembly, and (on macOS CI) the
+iOS simulator target. See
 this document's delivery and release sections for the engineering release sequence.
 
 | Gate | Minimum evidence before progressing | In-repo support today |
@@ -333,7 +334,7 @@ Stop a session after an unexpected urgent miss, repeated stale alerts, unannounc
 | 1 — one device/route | Visible-start Kotlin service, WSS, one approved server, English/Hindi states and a small alert class set; supervised daylight route only |
 | 2 — survive reality | OEM checklist, bounded queues, heat/battery/network states, regression suite and an evidence-gated fallback decision across phones/carriers |
 | 3 — supervised participant | Accessible onboarding, consent, controlled course then short guided route, incident/replay loop |
-| 4 — small monitored pilot | Approved-device inventory, support, rollout/rollback, privacy workflow and local failure labels; no scale or iOS promise until Android is stable |
+| 4 — small monitored pilot | Approved-device inventory, support, rollout/rollback, privacy workflow and local failure labels; no scale or iOS participant promise until Android is stable |
 
 Deferred features remain an enforceable scope guard. They include GPS hazard memory, optical-flow/looming or local approach tracking, foveated native-resolution uploads, continuous OCR, broad language rollout and large-scale cloud operations. Revisit each only with a specific evidence, privacy, latency and operating-cost case.
 
@@ -343,12 +344,12 @@ An iOS client (`ios/`) exists in this branch but is not a release candidate and 
 distributed to a participant. It shares the Android app's wire protocol and safety boundary but
 not its production hardening:
 
-- **No background operation.** Unlike Android's foreground service + wake lock, iOS has no
-  `camera` background mode. `AVCaptureSession` is force-interrupted the moment the app leaves the
-  foreground (a side-button press, an incoming call, another app claiming the camera). The app
-  observes `AVCaptureSessionWasInterrupted` / `InterruptionEnded` / `RuntimeError` and announces
-  the transition (never goes silent), but assistance genuinely stops until the app is foregrounded
-  again — this is a platform ceiling, not a bug to be fixed later.
+- **No guaranteed continuous background capture.** Unlike Android's foreground service + wake lock,
+  iOS has no `camera` background mode. `AVCaptureSession` can be interrupted when the app leaves
+  the foreground (a side-button press, an incoming call, or another app claiming the camera). The
+  app observes `AVCaptureSessionWasInterrupted` / `InterruptionEnded` / `RuntimeError` and
+  announces the transition (never goes silent), but assistance pauses until the app is foregrounded
+  again — this is a platform ceiling, not a hidden recovery promise.
 - **`BGProcessingTaskRequest` recovery is opportunistic**, not a guaranteed interval like Android's
   `AlarmManager` watchdog. iOS decides if/when it runs.
 - Camera permission, terminal-auth handling, and cross-thread session state have received the same

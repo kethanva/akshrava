@@ -68,7 +68,8 @@ class PreviewSurfaceDrain {
         try {
             reader?.setOnImageAvailableListener(null, null)
             reader?.close()
-        } catch (_: Exception) {
+        } catch (ex: Exception) {
+            Log.w("AkshravaVision", "preview drain release failed", ex)
         }
         reader = null
         handler = null

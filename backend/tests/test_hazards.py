@@ -192,3 +192,73 @@ def test_on_demand_look_answers_a_never_before_seen_object_on_its_first_frame():
     looked = HazardScorer().score(state, 640, 480, 20, -1200, 0, skip_cooldowns=True)
     assert looked is not None
     assert looked.message_key == "person_ahead"
+
+
+def _s2(bearing="ahead"):
+    from akshrava_backend.domain import Hazard
+
+    return Hazard(
+        kind="person",
+        level="caution",
+        bearing=bearing,
+        message_key="person_ahead",
+        haptic="single",
+        confidence=0.6,
+        severity="S2",
+    )
+
+
+def _s1():
+    from akshrava_backend.domain import Hazard
+
+    return Hazard(
+        kind="person",
+        level="urgent",
+        bearing="left",
+        message_key="person_ahead",
+        haptic="double",
+        confidence=0.95,
+        severity="S1",
+    )
+
+
+def test_ambient_s1_is_admitted_after_the_global_budget_is_spent():
+    policy = AlertPolicy()
+    state = SessionState(device_id="test")
+    for index in range(6):
+        state.last_alert_at_ms.clear()
+        assert policy.admit(state, _s2(bearing=f"slot{index}"), priority=False) is not None
+    assert policy.admit(state, _s1(), priority=False) is not None
+
+
+def test_s2_still_yields_to_the_global_budget():
+    policy = AlertPolicy()
+    state = SessionState(device_id="test")
+    for index in range(6):
+        state.last_alert_at_ms.clear()
+        assert policy.admit(state, _s2(bearing=f"slot{index}"), priority=False) is not None
+    state.last_alert_at_ms.clear()
+    assert policy.admit(state, _s2(bearing="overflow"), priority=False) is None
+
+
+def test_admit_with_reason_reports_debounce_and_global_rate_separately():
+    policy = AlertPolicy()
+    state = SessionState(device_id="test")
+    hazard, reason = policy.admit_with_reason(state, _s2(), priority=False)
+    assert hazard is not None and reason is None
+    blocked, debounce = policy.admit_with_reason(state, _s2(), priority=False)
+    assert blocked is None and debounce == "debounce"
+    for index in range(5):
+        state.last_alert_at_ms.clear()
+        policy.admit(state, _s2(bearing=f"slot{index}"), priority=False)
+    state.last_alert_at_ms.clear()
+    dropped, rate = policy.admit_with_reason(state, _s2(bearing="overflow"), priority=False)
+    assert dropped is None and rate == "global_rate"
+
+
+def test_admit_wrapper_preserves_the_legacy_signature():
+    policy = AlertPolicy()
+    state = SessionState(device_id="test")
+    assert policy.admit(state, None, priority=False) is None
+    assert policy.admit(state, _s2(), priority=False) is not None
+

@@ -118,6 +118,9 @@ object FrameGate {
     /** Consecutive blurred frames before the wipe-lens prompt is worth saying (F-72). */
     const val BLUR_FRAMES_BEFORE_ANNOUNCE = 5
 
+    /** Consecutive glared frames before the turn-slightly prompt is worth saying (F-42). */
+    const val GLARE_FRAMES_BEFORE_ANNOUNCE = 3
+
     /** Gap between repeats of the wipe-lens prompt. */
     const val BLUR_ANNOUNCE_COOLDOWN_MS = 60_000L
 

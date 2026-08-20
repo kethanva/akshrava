@@ -244,3 +244,28 @@ variable "cloud_armor_domain" {
   default     = ""
   description = "Domain for the External HTTPS LB's managed SSL certificate. Required when enable_cloud_armor=true; point its DNS A record at the akshrava_api_lb_ip output before applying, or the managed certificate will stay PROVISIONING indefinitely."
 }
+
+variable "monitoring_notification_channels" {
+  type        = list(string)
+  default     = []
+  description = "Cloud Monitoring notification channel IDs (projects/<p>/notificationChannels/<id>). An alert policy with no channel fires into an empty room: nobody is paged. Required in production."
+}
+
+variable "worker_infer_timeout_seconds" {
+  type        = number
+  default     = 0
+  description = "GPU worker inference deadline. 0 derives it from worker_use_gpu (0.5 s GPU / 2.2 s CPU). Must stay below the API's REMOTE_INFERENCE_TIMEOUT_MS so the API sees a signed 504 rather than its own client timeout."
+
+  validation {
+    condition     = var.worker_infer_timeout_seconds == 0 || (var.worker_infer_timeout_seconds >= 0.2 && var.worker_infer_timeout_seconds <= 3)
+    error_message = "worker_infer_timeout_seconds must be 0 (derive) or between 0.2 and 3."
+  }
+}
+
+check "worker_deadline_below_api_deadline" {
+  assert {
+    condition     = var.detector != "remote" || local.worker_infer_timeout_seconds * 1000 < local.remote_inference_timeout_ms
+    error_message = "The worker deadline must be strictly below REMOTE_INFERENCE_TIMEOUT_MS, or the API times out its own client and the circuit breaker attributes the failure to the network instead of the model."
+  }
+}
+

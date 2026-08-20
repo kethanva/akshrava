@@ -35,12 +35,13 @@ resource "google_compute_instance" "worker" {
   metadata = {
     google-logging-enabled = "true"
     startup-script = templatefile("${path.module}/scripts/worker-startup.sh.tftpl", {
-      project_id          = var.project_id
-      region              = var.region
-      worker_image        = local.worker_image
-      environment         = var.environment
-      yolo_weights_sha256 = var.yolo_weights_sha256
-      worker_use_gpu      = var.worker_use_gpu
+      project_id                   = var.project_id
+      region                       = var.region
+      worker_image                 = local.worker_image
+      environment                  = var.environment
+      yolo_weights_sha256          = var.yolo_weights_sha256
+      worker_use_gpu               = var.worker_use_gpu
+      worker_infer_timeout_seconds = local.worker_infer_timeout_seconds
     })
   }
 
@@ -58,6 +59,7 @@ resource "google_compute_instance" "worker" {
     google_secret_manager_secret_version.worker_tls_server_cert,
     google_secret_manager_secret_version.worker_tls_server_key,
     google_secret_manager_secret_version.metrics_scrape_token,
+    google_secret_manager_secret_version.redis_ca,
     google_artifact_registry_repository.containers,
   ]
 }
@@ -134,8 +136,11 @@ resource "google_cloud_run_v2_service" "api" {
   ingress = local.cloud_armor_enabled ? "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER" : "INGRESS_TRAFFIC_ALL"
 
   template {
-    service_account = google_service_account.api_sa.email
-    timeout         = "3600s"
+    # Long-lived WebSockets consume one concurrency slot each. Keep the per-instance buffer and
+    # event-loop fan-in bounded; max_active_sessions=200 then scales across at most ten instances.
+    max_instance_request_concurrency = 20
+    service_account                  = google_service_account.api_sa.email
+    timeout                          = "3600s"
     scaling {
       # Keep at least one warm instance for WSS reliability in pilot/production.
       min_instance_count = 1
@@ -222,6 +227,26 @@ resource "google_cloud_run_v2_service" "api" {
         }
         # Keep CPU allocated outside requests so WebSocket sessions stay alive.
         cpu_idle = false
+      }
+
+      startup_probe {
+        http_get {
+          path = "/readyz"
+          port = 8000
+        }
+        initial_delay_seconds = 5
+        period_seconds        = 5
+        timeout_seconds       = 3
+        failure_threshold     = 12
+      }
+      liveness_probe {
+        http_get {
+          path = "/livez"
+          port = 8000
+        }
+        period_seconds    = 30
+        timeout_seconds   = 3
+        failure_threshold = 3
       }
 
       volume_mounts {
@@ -327,10 +352,10 @@ resource "google_cloud_run_v2_service" "api" {
       }
       env {
         name = "ALERT_MAX_AGE_MS"
-        # GPU / noop keep the tight 2.5 s speak boundary. CPU remote YOLO routinely needs several
-        # seconds; align with REMOTE_INFERENCE_TIMEOUT_MS so scored hazards are not late-suppressed
-        # while inference is still inside the allowed remote budget.
-        value = var.worker_use_gpu || var.detector != "remote" ? "2500" : "8500"
+        # Shared server/phone freshness ceiling. A slow CPU bench result can still be counted as
+        # late telemetry, but it must never score a hazard at 8.5 s and invite a phone to speak
+        # about a frame the user captured many seconds earlier.
+        value = "2500"
       }
       env {
         name  = "MIN_FRAME_INTERVAL_MS"
@@ -346,14 +371,14 @@ resource "google_cloud_run_v2_service" "api" {
       }
       env {
         name = "INFERENCE_TIMEOUT_MS"
-        # Cap the outer wait_for at the speak budget. Spending past ALERT_MAX_AGE_MS only
-        # produces late_suppressed frames (service.py), so CPU remote matches 8500 rather than
-        # a wider 9000 that burned inference for results the phone would never speak.
-        value = var.worker_use_gpu || var.detector != "remote" ? "800" : "8500"
+        # CPU remote remains a bench option, but it gets no larger user-facing freshness budget.
+        # Sustained inability to answer inside 2.5 s opens the circuit and is announced by phones
+        # instead of leaving a nominally connected session silent indefinitely.
+        value = var.worker_use_gpu || var.detector != "remote" ? "800" : "2500"
       }
       env {
         name  = "REMOTE_INFERENCE_TIMEOUT_MS"
-        value = var.worker_use_gpu || var.detector != "remote" ? "450" : "8500"
+        value = tostring(local.remote_inference_timeout_ms)
       }
       env {
         name  = "INFERENCE_EXECUTOR_WORKERS"

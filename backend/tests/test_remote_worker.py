@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,7 +18,7 @@ from akshrava_backend.detector import (
     StaticInferenceEndpointRegistry,
 )
 from akshrava_backend.domain import Detection
-from akshrava_backend.worker import WorkerSettings, create_worker_app
+from akshrava_backend.worker import WorkerSettings, _batch_loop, create_worker_app
 
 JPEG = base64.b64decode(
     "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////"
@@ -101,6 +102,19 @@ def test_gpu_worker_rejects_legacy_base64_json_bodies():
         assert response.status_code == 415
 
 
+def test_gpu_worker_rejects_oversized_body_before_buffering_or_inference():
+    settings = WorkerSettings(SECRET, "unused.pt", 512, 1280, 30, require_gpu=False)
+    app = create_worker_app(settings, FixedDetector())
+    body = b"x" * 513
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/infer",
+            content=body,
+            headers={**_signed_headers(body), "Content-Type": "image/jpeg"},
+        )
+    assert response.status_code == 413
+
+
 def test_gpu_worker_uses_detector_batch_contract():
     detector = BatchDetector()
     settings = WorkerSettings(SECRET, "unused.pt", 200_000, 1280, 30, require_gpu=False, batch_wait_ms=0)
@@ -177,6 +191,7 @@ def test_gpu_worker_infer_fails_fast_instead_of_hanging_on_a_stuck_detector():
             "/v1/infer", content=JPEG, headers={**_signed_headers(JPEG), "Content-Type": "image/jpeg"}
         )
         elapsed = time.monotonic() - started
+        assert client.get("/readyz").status_code == 503
     assert response.status_code == 504
     assert elapsed < 2.0, "a stuck detector must not hang the request past its own timeout"
 
@@ -199,6 +214,36 @@ def test_gpu_worker_drains_queued_futures_on_shutdown_instead_of_hanging_them():
     future = asyncio.run(scenario())
     assert future.done()
     assert isinstance(future.exception(), RuntimeError)
+
+
+def test_cancelled_queued_request_does_not_leave_idle_worker_unready():
+    async def scenario():
+        queue = asyncio.Queue()
+        future = asyncio.get_running_loop().create_future()
+        future.cancel()
+        app = SimpleNamespace(
+            state=SimpleNamespace(
+                inference_queue=queue,
+                worker_settings=WorkerSettings(
+                    SECRET, "unused.pt", 200_000, 1280, 30, require_gpu=False, batch_wait_ms=0
+                ),
+                worker_detector=FixedDetector(),
+                batch_started_at=0.0,
+                detector_unresponsive=True,
+            )
+        )
+        task = asyncio.create_task(_batch_loop(app))
+        await queue.put((JPEG, future))
+        for _ in range(10):
+            if not app.state.detector_unresponsive:
+                break
+            await asyncio.sleep(0)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        assert app.state.detector_unresponsive is False
+
+    asyncio.run(scenario())
 
 
 def test_gpu_worker_readiness_fails_when_replay_protection_is_unavailable(monkeypatch):
@@ -423,7 +468,7 @@ def test_worker_settings_from_env_validation(monkeypatch):
         "WORKER_BATCH_WAIT_MS": "12",
         "AKSHRAVA_ENV": "development",
         "NONCE_REDIS_URL": "redis://localhost:6379/0",
-        "WORKER_INFER_TIMEOUT_SECONDS": "5.0",
+        "WORKER_INFER_TIMEOUT_SECONDS": "1.0",
         "METRICS_SCRAPE_TOKEN": "token123",
     }
 
@@ -494,6 +539,51 @@ def test_worker_settings_from_env_validation(monkeypatch):
             WorkerSettings.from_env()
 
 
+def test_worker_default_deadline_is_inside_the_api_remote_budget(monkeypatch):
+    assert WorkerSettings.__dataclass_fields__["infer_timeout_seconds"].default == 1.0
+    monkeypatch.setattr(
+        "os.environ",
+        {
+            "WORKER_SHARED_SECRET": SECRET,
+            "YOLO_WEIGHTS": "/models/yolo.pt",
+            "YOLO_WEIGHTS_SHA256": "a" * 64,
+            "MAX_IMAGE_BYTES": "200000",
+            "MAX_FRAME_SIDE": "1280",
+            "WORKER_REQUEST_MAX_AGE_SECONDS": "30",
+            "REQUIRE_GPU": "false",
+            "WORKER_BATCH_MAX_SIZE": "8",
+            "WORKER_BATCH_WAIT_MS": "12",
+            "AKSHRAVA_ENV": "development",
+            "NONCE_REDIS_URL": "redis://localhost:6379/0",
+            "METRICS_SCRAPE_TOKEN": "token123",
+        },
+    )
+    loaded = WorkerSettings.from_env()
+    assert loaded.infer_timeout_seconds == 1.0
+    assert loaded.infer_timeout_seconds * 1000 < 2400
+
+
+def test_production_rejects_a_worker_deadline_longer_than_the_api_budget(monkeypatch):
+    monkeypatch.setattr(
+        "os.environ",
+        {
+            "WORKER_SHARED_SECRET": SECRET,
+            "YOLO_WEIGHTS": "/models/yolo.pt",
+            "YOLO_WEIGHTS_SHA256": "a" * 64,
+            "MAX_IMAGE_BYTES": "200000",
+            "MAX_FRAME_SIDE": "1280",
+            "WORKER_REQUEST_MAX_AGE_SECONDS": "30",
+            "REQUIRE_GPU": "false",
+            "WORKER_BATCH_MAX_SIZE": "8",
+            "WORKER_BATCH_WAIT_MS": "12",
+            "AKSHRAVA_ENV": "production",
+            "NONCE_REDIS_URL": "redis://localhost:6379/0",
+            "WORKER_INFER_TIMEOUT_SECONDS": "5.0",
+            "METRICS_SCRAPE_TOKEN": "token123",
+        },
+    )
+    with pytest.raises(ValueError, match="must not exceed 3.0"):
+        WorkerSettings.from_env()
 
 
 def _signing_fields(headers):

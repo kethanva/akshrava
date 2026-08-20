@@ -1,7 +1,10 @@
 """Bounded session admission for WebSocket walking sessions.
 
-Development keeps a process-local counter. Production uses Redis so horizontally scaled API
+Development keeps a process-local map. Production uses Redis so horizontally scaled API
 replicas share one fleet-wide concurrent-session budget instead of each admitting up to the cap.
+
+The unit of admission is ``device_id`` (one live walking socket per phone). ``session_id`` is a
+fencing token so a reconnect can take over without a stale ``finally`` block deleting the winner.
 """
 
 import asyncio
@@ -10,19 +13,23 @@ from abc import ABC, abstractmethod
 
 DEFAULT_LEASE_SECONDS = 180  # Short lease; clients renew via ping / frame traffic.
 
+ADMITTED = "admitted"
+AT_CAPACITY = "at_capacity"
+SUPERSEDED = "superseded"
+
 
 class SessionAdmission(ABC):
     @abstractmethod
-    async def try_open(self, session_id: str) -> bool:
-        """Reserve capacity for a session id."""
+    async def try_open(self, device_id: str, session_id: str) -> str:
+        """Reserve capacity for this device. Newest session wins if the device is already live."""
 
     @abstractmethod
-    async def renew(self, session_id: str) -> bool:
-        """Extend an active session lease. Return False if the lease is gone."""
+    async def renew(self, device_id: str, session_id: str) -> str:
+        """Extend an active session lease. SUPERSEDED if another session owns the device."""
 
     @abstractmethod
-    async def close(self, session_id: str) -> None:
-        """Release a previously reserved session id."""
+    async def close(self, device_id: str, session_id: str) -> None:
+        """Release capacity only if this session still owns the device."""
 
     @abstractmethod
     async def health(self) -> None:
@@ -36,31 +43,33 @@ class SessionAdmission(ABC):
 class InMemorySessionAdmission(SessionAdmission):
     def __init__(self, maximum: int):
         self.maximum = maximum
-        self._active = 0
-        self._sessions = set()
+        self._owners: dict[str, str] = {}
         self._lock = asyncio.Lock()
 
-    async def try_open(self, session_id: str) -> bool:
+    async def try_open(self, device_id: str, session_id: str) -> str:
         async with self._lock:
-            if session_id in self._sessions:
-                return True
-            if self._active >= self.maximum:
-                return False
-            self._active += 1
-            self._sessions.add(session_id)
-            return True
+            current = self._owners.get(device_id)
+            if current is None and len(self._owners) >= self.maximum:
+                return AT_CAPACITY
+            self._owners[device_id] = session_id
+            return ADMITTED
 
-    async def renew(self, session_id: str) -> bool:
-        # In-memory admission has no TTL; presence is enough.
+    async def renew(self, device_id: str, session_id: str) -> str:
         async with self._lock:
-            return session_id in self._sessions
+            current = self._owners.get(device_id)
+            if current is not None and current != session_id:
+                return SUPERSEDED
+            if current is None:
+                if len(self._owners) >= self.maximum:
+                    return AT_CAPACITY
+                self._owners[device_id] = session_id
+                return ADMITTED
+            return ADMITTED
 
-    async def close(self, session_id: str) -> None:
+    async def close(self, device_id: str, session_id: str) -> None:
         async with self._lock:
-            if session_id not in self._sessions:
-                return
-            self._sessions.remove(session_id)
-            self._active = max(0, self._active - 1)
+            if self._owners.get(device_id) == session_id:
+                del self._owners[device_id]
 
     async def health(self) -> None:
         return None
@@ -70,52 +79,81 @@ class InMemorySessionAdmission(SessionAdmission):
 
     @property
     def active(self) -> int:
-        return self._active
+        return len(self._owners)
 
 
 class RedisSessionAdmission(SessionAdmission):
-    """Atomic fleet-wide session cap backed by a Redis sorted set."""
+    """Atomic fleet-wide session cap: ZSET of device_id + STRING fencing token per device."""
 
-    _SCRIPT = """
-local key = KEYS[1]
+    _OPEN_SCRIPT = """
+local zset = KEYS[1]
+local owner = KEYS[2]
 local session_id = ARGV[1]
 local now = tonumber(ARGV[2])
-local lease_seconds = tonumber(ARGV[3])
+local lease = tonumber(ARGV[3])
 local maximum = tonumber(ARGV[4])
-redis.call('ZREMRANGEBYSCORE', key, '-inf', now)
-if redis.call('ZSCORE', key, session_id) then
-  redis.call('ZADD', key, now + lease_seconds, session_id)
-  redis.call('EXPIRE', key, lease_seconds)
-  return 1
-end
-if redis.call('ZCARD', key) >= maximum then
+local device_id = ARGV[5]
+redis.call('ZREMRANGEBYSCORE', zset, '-inf', now)
+local existing = redis.call('ZSCORE', zset, device_id)
+if (not existing) and redis.call('ZCARD', zset) >= maximum then
   return 0
 end
-redis.call('ZADD', key, now + lease_seconds, session_id)
-redis.call('EXPIRE', key, lease_seconds)
+local previous = redis.call('GET', owner)
+redis.call('SET', owner, session_id, 'EX', lease)
+redis.call('ZADD', zset, now + lease, device_id)
+redis.call('EXPIRE', zset, lease)
+if previous and previous ~= session_id then
+  return 2
+end
 return 1
 """
 
     _RENEW_SCRIPT = """
-local key = KEYS[1]
+local zset = KEYS[1]
+local owner = KEYS[2]
 local session_id = ARGV[1]
 local now = tonumber(ARGV[2])
-local lease_seconds = tonumber(ARGV[3])
-redis.call('ZREMRANGEBYSCORE', key, '-inf', now)
-if not redis.call('ZSCORE', key, session_id) then
-  return 0
+local lease = tonumber(ARGV[3])
+local maximum = tonumber(ARGV[4])
+local device_id = ARGV[5]
+redis.call('ZREMRANGEBYSCORE', zset, '-inf', now)
+local previous = redis.call('GET', owner)
+if previous and previous ~= session_id then
+  return 2
 end
-redis.call('ZADD', key, now + lease_seconds, session_id)
-redis.call('EXPIRE', key, lease_seconds)
+if not previous then
+  local existing = redis.call('ZSCORE', zset, device_id)
+  if (not existing) and redis.call('ZCARD', zset) >= maximum then
+    return 0
+  end
+end
+redis.call('SET', owner, session_id, 'EX', lease)
+redis.call('ZADD', zset, now + lease, device_id)
+redis.call('EXPIRE', zset, lease)
 return 1
 """
 
-    def __init__(self, url: str, maximum: int, namespace: str = "akshrava:session-admission"):
+    _CLOSE_SCRIPT = """
+local zset = KEYS[1]
+local owner = KEYS[2]
+local session_id = ARGV[1]
+local device_id = ARGV[2]
+if redis.call('GET', owner) == session_id then
+  redis.call('DEL', owner)
+  redis.call('ZREM', zset, device_id)
+end
+return 1
+"""
+
+    def __init__(self, url: str, maximum: int, namespace: str = "{akshrava:session-admission}"):
         self.url = url
         self.maximum = maximum
         self.namespace = namespace
         self.lease_seconds = DEFAULT_LEASE_SECONDS
         self._client = None
+
+    def _owner_key(self, device_id: str) -> str:
+        return f"{self.namespace}:device:{device_id}"
 
     async def _client_for_use(self):
         if self._client is None:
@@ -126,23 +164,61 @@ return 1
             )
         return self._client
 
-    async def try_open(self, session_id: str) -> bool:
-        client = await self._client_for_use()
-        # Redis leases must use wall-clock epoch seconds shared across replicas. asyncio loop
-        # time is monotonic and process-local; mixing it into Redis would desync expiry.
-        now = time.time()
-        result = await client.eval(self._SCRIPT, 1, self.namespace, session_id, now, self.lease_seconds, self.maximum)
-        return bool(result)
+    def _map_open(self, result) -> str:
+        if int(result) == 0:
+            return AT_CAPACITY
+        return ADMITTED
 
-    async def renew(self, session_id: str) -> bool:
+    def _map_renew(self, result) -> str:
+        code = int(result)
+        if code == 0:
+            return AT_CAPACITY
+        if code == 2:
+            return SUPERSEDED
+        return ADMITTED
+
+    async def try_open(self, device_id: str, session_id: str) -> str:
         client = await self._client_for_use()
         now = time.time()
-        result = await client.eval(self._RENEW_SCRIPT, 1, self.namespace, session_id, now, self.lease_seconds)
-        return bool(result)
+        result = await client.eval(
+            self._OPEN_SCRIPT,
+            2,
+            self.namespace,
+            self._owner_key(device_id),
+            session_id,
+            now,
+            self.lease_seconds,
+            self.maximum,
+            device_id,
+        )
+        return self._map_open(result)
 
-    async def close(self, session_id: str) -> None:
+    async def renew(self, device_id: str, session_id: str) -> str:
         client = await self._client_for_use()
-        await client.zrem(self.namespace, session_id)
+        now = time.time()
+        result = await client.eval(
+            self._RENEW_SCRIPT,
+            2,
+            self.namespace,
+            self._owner_key(device_id),
+            session_id,
+            now,
+            self.lease_seconds,
+            self.maximum,
+            device_id,
+        )
+        return self._map_renew(result)
+
+    async def close(self, device_id: str, session_id: str) -> None:
+        client = await self._client_for_use()
+        await client.eval(
+            self._CLOSE_SCRIPT,
+            2,
+            self.namespace,
+            self._owner_key(device_id),
+            session_id,
+            device_id,
+        )
 
     async def health(self) -> None:
         client = await self._client_for_use()

@@ -96,13 +96,38 @@ class AssistService : LifecycleService() {
          */
         internal fun shouldRebindForStall(nowMs: Long, lastAnalyzeAtMs: Long): Boolean =
             lastAnalyzeAtMs > 0L && nowMs - lastAnalyzeAtMs > CAMERA_STALL_REBIND_MS
+
+        /**
+         * Duplicate START on a healthy session must be ignored. A terminal client (revoked,
+         * token rejected, session taken over) is still non-null, so Start must rebuild.
+         */
+        internal fun ignoresDuplicateStart(
+            stopping: Boolean,
+            hasClient: Boolean,
+            hasAlertManager: Boolean,
+            clientTerminal: Boolean
+        ): Boolean =
+            !stopping && !(hasClient && clientTerminal) && hasClient && hasAlertManager
+
+        internal const val ANALYZE_FAILURES_BEFORE_STOP = 5
+        internal const val ANALYZE_FAILURE_ANNOUNCE_COOLDOWN_MS = 8_000L
+
+        internal fun shouldAnnounceAnalyzeFailure(
+            nowMs: Long,
+            consecutiveFailures: Int,
+            lastAnnounceMs: Long
+        ): Boolean {
+            if (consecutiveFailures < 2) return false
+            if (lastAnnounceMs == 0L) return true
+            return nowMs - lastAnnounceMs >= ANALYZE_FAILURE_ANNOUNCE_COOLDOWN_MS
+        }
     }
 
     private var frameExecutor: ExecutorService? = null
-    private var frameEncoder: FrameEncoder? = null
-    private var poseTracker: PoseTracker? = null
-    private var alertManager: AlertManager? = null
-    private var client: ProtocolClient? = null
+    @Volatile private var frameEncoder: FrameEncoder? = null
+    @Volatile private var poseTracker: PoseTracker? = null
+    @Volatile private var alertManager: AlertManager? = null
+    @Volatile private var client: ProtocolClient? = null
     private var http: OkHttpClient? = null
     private var calibrationId: String = ""
     private var headsetControls: HeadsetControls? = null
@@ -121,6 +146,7 @@ class AssistService : LifecycleService() {
     private var extremeTiltSinceMs: Long? = null
     private var framesAnalyzed = 0L
     private val framePending = AtomicBoolean(false)
+    private val frameSlotLock = Any()
 
     /**
      * When the current in-flight slot was claimed, or 0 when free.
@@ -148,6 +174,7 @@ class AssistService : LifecycleService() {
     private var lastCameraUnclearMs: Long? = null
     private var lastHeartbeatMs = 0L
     private var lastWakeLockRenewAtMs = 0L
+    @Volatile private var wakeKeepAliveWarningAnnounced = false
     /**
      * When the analyzer last ran, in [SystemClock.elapsedRealtime].
      *
@@ -185,6 +212,8 @@ class AssistService : LifecycleService() {
     private var consecutiveBlurredFrames = 0
     private var consecutiveOccludedFrames = 0
     private var consecutiveGlaredFrames = 0
+    private var consecutiveAnalyzeFailures = 0
+    private var lastAnalyzeFailureAnnounceMs = 0L
     private var previousThumbnail: IntArray? = null
     private val capturePolicy = CapturePolicy()
     private var linkQuality = LinkQualityController()
@@ -216,9 +245,8 @@ class AssistService : LifecycleService() {
                 if (shouldRebindForStall(now, last)) {
                     Log.w("AkshravaDebug", "camera_stall rebind after=${now - last}ms")
                     lastAnalyzeAtMs = now
-                    framePending.set(false)
                     deferredAnalysisSide = null
-                    alertManager?.status("Camera stalled. Recovering.")
+                    alertManager?.statusKey("op_camera_stalled")
                     bindCamera()
                 }
             }
@@ -249,12 +277,16 @@ class AssistService : LifecycleService() {
         // here closed the WSS, reset the cloud tracker, and briefly set canStream=false —
         // the soak run showed svc_restart at ~96s with client=true while results were still
         // flowing, which is exactly the mid-walk "assistance died then came back" flap.
-        // A terminally-dead client (device revoked, token rejected — handlePermanentFailure
-        // stops the reconnect executor) is still non-null, so a plain non-null check here would
-        // swallow the Start press that is the user's ONLY way back. Only a session that can
-        // still recover by itself may ignore a duplicate Start; a terminal one must rebuild.
-        val recoverable = client?.isTerminal() != true
-        if (!stopping && recoverable && client != null && alertManager != null) {
+        // A terminally-dead client (device revoked, token rejected, session taken over —
+        // handlePermanentFailure stops the reconnect executor) is still non-null, so a plain
+        // non-null check here would swallow the Start press that is the user's ONLY way back.
+        if (ignoresDuplicateStart(
+                stopping = stopping,
+                hasClient = client != null,
+                hasAlertManager = alertManager != null,
+                clientTerminal = client?.isTerminal() == true
+            )
+        ) {
             Log.i("AkshravaDebug", "svc_start ignored; session already active")
             // #region agent log
             AgentDebugLog.log(
@@ -269,7 +301,7 @@ class AssistService : LifecycleService() {
 
         // Bump generation so any TTS completion callback still in flight (AlertManager.shutdown
         // re-posts them) becomes a no-op against this new session.
-        assistanceGeneration.incrementAndGet()
+        val activeGeneration = assistanceGeneration.incrementAndGet()
         if (stopping || client != null || alertManager != null) {
             // stopping: interrupt in-progress Stop. client XOR alertManager: rebuild a half-dead
             // or camera-failure leftover so Start itself is the recovery action (and so we do
@@ -284,7 +316,12 @@ class AssistService : LifecycleService() {
         stopping = false
         val config = AppConfigStore.load(this)
         AgentDebugLog.bind(this, config.debugTelemetry)
-        Log.i("AkshravaDebug", "svc_start endpoint=${config.endpoint} calib=${config.calibrationId} lang=${config.language} hasToken=${config.deviceToken.isNotBlank()}")
+        Log.i(
+            "AkshravaDebug",
+            "svc_start endpoint_class=${EndpointPolicy.classify(config.endpoint).logValue} " +
+                "calib_set=${config.calibrationId.isNotBlank()} lang=${config.language} " +
+                "hasToken=${config.deviceToken.isNotBlank()}"
+        )
         // #region agent log
         AgentDebugLog.log(
             "H1",
@@ -300,6 +337,12 @@ class AssistService : LifecycleService() {
         )
         // #endregion
         if (!endpointAllowed(config.endpoint)) {
+            Log.e("AkshravaVision", "assistance_start_rejected reason=invalid_endpoint")
+            stopSelf()
+            return
+        }
+        if (!config.hasRequiredProvisioning()) {
+            Log.e("AkshravaVision", "assistance_start_rejected reason=incomplete_provisioning")
             stopSelf()
             return
         }
@@ -315,14 +358,18 @@ class AssistService : LifecycleService() {
         poseTracker = PoseTracker(this).also { it.start() }
         val am = AlertManager(this, config.language).also { alertManager = it }
         val manager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = manager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Akshrava:camera").also {
-            // Not reference counted: the session re-acquires this lock periodically to re-arm its
-            // timeout (see maybeRenewWakeLocks). With the default counting behaviour each renewal
-            // would add a hold that the single release() in teardown could never balance, leaking
-            // the CPU lock for the life of the process.
-            it.setReferenceCounted(false)
-            it.acquire(WAKE_LOCK_TIMEOUT_MS)
-        }
+        wakeLock = runCatching {
+            manager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Akshrava:camera").also {
+                // Not reference counted: the session re-acquires this lock periodically to re-arm its
+                // timeout (see maybeRenewWakeLocks). With the default counting behaviour each renewal
+                // would add a hold that the single release() in teardown could never balance, leaking
+                // the CPU lock for the life of the process.
+                it.setReferenceCounted(false)
+                it.acquire(WAKE_LOCK_TIMEOUT_MS)
+            }
+        }.onFailure {
+            Log.e("AkshravaVision", "CPU wake-lock acquisition failed", it)
+        }.getOrNull()
         lastWakeLockRenewAtMs = SystemClock.elapsedRealtime()
         val httpClient = OkHttpClient.Builder().pingInterval(20, java.util.concurrent.TimeUnit.SECONDS).build().also { http = it }
         // Donated / low-RAM phones start on a cheaper ladder before the first server quality hint.
@@ -333,15 +380,18 @@ class AssistService : LifecycleService() {
         capturePolicy.batteryLow = batteryLow
         boundAnalysisMaxSide = analysisTargetSide(quality.maxSide)
         deferredAnalysisSide = null
-        framePending.set(false)
+        resetFrameSlot()
         framesAnalyzed = 0L
         frameId = 0L
         lastAnalyzeAtMs = 0L
         lastCaptureMs = 0L
         previousThumbnail = null
+        lookRequested.set(false)
         consecutiveBlurredFrames = 0
         consecutiveOccludedFrames = 0
         consecutiveGlaredFrames = 0
+        consecutiveAnalyzeFailures = 0
+        lastAnalyzeFailureAnnounceMs = 0L
         lastCameraUnclearMs = null
         extremeTiltSinceMs = null
         captureSuspendedForBattery = false
@@ -350,22 +400,45 @@ class AssistService : LifecycleService() {
             endpoint = config.endpoint,
             token = config.deviceToken,
             alertManager = am,
-            onState = { status -> updateNotification(status) },
-            onFrameSettled = { onFrameSlotSettled() },
-            onQuality = { updated -> applyEffectiveQuality(linkQuality.onServerQuality(updated)) },
-            onHighAlert = {
-                capturePolicy.markHighAlert(SystemClock.elapsedRealtime())
+            onState = { status ->
+                if (isCurrentAssistance(activeGeneration)) updateNotification(status)
             },
-            onRoundTripMs = { rtt -> applyEffectiveQuality(linkQuality.onRoundTrip(rtt)) },
-            onSettleTimeout = { applyEffectiveQuality(linkQuality.onSettleTimeout()) },
+            onFrameSettled = { onFrameSlotSettled(activeGeneration) },
+            onQuality = { updated ->
+                if (isCurrentAssistance(activeGeneration)) {
+                    applyEffectiveQuality(linkQuality.onServerQuality(updated))
+                }
+            },
+            onHighAlert = {
+                if (isCurrentAssistance(activeGeneration)) {
+                    capturePolicy.markHighAlert(SystemClock.elapsedRealtime())
+                }
+            },
+            onRoundTripMs = { rtt ->
+                if (isCurrentAssistance(activeGeneration)) {
+                    applyEffectiveQuality(linkQuality.onRoundTrip(rtt))
+                }
+            },
+            onSettleTimeout = {
+                if (isCurrentAssistance(activeGeneration)) {
+                    applyEffectiveQuality(linkQuality.onSettleTimeout())
+                }
+            },
             onResultTelemetry = { telemetry ->
-                if (telemetry.lateSuppressed) {
+                if (isCurrentAssistance(activeGeneration) && telemetry.lateSuppressed) {
                     Log.i(
                         "AkshravaVision",
                         "result_late_suppressed frame=${telemetry.frameId} " +
                             "detections=${telemetry.detectionCount} labels=${telemetry.labels} " +
                             "age_ms=${telemetry.resultAgeMs}"
                     )
+                }
+            },
+            onTerminal = { key ->
+                ContextCompat.getMainExecutor(this).execute {
+                    if (isCurrentAssistance(activeGeneration)) {
+                        stopAfterUnrecoverableFailure(key, "Session ended")
+                    }
                 }
             },
             language = config.language,
@@ -376,12 +449,25 @@ class AssistService : LifecycleService() {
         reflexEngine = ReflexFactory.create(this)
         headsetControls = HeadsetControls(
             this,
-            onRepeat = { am.repeatLast() },
-            onMute = { am.muteFor(15 * 60_000L) },
-            onLook = { lookRequested.set(true); am.acknowledgeLook() },
+            onRepeat = {
+                if (isCurrentAssistance(activeGeneration)) am.repeatLast()
+            },
+            onMute = {
+                if (isCurrentAssistance(activeGeneration)) am.toggleMute()
+            },
+            onLook = {
+                if (isCurrentAssistance(activeGeneration)) {
+                    lookRequested.set(true)
+                    am.acknowledgeLook()
+                }
+            },
             // Earbuds died or the cable was pulled (F-17). Say so and keep going: silence here
             // would be indistinguishable from a dead app to someone who cannot see the screen.
-            onAudioRouteLost = { am.status("Headset disconnected. Alerts now play on the speaker.") }
+            onAudioRouteLost = {
+                if (isCurrentAssistance(activeGeneration)) {
+                    am.statusKey("op_headset_disconnected")
+                }
+            }
         ).also { it.start() }
         gestureDetectorEngine = GestureDetectorEngine(
             // Double shake = one immediate look (F-31), nothing else. Speaking anything additional
@@ -390,8 +476,10 @@ class AssistService : LifecycleService() {
                 // Samples arrive on the sensor thread; acknowledgeLook vibrates and speaks, and
                 // blocking there stalls delivery for PoseTracker, which shares the registration.
                 mainHandler.post {
-                    lookRequested.set(true)
-                    am.acknowledgeLook()
+                    if (isCurrentAssistance(activeGeneration)) {
+                        lookRequested.set(true)
+                        am.acknowledgeLook()
+                    }
                 }
             }
         ).also { engine ->
@@ -404,7 +492,9 @@ class AssistService : LifecycleService() {
         ambientLightMonitor = AmbientLightMonitor(this) { level ->
             // Samples arrive on the sensor thread; status() speaks, so hop off it for the same
             // reason the gesture engine does — PoseTracker shares that thread.
-            mainHandler.post { announceAmbientLightEdge(am, level) }
+            mainHandler.post {
+                if (isCurrentAssistance(activeGeneration)) announceAmbientLightEdge(am, level)
+            }
         }.also { monitor ->
             // A phone with no light sensor simply never gets this context. It is additive
             // awareness, so its absence is logged, not spoken: it is not a fault the user can act on.
@@ -412,9 +502,11 @@ class AssistService : LifecycleService() {
         }
         // A session only survives a long walk if the display stays awake: many OEM ROMs stop
         // delivering CameraX frames once the screen sleeps, which ends the walk silently. The
-        // overlay is the only thing that guarantees it, and it needs a permission the user must
-        // grant by hand, so treat a failure here as a first-class warning rather than a detail.
+        // overlay is preferred and the timed screen wake-lock is the fallback. Treat failure of
+        // both as a first-class warning rather than a detail.
         val holdingScreenOn = ScreenKeepAlive(this).also { screenKeepAlive = it }.start()
+        val holdingCpuAwake = wakeLock?.isHeld == true
+        wakeKeepAliveWarningAnnounced = !holdingScreenOn || !holdingCpuAwake
         // #region agent log
         AgentDebugLog.log(
             "H1",
@@ -451,14 +543,13 @@ class AssistService : LifecycleService() {
         mainHandler.removeCallbacks(cameraStallCheck)
         mainHandler.postDelayed(cameraStallCheck, CAMERA_STALL_CHECK_MS)
         Log.i("AkshravaDebug", "svc_started screen_keep_alive=$holdingScreenOn mode=${screenKeepAlive?.mode}")
-        am.status(
-            if (holdingScreenOn) {
-                "Assistance started"
+        am.statusKey(
+            if (holdingScreenOn && holdingCpuAwake) {
+                "op_starting"
+            } else if (holdingScreenOn) {
+                "op_starting_no_cpu_keepalive"
             } else {
-                // Say what to do, not just that something is missing: this user cannot see the
-                // screen time out and will otherwise experience it as the app dying by itself.
-                "Assistance started. Keep the screen on, or assistance will stop when it sleeps. " +
-                    "Ask a volunteer to allow Display over other apps."
+                "op_starting_no_screen_keepalive"
             }
         )
     }
@@ -479,7 +570,11 @@ class AssistService : LifecycleService() {
         ambientLightMonitor?.stop(); ambientLightMonitor = null
         screenKeepAlive?.stop(); screenKeepAlive = null
         osLifecycleReceiver?.let {
-            try { unregisterReceiver(it) } catch (e: Exception) {}
+            try {
+                unregisterReceiver(it)
+            } catch (ex: Exception) {
+                Log.w("AkshravaDebug", "lifecycle receiver unregister failed", ex)
+            }
             osLifecycleReceiver = null
         }
         cameraProvider?.unbindAll()
@@ -490,13 +585,14 @@ class AssistService : LifecycleService() {
         poseTracker?.stop(); poseTracker = null
         frameExecutor?.shutdownNow(); frameExecutor = null
         frameEncoder = null
-        wakeLock?.let { if (it.isHeld) it.release(); wakeLock = null }
+        releaseCpuWakeLock()
         http?.connectionPool?.evictAll()
         http?.dispatcher?.executorService?.shutdown()
         http = null
         reflexEngine.release()
         reflexEngine = DisabledReflexEngine()
-        framePending.set(false)
+        resetFrameSlot()
+        lookRequested.set(false)
         deferredAnalysisSide = null
         if (!keepForeground) {
             SessionFlags.setActive(this, false)
@@ -512,9 +608,20 @@ class AssistService : LifecycleService() {
             allowPhysicalLoopbackDevelopment = BuildConfig.ALLOW_PHYSICAL_LOOPBACK_DEV
         ).allowed
     }
+
+    private fun releaseCpuWakeLock() {
+        val held = wakeLock
+        wakeLock = null
+        if (held?.isHeld == true) {
+            runCatching { held.release() }.onFailure {
+                Log.w("AkshravaVision", "CPU wake-lock release failed", it)
+            }
+        }
+    }
     
     private fun bindCamera() {
         val generation = bindGeneration.incrementAndGet()
+        val sessionGeneration = assistanceGeneration.get()
         val future = ProcessCameraProvider.getInstance(this)
         future.addListener({
             try {
@@ -523,7 +630,7 @@ class AssistService : LifecycleService() {
                     runCatching {
                         val provider = future.get()
                         provider.unbindAll()
-                    }
+                    }.onFailure { Log.w("AkshravaVision", "late camera bind cleanup failed", it) }
                     return@addListener
                 }
                 val provider = future.get()
@@ -574,7 +681,7 @@ class AssistService : LifecycleService() {
                     cameraLifecycleOwner?.destroy(); cameraLifecycleOwner = null
                     return@addListener
                 }
-                analysis.setAnalyzer(exec) { image -> analyzeImage(image) }
+                analysis.setAnalyzer(exec) { image -> analyzeImage(image, sessionGeneration) }
                 provider.unbindAll()
                 provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
                 // Start the stall clock at the moment frames become expected.
@@ -604,9 +711,10 @@ class AssistService : LifecycleService() {
         }, ContextCompat.getMainExecutor(this))
     }
 
-    private fun analyzeImage(image: ImageProxy) {
+    private fun analyzeImage(image: ImageProxy, sessionGeneration: Int) {
         var closed = false
         try {
+            if (!isCurrentAssistance(sessionGeneration)) return
             framesAnalyzed += 1
             val now = SystemClock.elapsedRealtime()
             lastAnalyzeAtMs = now
@@ -620,6 +728,7 @@ class AssistService : LifecycleService() {
             // unchanging scene -- every frame legitimately a duplicate -- starves the watchdog
             // and gets a loud false "assistance stopped" alarm despite the service running fine.
             maybeHeartbeat(now)
+            if (!isCurrentAssistance(sessionGeneration)) return
             // #region agent log
             if (framesAnalyzed == 1L || framesAnalyzed % 90L == 0L) {
                     AgentDebugLog.log(
@@ -680,8 +789,8 @@ class AssistService : LifecycleService() {
 
             // One encode/upload at a time. CameraX KEEP_ONLY_LATEST already sheds older
             // buffers; this flag also stops us from racing the WebSocket in-flight slot.
-            if (!framePending.compareAndSet(false, true)) {
-                val heldForMs = framePendingSinceMs.takeIf { it > 0L }?.let { now - it } ?: 0L
+            if (!tryClaimFrameSlot(sessionGeneration, now)) {
+                val heldForMs = frameSlotAgeMs(sessionGeneration, now)
                 // A slot held past the send-side settle timeout means nothing is going to release
                 // it: the session is already dead from the user's point of view even though the
                 // camera and socket both still look healthy. Log it loudly and distinctly rather
@@ -697,9 +806,11 @@ class AssistService : LifecycleService() {
                     // Release the wedged slot so frames can resume. Without this, framePending
                     // stays true forever and no frame is ever sent again — the session is
                     // silently dead while the camera and socket both still look healthy.
-                    framePendingSinceMs = 0L
-                    framePending.set(false)
-                    alertManager?.status("Assistance stalled. Recovering.")
+                    releaseFrameSlot(sessionGeneration)
+                    // ProtocolClient owns a second exact-frame slot. Resetting only this service
+                    // flag would make every later encode bounce off that still-held slot. Cancel
+                    // the socket so its normal explicit outage/reconnect path rebuilds both.
+                    if (isCurrentAssistance(sessionGeneration)) currentClient.recoverFrameStall()
                 }
                 // #region agent log
                 else if (framesAnalyzed <= 5L || framesAnalyzed % 60L == 0L) {
@@ -714,13 +825,12 @@ class AssistService : LifecycleService() {
                 // #endregion
                 return
             }
-            framePendingSinceMs = now
             val priority = lookRequested.getAndSet(false)
             // Headset long-press look or a fresh turn asks for one immediate frame.
             val turning = poseTracker?.consumeTurn() ?: false
             maybeAnnounceTilt(now)
             if (!priority && !turning && now - lastCaptureMs < captureIntervalMs()) {
-                framePending.set(false)
+                releaseFrameSlot(sessionGeneration)
                 return
             }
 
@@ -751,7 +861,7 @@ class AssistService : LifecycleService() {
             }
             // #endregion
             if (isOccluded) {
-                framePending.set(false)
+                releaseFrameSlot(sessionGeneration)
                 // lastCaptureMs gates the capture interval above (`now - lastCaptureMs <
                 // captureIntervalMs()`), and every OTHER exit path in this function that reaches
                 // this point updates it. This branch did not, so once the scene went dark
@@ -769,12 +879,13 @@ class AssistService : LifecycleService() {
                 // consecutive dark frames: one dark frame is ordinary (auto-exposure settling, a
                 // passing shadow, the first buffer after a bind) and telling the user to uncover a
                 // lens that is not covered teaches them to ignore the prompt that matters.
-                if (consecutiveOccludedFrames >= OCCLUDED_FRAMES_BEFORE_ANNOUNCE &&
+                if (isCurrentAssistance(sessionGeneration) &&
+                    consecutiveOccludedFrames >= OCCLUDED_FRAMES_BEFORE_ANNOUNCE &&
                     now - lastDarkAnnounceMs > 8_000L
                 ) {
                     lastDarkAnnounceMs = now
                     updateNotification("Camera is dark — uncover rear lens")
-                    alertManager?.status("Camera is dark. Uncover the rear lens.")
+                    alertManager?.statusKey("op_camera_dark")
                     // #region agent log
                     AgentDebugLog.log(
                         "H1",
@@ -793,13 +904,14 @@ class AssistService : LifecycleService() {
             } else {
                 consecutiveGlaredFrames = 0
             }
-            if (consecutiveGlaredFrames >= 3) {
-                framePending.set(false)
-                lastCaptureMs = now
-                if (now - lastGlareAnnounceMs > 8_000L) {
+            if (consecutiveGlaredFrames >= FrameGate.GLARE_FRAMES_BEFORE_ANNOUNCE) {
+                // Glare, like blur, never drops a frame: a false washout verdict would stop
+                // assistance in bright outdoor conditions. Persistent evidence only produces a
+                // bounded status prompt.
+                if (isCurrentAssistance(sessionGeneration) && now - lastGlareAnnounceMs > 8_000L) {
                     lastGlareAnnounceMs = now
                     updateNotification("Camera blinded by light")
-                    alertManager?.status("Camera blinded by light. Turn slightly.")
+                    alertManager?.statusKey("op_camera_glare")
                     AgentDebugLog.log(
                         "H1",
                         "AssistService.analyzeImage:glareAnnounce",
@@ -807,18 +919,19 @@ class AssistService : LifecycleService() {
                         mapOf("n" to framesAnalyzed, "avgLuma" to avgLuma)
                     )
                 }
-                return
             }
             if (FrameGate.isBlurred(thumbnail)) {
                 consecutiveBlurredFrames += 1
-                // Blur never drops a frame. Persistent evidence only produces a bounded status
-                // prompt, because the cane/guide is primary when the camera cannot be trusted.
-                if (FrameGate.shouldAnnounceBlur(now, consecutiveBlurredFrames, lastCameraUnclearMs)) {
+                // Blur and glare do not drop frames. Persistent evidence only produces a bounded
+                // status prompt, because the cane/guide is primary when the camera cannot be trusted.
+                if (isCurrentAssistance(sessionGeneration) &&
+                    FrameGate.shouldAnnounceBlur(now, consecutiveBlurredFrames, lastCameraUnclearMs)
+                ) {
                     lastCameraUnclearMs = now
                     // Name the fix first (F-72): a smeared lens on a pocket-carried donated phone
                     // is usually a fingerprint, and "unclear" alone gave the user nothing to do
                     // about it. The cane/guide fallback stays, because wiping may not help.
-                    alertManager?.status("Camera is blurry. Wipe the lens. Use cane or guide.")
+                    alertManager?.statusKey("op_camera_blurry")
                     updateNotification("Camera is blurry — wipe the lens")
                 }
             } else {
@@ -831,17 +944,17 @@ class AssistService : LifecycleService() {
             if (!priority && !turning && now - lastCaptureMs < 350L) {
                 if (FrameGate.isDuplicate(previousThumbnail, thumbnail)) {
                     previousThumbnail = thumbnail
-                    framePending.set(false)
+                    releaseFrameSlot(sessionGeneration)
                     return
                 }
             }
-            // Blur is recorded as a cheap diagnostic signal by FrameGate, but never used to drop
-            // a frame: a bad quality estimate must not become a missed-obstacle decision.
+            // Blur and glare are recorded as cheap diagnostic signals by FrameGate, but never
+            // used to drop a frame: a bad quality estimate must not become a missed-obstacle decision.
             previousThumbnail = thumbnail
 
             val encoder = frameEncoder
             if (encoder == null) {
-                framePending.set(false)
+                releaseFrameSlot(sessionGeneration)
                 // Leave the close to `finally` — closing here as well double-closed the ImageProxy.
                 return
             }
@@ -849,14 +962,23 @@ class AssistService : LifecycleService() {
             image.close()
             closed = true
             val frame = encoder.compressPrepared(prepared, quality.jpegQ)
+            if (!isCurrentAssistance(sessionGeneration) || currentClient !== client) {
+                releaseFrameSlot(sessionGeneration)
+                return
+            }
             // Fail-closed offline: without licensed TFLite weights, reflex never speaks hazards.
             if (reflexEngine.isArmed()) {
                 reflexEngine.evaluate(frame)
             }
 
             lastCaptureMs = now
+            consecutiveAnalyzeFailures = 0
 
             val poseSnapshot = poseTracker?.snapshot()
+            if (!isCurrentAssistance(sessionGeneration) || currentClient !== client) {
+                releaseFrameSlot(sessionGeneration)
+                return
+            }
             val sent = currentClient.sendFrame(
                 ++frameId,
                 now,
@@ -877,23 +999,75 @@ class AssistService : LifecycleService() {
                 )
             }
             // #endregion
-            if (!sent) framePending.set(false)
+            if (!sent) releaseFrameSlot(sessionGeneration)
         } catch (ex: Exception) {
             // Log before recovering — silent failures in the analysis loop are dangerous
             // on a safety-critical system and produce no diagnostic output otherwise.
             Log.e("AkshravaVision", "analyzeImage error (frames=$framesAnalyzed)", ex)
-            framePending.set(false)
-            updateNotification("Camera processing error")
+            releaseFrameSlot(sessionGeneration)
+            if (isCurrentAssistance(sessionGeneration)) {
+                consecutiveAnalyzeFailures += 1
+                val failNow = SystemClock.elapsedRealtime()
+                if (consecutiveAnalyzeFailures >= ANALYZE_FAILURES_BEFORE_STOP) {
+                    updateNotification("Camera processing failed")
+                    stopAfterUnrecoverableFailure("op_camera_failed", "Camera processing failed")
+                } else if (shouldAnnounceAnalyzeFailure(
+                        failNow, consecutiveAnalyzeFailures, lastAnalyzeFailureAnnounceMs
+                    )
+                ) {
+                    lastAnalyzeFailureAnnounceMs = failNow
+                    updateNotification("Camera processing error")
+                    alertManager?.statusKey("op_analyze_failed")
+                }
+            }
         } finally {
             if (!closed) image.close()
         }
     }
 
-    private fun onFrameSlotSettled() {
-        framePendingSinceMs = 0L
-        framePending.set(false)
+    private fun isCurrentAssistance(generation: Int): Boolean =
+        !stopping && generation == assistanceGeneration.get()
+
+    private fun tryClaimFrameSlot(generation: Int, nowMs: Long): Boolean =
+        synchronized(frameSlotLock) {
+            if (!isCurrentAssistance(generation) || !framePending.compareAndSet(false, true)) {
+                false
+            } else {
+                framePendingSinceMs = nowMs
+                true
+            }
+        }
+
+    private fun frameSlotAgeMs(generation: Int, nowMs: Long): Long =
+        synchronized(frameSlotLock) {
+            if (!isCurrentAssistance(generation) || framePendingSinceMs <= 0L) {
+                0L
+            } else {
+                nowMs - framePendingSinceMs
+            }
+        }
+
+    private fun releaseFrameSlot(generation: Int) {
+        synchronized(frameSlotLock) {
+            if (isCurrentAssistance(generation)) {
+                framePendingSinceMs = 0L
+                framePending.set(false)
+            }
+        }
+    }
+
+    private fun resetFrameSlot() {
+        synchronized(frameSlotLock) {
+            framePendingSinceMs = 0L
+            framePending.set(false)
+        }
+    }
+
+    private fun onFrameSlotSettled(generation: Int) {
+        releaseFrameSlot(generation)
+        if (!isCurrentAssistance(generation)) return
         val deferred = deferredAnalysisSide ?: return
-        if (stopping || client == null) return
+        if (client == null) return
         if (deferred != boundAnalysisMaxSide) {
             scheduleCameraRebind(deferred)
         } else {
@@ -960,6 +1134,7 @@ class AssistService : LifecycleService() {
     }
 
     private fun maybeHeartbeat(now: Long) {
+        if (client?.isTerminal() == true) return
         if (now - lastHeartbeatMs < HEARTBEAT_INTERVAL_MS) return
         lastHeartbeatMs = now
         SessionFlags.heartbeat(this)
@@ -976,9 +1151,25 @@ class AssistService : LifecycleService() {
     private fun maybeRenewWakeLocks(now: Long) {
         if (now - lastWakeLockRenewAtMs < WAKE_LOCK_RENEW_INTERVAL_MS) return
         lastWakeLockRenewAtMs = now
-        runCatching { wakeLock?.acquire(WAKE_LOCK_TIMEOUT_MS) }
-        screenKeepAlive?.renew()
-        Log.i("AkshravaDebug", "wake_locks_renewed screen_mode=${screenKeepAlive?.mode}")
+        val cpuRenewed = runCatching {
+            wakeLock?.acquire(WAKE_LOCK_TIMEOUT_MS)
+            wakeLock?.isHeld == true
+        }.onFailure {
+            Log.e("AkshravaVision", "CPU wake-lock renewal failed", it)
+        }.getOrDefault(false)
+        val screenRenewed = screenKeepAlive?.renew() == true
+        if ((!cpuRenewed || !screenRenewed) && !wakeKeepAliveWarningAnnounced) {
+            wakeKeepAliveWarningAnnounced = true
+            Log.e(
+                "AkshravaVision",
+                "wake keep-alive lost cpu=$cpuRenewed screen=$screenRenewed mode=${screenKeepAlive?.mode}"
+            )
+            alertManager?.statusKey("op_power_keepalive_lost")
+        }
+        Log.i(
+            "AkshravaDebug",
+            "wake_locks_renewed cpu=$cpuRenewed screen=$screenRenewed mode=${screenKeepAlive?.mode}"
+        )
     }
 
     private fun maybeAnnounceTilt(now: Long) {
@@ -986,7 +1177,7 @@ class AssistService : LifecycleService() {
         extremeTiltSinceMs = PoseTracker.extremeSinceUpdated(now, pitch, extremeTiltSinceMs)
         if (!PoseTracker.shouldAnnounceTilt(now, extremeTiltSinceMs, lastTiltAnnounceMs)) return
         lastTiltAnnounceMs = now
-        alertManager?.status("Phone tilted. Point camera forward.", haptic = true)
+        alertManager?.statusKey("op_phone_tilted", haptic = true)
         updateNotification("Phone tilted — point camera forward")
         Log.i("AkshravaDebug", "tilt_announced pitch_cdeg=$pitch")
     }
@@ -1007,11 +1198,11 @@ class AssistService : LifecycleService() {
             Log.i("AkshravaDebug", "ambient_light_edge_skipped level=$level reason=alert_busy")
             return
         }
-        val text = when (level) {
-            AmbientLightLevel.DARK -> "Environment is dark."
-            AmbientLightLevel.BRIGHT -> "Brighter now."
+        val textKey = when (level) {
+            AmbientLightLevel.DARK -> "op_env_dark"
+            AmbientLightLevel.BRIGHT -> "op_env_bright"
         }
-        am.status(text)
+        am.statusKey(textKey)
         Log.i("AkshravaDebug", "ambient_light_edge level=$level")
     }
 
@@ -1031,7 +1222,7 @@ class AssistService : LifecycleService() {
         if (temperature >= THERMAL_THROTTLE_C && !thermalThrottled) {
             thermalThrottled = true
             capturePolicy.thermalThrottled = true
-            alertManager?.status("Akshrava is running slower to cool down")
+            alertManager?.statusKey("op_thermal_slow")
         } else if (temperature in 0f..THERMAL_CLEAR_C && thermalThrottled) {
             thermalThrottled = false
             capturePolicy.thermalThrottled = false
@@ -1060,10 +1251,11 @@ class AssistService : LifecycleService() {
                         // The F-15 gauge rides on the warning that already exists: the moment the
                         // user needs the number is the moment they have to decide whether to keep
                         // walking, and it costs no extra utterance.
-                        alertManager?.status(
-                            "Battery low. Vision alerts may stop soon. " +
-                                DeviceCapability.batteryStatusText(batteryPct)
-                        )
+                        val prefix = alertManager?.operationalText("op_battery_low").orEmpty()
+                        if (prefix.isNotEmpty()) {
+                            // Percent is language-neutral; batteryStatusText() is English hours.
+                            alertManager?.status("$prefix $batteryPct%")
+                        }
                         lastBatteryWarningMs = now
                     }
                 }
@@ -1090,7 +1282,7 @@ class AssistService : LifecycleService() {
         // failure, so the user gets one consistent "press Start again" recovery path.
         captureSuspendedForBattery = true
         val gen = assistanceGeneration.get()
-        alertManager?.status("Battery critical. Vision assistance stopped. Use cane or guide.") {
+        alertManager?.statusKey("op_battery_critical") {
             ContextCompat.getMainExecutor(this).execute {
                 if (assistanceGeneration.get() == gen) stopAssistance()
             }
@@ -1098,6 +1290,10 @@ class AssistService : LifecycleService() {
     }
 
     private fun stopAfterCameraFailure() {
+        stopAfterUnrecoverableFailure("op_camera_failed", "Rear camera unavailable")
+    }
+
+    private fun stopAfterUnrecoverableFailure(speechKey: String, notificationText: String) {
         if (captureSuspendedForFailure) return
         // A failed bind used to leave the WebSocket, sensors, wake lock and foreground service
         // running indefinitely even though the phone could no longer see. Stop capture now and
@@ -1105,6 +1301,7 @@ class AssistService : LifecycleService() {
         captureSuspendedForFailure = true
         SessionFlags.setActive(this, false)
         Watchdog.cancel(this)
+        updateNotification(notificationText)
         cameraProvider?.unbindAll()
         previewDrain?.release(); previewDrain = null
         cameraLifecycleOwner?.destroy(); cameraLifecycleOwner = null
@@ -1115,11 +1312,11 @@ class AssistService : LifecycleService() {
         // that something is still watching.
         ambientLightMonitor?.stop(); ambientLightMonitor = null
         frameExecutor?.shutdownNow(); frameExecutor = null
-        wakeLock?.let { if (it.isHeld) it.release(); wakeLock = null }
+        releaseCpuWakeLock()
         // Capture generation before scheduling deferred stops. A Start that bumps
         // assistanceGeneration makes both the TTS callback and the hard timeout no-ops.
         val gen = assistanceGeneration.get()
-        alertManager?.speakThen("Rear camera unavailable. Use cane or guide.") {
+        alertManager?.speakThenKey(speechKey) {
             ContextCompat.getMainExecutor(this).execute {
                 if (assistanceGeneration.get() == gen) stopAssistance()
             }

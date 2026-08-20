@@ -13,7 +13,6 @@ import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.min
 import kotlin.math.pow
@@ -62,6 +61,7 @@ class ProtocolClient(
     /** Fired when an in-flight frame hits the settle deadline (before optional reconnect). */
     private val onSettleTimeout: () -> Unit = {},
     private val onResultTelemetry: (DetectionTelemetry) -> Unit = {},
+    private val onTerminal: (String) -> Unit = {},
     private val language: String = "en",
     private val http: OkHttpClient = OkHttpClient.Builder().pingInterval(20, TimeUnit.SECONDS).build(),
     private val debugTelemetry: Boolean = false
@@ -124,8 +124,62 @@ class ProtocolClient(
         fun shouldTickStaleInference(inFlight: Boolean, frameAgeMs: Long, ticksAlready: Int): Boolean =
             inFlight && frameAgeMs >= STALE_INFERENCE_TICK_AFTER_MS && ticksAlready < STALE_INFERENCE_MAX_TICKS
 
+        /** A response may release only the exact frame that still owns the single-flight slot. */
+        fun frameMaySettle(currentFrameId: Long?, responseFrameId: Long): Boolean =
+            currentFrameId != null && currentFrameId == responseFrameId
+
         /** Device revocation is an operator action, not a network condition to retry. */
         fun isPermanentAccessClose(code: Int): Boolean = code == 4401 || code == 4403
+
+        /** Dual-session fencing: the loser socket is closed after a JSON session_superseded body. */
+        fun isSessionTakenOverClose(code: Int) = code == 4409
+
+        /** JSON error codes that must tear down the session even if the close code is lost. */
+        fun isTerminalErrorCode(code: String): Boolean = when (code) {
+            "session_superseded", "device_revoked", "authentication_failed" -> true
+            else -> false
+        }
+
+        fun speechKeyForTerminalError(code: String): String = when (code) {
+            "session_superseded" -> "op_session_taken_over"
+            "device_revoked" -> "op_access_revoked"
+            else -> "op_auth_failed"
+        }
+
+        /**
+         * Pre-accept Uvicorn rejects collapse to HTTP 401/403 with no JSON. 403 is revoke
+         * (matching iOS); 401 is a bad token. After accept, JSON + 4401/4403 are preferred.
+         */
+        fun speechKeyForHandshakeHttp(status: Int): String =
+            if (status == 403) "op_access_revoked" else "op_auth_failed"
+
+        /**
+         * Control-only soft sheds have no frame_id and must not free the in-flight JPEG slot.
+         * A corrupt ping that called settleFrame() made the real result arrive as a late miss.
+         */
+        fun shouldSettleUnownedSoftError(code: String): Boolean =
+            code != "malformed_control_message" && code != "unknown_message"
+
+        val FORBIDDEN_AWARENESS_PREFIXES = listOf("saf", "clear", "cross", "navigat", "collis", "approach")
+
+        fun awarenessTextIsSpeakable(text: String): Boolean {
+            if (text.isBlank()) return false
+            val lower = text.lowercase()
+            return FORBIDDEN_AWARENESS_PREFIXES.none { it in lower }
+        }
+
+        const val SOFT_SHED_ANNOUNCE_AFTER = 3
+        const val SOFT_SHED_ANNOUNCE_COOLDOWN_MS = 15_000L
+
+        fun shouldAnnounceSoftShed(
+            consecutiveSoftSheds: Int,
+            lastAnnounceAtMonoMs: Long,
+            nowMonoMs: Long
+        ): Boolean {
+            if (consecutiveSoftSheds < SOFT_SHED_ANNOUNCE_AFTER) return false
+            if (lastAnnounceAtMonoMs == 0L) return true
+            return nowMonoMs - lastAnnounceAtMonoMs >= SOFT_SHED_ANNOUNCE_COOLDOWN_MS
+        }
 
         /** Wire contract uses en|hi; AppConfig stores BCP-47 tags like en-IN / hi-IN. */
         fun wireLanguage(tag: String): String = SupportedLanguages.wireCode(tag)
@@ -134,12 +188,23 @@ class ProtocolClient(
         fun streamEnabled(sessionReady: Boolean, visionEnabled: Boolean): Boolean =
             sessionReady && visionEnabled
 
+        /** Server policy may tighten speech freshness, but can never widen the phone-owned cap. */
+        fun configuredSpeakBudget(serverAdvertisedMs: Long): Long =
+            serverAdvertisedMs.coerceIn(0L, STALE_ALERT_MS)
+
+        fun maxSpeakAgeMs(priority: Boolean, isUrgent: Boolean, configuredMs: Long): Long = when {
+            priority -> minOf(LOOK_FRESHNESS_MS, configuredMs)
+            isUrgent -> minOf(URGENT_FRESHNESS_MS, configuredMs)
+            else -> configuredMs
+        }
+
         /**
          * Soft server rejects: free the in-flight slot and keep the socket. These are framing /
          * admission / overload conditions, not a dead vision vendor.
          */
         fun isSoftServerError(code: String): Boolean = when (code) {
             "worker_saturated",
+            "frame_in_flight",
             "frame_rate_limited",
             "non_monotonic_capture",
             "invalid_image_size",
@@ -147,9 +212,13 @@ class ProtocolClient(
             "jpeg_dimension_mismatch",
             "unsupported_frame_size",
             "invalid_frame_header",
-            "unknown_message" -> true
+            "unknown_message",
+            "malformed_control_message" -> true
             else -> false
         }
+
+        /** Sustained breaker state: keep the socket for recovery probes, but announce once. */
+        fun isInferenceOutageError(code: String): Boolean = code == "inference_circuit_open"
 
         /**
          * Pose is centidegrees of device pitch/roll. The wire allows ±180°; extreme values only
@@ -223,6 +292,7 @@ class ProtocolClient(
             1011 -> "server_error"
             1013 -> "temporary_overload"
             4401, 4403 -> "authentication"
+            4409 -> "session_conflict"
             else -> "other"
         }
 
@@ -235,12 +305,15 @@ class ProtocolClient(
     // payload; that value is logged for diagnostics but deliberately not stored as client state,
     // because nothing here honours a value above 1 and a field suggesting otherwise reads as a
     // capability the client does not have.
-    private val inFlight = AtomicBoolean(false)
-    private var socket: WebSocket? = null
+    private val frameSlotLock = Any()
+    private var inFlightFrameId: Long? = null
+    @Volatile private var socket: WebSocket? = null
     private var pendingReconnect: ScheduledFuture<*>? = null
     private val connectionGeneration = AtomicInteger(0)
     @Volatile private var closedByUser = false
     @Volatile private var outageAnnounced = false
+    @Volatile private var inferenceOutageAnnounced = false
+    @Volatile private var hasEverVisionReady = false
     @Volatile private var sessionReady = false
     @Volatile private var visionEnabled = false
 
@@ -256,12 +329,14 @@ class ProtocolClient(
     @Volatile private var serverProtocolVersion = 0
     @Volatile private var reconnectAttempt = 0
     @Volatile private var cloudFallbackWarningAnnounced = false
-    @Volatile private var pendingLookTimeout: ScheduledFuture<*>? = null
+    private val settleTimeoutLock = Any()
     @Volatile private var pendingSettleTimeout: ScheduledFuture<*>? = null
+    @Volatile private var pendingSettleFrameId: Long? = null
     @Volatile private var pendingAppPing: ScheduledFuture<*>? = null
-    @Volatile private var pendingLook = false
     @Volatile private var frameSentAtMonoMs = 0L
     @Volatile private var consecutiveSettleTimeouts = 0
+    @Volatile private var consecutiveSoftSheds = 0
+    @Volatile private var lastSoftShedAnnounceAtMs = 0L
     @Volatile private var connectedAtMonoMs = 0L
     /** Stale earcons already emitted for the frame currently in flight; see shouldTickStaleInference. */
     @Volatile private var staleInferenceTicks = 0
@@ -274,6 +349,8 @@ class ProtocolClient(
             return
         }
         closedByUser = false
+        inferenceOutageAnnounced = false
+        hasEverVisionReady = false
         openSocket("initial")
     }
 
@@ -294,10 +371,16 @@ class ProtocolClient(
                 "replacedSocket" to (previous != null)
             )
         )
-        val opened = http.newWebSocket(
-            Request.Builder().url(endpoint).header("Authorization", "Bearer $token").build(),
-            GenerationGuard(generation)
-        )
+        val opened = runCatching {
+            http.newWebSocket(
+                Request.Builder().url(endpoint).header("Authorization", "Bearer $token").build(),
+                GenerationGuard(generation)
+            )
+        }.getOrElse {
+            Log.e("AkshravaVision", "websocket_open_failed generation=$generation", it)
+            if (isCurrentGeneration(generation)) handleDrop("open_failed")
+            return
+        }
         // Only publish if this open is still the latest generation (a racing reconnect may
         // have already bumped past us).
         if (generation == connectionGeneration.get()) {
@@ -344,6 +427,20 @@ class ProtocolClient(
      */
     fun isTerminal(): Boolean = closedByUser
 
+    /** Force the normal transport recovery path when the service detects an impossible slot age. */
+    fun recoverFrameStall() {
+        if (closedByUser) return
+        logConnection("frame_slot_recovery")
+        val current = socket
+        if (current != null) {
+            // OkHttp reports cancel through the generation-guarded failure callback, which owns
+            // outage speech, exact settlement, and reconnect scheduling.
+            current.cancel()
+        } else {
+            handleDrop("frame_slot_watchdog")
+        }
+    }
+
     fun sendFrame(
         frameId: Long,
         captureMonoMs: Long,
@@ -358,7 +455,7 @@ class ProtocolClient(
         // Do not produce traffic or imply an active service before the authenticated server has
         // explicitly confirmed that a real detector, rather than bench-mode NoopDetector, is live.
         if (!canStream()) return failSendFrame(look, "vision_not_ready")
-        if (!inFlight.compareAndSet(false, true)) return failSendFrame(look, "frame_in_flight")
+        if (!tryClaimFrame(frameId)) return failSendFrame(look, "frame_in_flight")
         // From here until scheduleSettleTimeout() below, this call owns the in-flight slot and
         // nothing is yet armed to release it. An exception escaping that window -- JSON assembly,
         // or OkHttp throwing on a socket that is closing under us -- used to latch `inFlight`
@@ -371,7 +468,7 @@ class ProtocolClient(
         return try {
             sendFrameLocked(ws, look, frameId, captureMonoMs, pose, calibrationId, frame, mode)
         } catch (ex: Exception) {
-            settleFrame()
+            settleFrame(frameId)
             Log.e("AkshravaVision", "frame_send_threw id=$frameId", ex)
             AgentDebugLog.log(
                 "H4",
@@ -424,16 +521,16 @@ class ProtocolClient(
         // independently, so if it accepts the header but rejects the JPEG we must tear down the
         // socket rather than let the next JPEG attach to this header.
         if (!ws.send(header.toString())) {
-            settleFrame()
+            settleFrame(frameId)
             return failSendFrame(look, "header_rejected")
         }
         if (!ws.send(frame.jpeg.toByteString())) {
             ws.close(1011, "incomplete frame")
-            settleFrame()
+            settleFrame(frameId)
             return failSendFrame(look, "jpeg_rejected")
         }
-        frameSentAtMonoMs = SystemClock.elapsedRealtime()
-        scheduleSettleTimeout(look)
+        if (!markFrameSent(frameId, SystemClock.elapsedRealtime())) return false
+        scheduleSettleTimeout(look, frameId)
         Log.i("AkshravaVision", "frame_sent id=$frameId endpoint_class=${EndpointPolicy.classify(endpoint).logValue}")
         return true
     }
@@ -443,29 +540,26 @@ class ProtocolClient(
     private fun failSendFrame(isLook: Boolean, reason: String): Boolean {
         Log.i("AkshravaVision", "frame_drop reason=$reason session_ready=$sessionReady vision_enabled=$visionEnabled")
         if (isLook) {
-            cancelLookTimeout()
             alertManager.announceLookFailed()
             earcons.lookFailed()
         }
         return false
     }
 
-    private fun scheduleSettleTimeout(isLook: Boolean) {
+    private fun scheduleSettleTimeout(isLook: Boolean, frameId: Long) {
         cancelSettleTimeout()
-        pendingLook = isLook
-        pendingSettleTimeout = runCatching {
+        val future = runCatching {
             reconnect.schedule({
-                pendingSettleTimeout = null
-                val look = pendingLook
-                pendingLook = false
-                if (look) {
+                // A cancelled timer may already be executing. It must never release or diagnose a
+                // newer frame that acquired the slot after this frame settled.
+                if (!settleFrame(frameId)) return@schedule
+                if (isLook) {
                     alertManager.announceLookFailed()
                     earcons.lookFailed()
                 }
                 // Unblock the camera immediately, then shed capture cost. Reconnect only after
                 // repeated hangs so a single slow CPU infer does not reset the WSS session.
                 onSettleTimeout()
-                settleFrame()
                 consecutiveSettleTimeouts += 1
                 if (!closedByUser && consecutiveSettleTimeouts >= SETTLE_TIMEOUTS_BEFORE_RECONNECT) {
                     consecutiveSettleTimeouts = 0
@@ -474,25 +568,36 @@ class ProtocolClient(
                 }
             }, FRAME_SETTLE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         }.getOrElse {
-            // Executor rejected the task (already shut down). Without this, inFlight stays true
+            // Executor rejected the task (already shut down). Without this, the slot stays held
             // forever because no timeout was armed to release it — the session is silently dead.
-            settleFrame()
+            settleFrame(frameId)
             null
         }
-        if (isLook) {
-            // Keep the look-timeout handle alias for cancel paths that still name it.
-            pendingLookTimeout = pendingSettleTimeout
+        if (future != null) {
+            synchronized(settleTimeoutLock) {
+                if (ownsInFlightFrame(frameId)) {
+                    pendingSettleFrameId = frameId
+                    pendingSettleTimeout = future
+                } else {
+                    future.cancel(false)
+                }
+            }
         }
     }
 
-    private fun cancelSettleTimeout() {
-        pendingSettleTimeout?.cancel(false)
-        pendingSettleTimeout = null
-        pendingLookTimeout = null
-        pendingLook = false
+    private fun cancelSettleTimeout(expectedFrameId: Long? = null) {
+        val future = synchronized(settleTimeoutLock) {
+            if (expectedFrameId != null && pendingSettleFrameId != expectedFrameId) {
+                null
+            } else {
+                pendingSettleTimeout.also {
+                    pendingSettleTimeout = null
+                    pendingSettleFrameId = null
+                }
+            }
+        }
+        future?.cancel(false)
     }
-
-    private fun cancelLookTimeout() = cancelSettleTimeout()
 
     private fun isCurrentGeneration(generation: Int): Boolean =
         generation == connectionGeneration.get()
@@ -517,10 +622,11 @@ class ProtocolClient(
         // A new socket has negotiated nothing yet, even if the previous one had.
         clearNegotiatedCapabilities()
         cloudFallbackWarningAnnounced = false
+        consecutiveSoftSheds = 0
+        lastSoftShedAnnounceAtMs = 0L
         connectedAtMonoMs = SystemClock.elapsedRealtime()
         logConnection("transport_open", mapOf("recovered" to recovered))
         Log.i("AkshravaDebug", "ws_open endpoint_class=${EndpointPolicy.classify(endpoint).logValue}")
-        earcons.connected()
         // Transport alone is not vision. Announcing "Connection restored" here made every
         // blip/reconnect sound recovered even when the next frame immediately failed closed again.
         onState("Transport connected; checking vision service")
@@ -528,8 +634,10 @@ class ProtocolClient(
 
     private fun handleMessage(webSocket: WebSocket, text: String) {
         val payload = runCatching { JSONObject(text) }.getOrNull() ?: run {
+            Log.w("AkshravaVision", "invalid_server_json")
             onState("Invalid server response")
-            settleFrame()
+            // The message has no frame ownership. Keep the exact frame timeout armed instead of
+            // letting unrelated malformed traffic free the slot.
             return
         }
         when (payload.optString("type")) {
@@ -537,7 +645,7 @@ class ProtocolClient(
                 sessionReady = true
                 visionEnabled = payload.optBoolean("vision_enabled", false)
                 val serverMaxAge = payload.optLong("alert_max_age_ms", STALE_ALERT_MS)
-                configuredStaleAlertMs = serverMaxAge.coerceAtLeast(STALE_ALERT_MS)
+                configuredStaleAlertMs = configuredSpeakBudget(serverMaxAge)
                 val advertised = payload.optInt("max_in_flight", 1).coerceIn(1, 2)
                 // Negotiate compatibility per connection. Re-read on every `ready` so a reconnect
                 // that lands on a different (possibly older) revision renegotiates rather than
@@ -576,10 +684,21 @@ class ProtocolClient(
                 )
                 // #endregion
                 if (visionEnabled) {
+                    val firstVisionReady = !hasEverVisionReady
+                    hasEverVisionReady = true
                     if (outageAnnounced) {
                         outageAnnounced = false
-                        earcons.restored()
-                        alertManager.status("Connection restored")
+                        // A transport handshake is not proof that inference recovered. When a
+                        // circuit outage was already active, wait for an actual result before
+                        // announcing restoration; otherwise ready is sufficient for a link-only
+                        // outage.
+                        if (!inferenceOutageAnnounced) {
+                            earcons.restored()
+                            alertManager.statusKey("op_restored")
+                        }
+                    } else if (firstVisionReady) {
+                        earcons.connected()
+                        alertManager.statusKey("op_connected")
                     }
                     onState("Vision assistance connected")
                     scheduleAppPing()
@@ -591,13 +710,41 @@ class ProtocolClient(
                     onState(message)
                     if (!outageAnnounced) {
                         outageAnnounced = true
-                        alertManager.status(message)
+                        alertManager.statusKey("op_model_unavailable")
                     }
                 }
             }
             "error" -> {
                 val code = payload.optString("code")
+                val errorFrameId = payload.optLong("frame_id", -1L)
+                if (errorFrameId >= 0L && !ownsInFlightFrame(errorFrameId)) {
+                    // A delayed error for an already-settled frame has no authority over the
+                    // newer frame or its user-facing state. Processing it could announce an old
+                    // outage after a fresh result had already restored the session.
+                    Log.i("AkshravaVision", "late_frame_error_ignored code=$code frame=$errorFrameId")
+                    return
+                }
+                if (isTerminalErrorCode(code)) {
+                    handlePermanentFailure(speechKeyForTerminalError(code))
+                    return
+                }
+                val settleErrorFrame = {
+                    if (errorFrameId >= 0L) {
+                        settleFrame(errorFrameId)
+                    } else if (shouldSettleUnownedSoftError(code)) {
+                        settleFrame()
+                    }
+                }
                 when {
+                    isInferenceOutageError(code) -> {
+                        settleErrorFrame()
+                        val message = "Vision assistance unavailable. Use cane or guide."
+                        onState(message)
+                        if (!inferenceOutageAnnounced) {
+                            inferenceOutageAnnounced = true
+                            alertManager.statusKey("op_vision_unavailable")
+                        }
+                    }
                     isSoftServerError(code) -> {
                         // Soft shed: keep socket, free in-flight slot, let the next frame retry.
                         Log.i("AkshravaDebug", "ws_soft_error code=$code")
@@ -609,18 +756,24 @@ class ProtocolClient(
                             mapOf("code" to code)
                         )
                         // #endregion
-                        settleFrame()
+                        settleErrorFrame()
+                        consecutiveSoftSheds += 1
+                        val nowMonoMs = SystemClock.elapsedRealtime()
+                        if (shouldAnnounceSoftShed(consecutiveSoftSheds, lastSoftShedAnnounceAtMs, nowMonoMs)) {
+                            lastSoftShedAnnounceAtMs = nowMonoMs
+                            alertManager.statusKey("op_server_shedding")
+                        }
                         onState("Server busy; shedding frames")
                     }
                     code == "vision_unavailable" -> {
                         sessionReady = false
                         visionEnabled = false
-                        settleFrame()
+                        settleErrorFrame()
                         val message = "Vision assistance unavailable. Use cane or guide."
                         onState(message)
                         if (!outageAnnounced) {
                             outageAnnounced = true
-                            alertManager.status(message)
+                            alertManager.statusKey("op_vision_unavailable")
                         }
                         // The server will close this socket after the error. Closing proactively
                         // also protects older deployments that do not, and starts normal backoff.
@@ -628,7 +781,7 @@ class ProtocolClient(
                     }
                     else -> {
                         Log.w("AkshravaDebug", "ws_hard_error code=$code")
-                        settleFrame()
+                        settleErrorFrame()
                         onState("Server protocol error")
                     }
                 }
@@ -640,6 +793,20 @@ class ProtocolClient(
                 payload.optDouble("fps", 1.0)
             ))
             "result" -> {
+                val resultFrameId = payload.optLong("frame_id", -1L)
+                if (resultFrameId < 0L) {
+                    // A result without ownership must not free the slot. Leave the exact
+                    // frame timer armed so normal timeout recovery handles this broken response.
+                    Log.w("AkshravaVision", "result_missing_frame_id")
+                    onState("Invalid server response")
+                    return
+                }
+                if (!ownsInFlightFrame(resultFrameId)) {
+                    // Duplicate/late results must not speak, update outage state, acknowledge, or
+                    // release a newer slot. Freshness alone is insufficient ownership evidence.
+                    Log.i("AkshravaVision", "late_result_ignored frame=$resultFrameId")
+                    return
+                }
                 // The stale-inference tick budget is reset by settleFrame() below, which is the
                 // single place the in-flight slot is released.
                 payload.optString("trace_id", "").takeIf { it.isNotBlank() }?.let {
@@ -652,7 +819,7 @@ class ProtocolClient(
                         cloudFallbackWarningAnnounced = true
                         val message = "Cloud vision fallback unavailable. Use cane or guide."
                         onState(message)
-                        alertManager.status(message)
+                        alertManager.statusKey("op_cloud_fallback_unavailable")
                     }
                 } else {
                     cloudFallbackWarningAnnounced = false
@@ -660,21 +827,33 @@ class ProtocolClient(
                 val frameMono = payload.optLong("capture_mono_ms", -1)
                 val age = if (frameMono >= 0) SystemClock.elapsedRealtime() - frameMono else Long.MAX_VALUE
                 val priority = payload.optBoolean("priority", false)
-                // Any result (including look) settles the in-flight slot; cancel the timeout first.
-                cancelSettleTimeout()
-                consecutiveSettleTimeouts = 0
-                val sentAt = frameSentAtMonoMs
-                if (sentAt > 0L) {
+                // Only the response for the frame that currently owns the slot contributes RTT.
+                // A late response for a timed-out frame may still update diagnostics, but it must
+                // never cancel the newer frame's timeout or make its RTT appear enormous.
+                val sentAt = sentAtForFrame(resultFrameId)
+                if (sentAt != null && sentAt > 0L) {
                     onRoundTripMs(SystemClock.elapsedRealtime() - sentAt)
                 }
                 val hazard = payload.optJSONObject("hazard")
                 val isUrgent = hazard?.optString("level") == "urgent"
                 // Look answers use the full freshness budget even if the hazard is S1 —
                 // a user-pulled query must not be dropped by the tighter S1 window on slow links.
-                val maxAge = when {
-                    priority -> LOOK_FRESHNESS_MS.coerceAtLeast(configuredStaleAlertMs)
-                    isUrgent -> URGENT_FRESHNESS_MS.coerceAtLeast(configuredStaleAlertMs)
-                    else -> configuredStaleAlertMs
+                val maxAge = maxSpeakAgeMs(priority, isUrgent, configuredStaleAlertMs)
+                val lookSummary = payload.optString("look_summary", "").ifBlank {
+                    hazard?.optString("spoken_preview", "") ?: ""
+                }
+                val hasFreshAwareness = age <= maxAge &&
+                    ((priority && lookSummary.isNotBlank()) || hazard != null)
+                if (inferenceOutageAnnounced && age <= maxAge) {
+                    inferenceOutageAnnounced = false
+                    onState("Vision assistance restored")
+                    // Do not put a recovery status behind (and therefore potentially flush) an
+                    // awareness utterance from this same result. When there is no fresh spoken
+                    // content, say the recovery explicitly.
+                    if (!hasFreshAwareness) {
+                        earcons.restored()
+                        alertManager.statusKey("op_restored")
+                    }
                 }
                 val detectionCount = payload.optInt("detection_count", -1)
                 val labels = payload.optJSONArray("detection_labels")
@@ -684,7 +863,7 @@ class ProtocolClient(
                 val lateSuppressed = payload.optBoolean("late_suppressed", false)
                 Log.i(
                     "AkshravaVision",
-                    "frame=${payload.optLong("frame_id", -1)} detections=$detectionCount labels=$labelValues " +
+                    "frame=$resultFrameId detections=$detectionCount labels=$labelValues " +
                         "late_suppressed=$lateSuppressed result_age_ms=$age priority=$priority"
                 )
                 // #region agent log
@@ -693,7 +872,7 @@ class ProtocolClient(
                     "ProtocolClient.handleMessage:result",
                     "ws_result",
                     mapOf(
-                        "frameId" to payload.optLong("frame_id", -1),
+                        "frameId" to resultFrameId,
                         "detectionCount" to detectionCount,
                         "lateSuppressed" to lateSuppressed,
                         "ageMs" to age,
@@ -707,7 +886,7 @@ class ProtocolClient(
                 // #endregion
                 onResultTelemetry(
                     DetectionTelemetry(
-                        frameId = payload.optLong("frame_id", -1),
+                        frameId = resultFrameId,
                         detectionCount = detectionCount,
                         labels = labelValues,
                         lateSuppressed = lateSuppressed,
@@ -728,12 +907,15 @@ class ProtocolClient(
                     else -> null
                 }
                 if (age <= maxAge) {
-                    val lookSummary = payload.optString("look_summary", "").ifBlank {
-                        hazard?.optString("spoken_preview", "") ?: ""
-                    }
                     if (priority && lookSummary.isNotBlank()) {
-                        alertManager.speakComposed(lookSummary, urgent = true)
-                        onState("Live · ${hazard?.optString("message_key") ?: labelHint ?: "look"}")
+                        if (awarenessTextIsSpeakable(lookSummary)) {
+                            alertManager.speakComposed(lookSummary, urgent = true)
+                            onState("Live · ${hazard?.optString("message_key") ?: labelHint ?: "look"}")
+                        } else {
+                            Log.e("AkshravaVision", "look_summary_rejected_by_safety_guard")
+                            alertManager.statusKey("op_look_unavailable")
+                            onState("Look summary rejected")
+                        }
                     } else if (hazard != null) {
                         val isNear = hazard.optBoolean("range_valid", false) &&
                             hazard.optString("range_band") == "near"
@@ -758,11 +940,14 @@ class ProtocolClient(
                 if (serverAcceptsResultAcknowledgements()) {
                     acknowledgeResult(
                         webSocket = webSocket,
-                        frameId = payload.optLong("frame_id", -1),
+                        frameId = resultFrameId,
                         fresh = age <= maxAge
                     )
                 }
-                settleFrame()
+                if (settleFrame(resultFrameId)) {
+                    consecutiveSettleTimeouts = 0
+                    consecutiveSoftSheds = 0
+                }
             }
         }
     }
@@ -788,7 +973,8 @@ class ProtocolClient(
         }
     }
 
-    private fun handlePermanentFailure(message: String) {
+    private fun handlePermanentFailure(speechKey: String) {
+        if (closedByUser) return
         settleFrame()
         cancelSettleTimeout()
         cancelAppPing()
@@ -796,11 +982,14 @@ class ProtocolClient(
         sessionReady = false
         visionEnabled = false
         clearNegotiatedCapabilities()
+        inferenceOutageAnnounced = false
         closedByUser = true
-        onState(message)
-        alertManager.status(message)
+        val diagnostic = AlertManager.operationalText(speechKey, "en").ifEmpty { "Session ended" }
+        onState(diagnostic)
+        alertManager.statusKey(speechKey)
         pendingReconnect?.cancel(false)
         reconnect.shutdownNow()
+        onTerminal(speechKey)
     }
 
     private fun handleDrop(cause: String) {
@@ -839,7 +1028,7 @@ class ProtocolClient(
             // server link is lost.
             val message = "Vision assistance unavailable. Use cane or guide."
             onState(message)
-            alertManager.status(message)
+            if (!inferenceOutageAnnounced) alertManager.statusKey("op_link_lost")
         }
         scheduleReconnect(cause)
     }
@@ -856,7 +1045,10 @@ class ProtocolClient(
                     logConnection("app_ping_send_failed")
                 }
             }, APP_PING_INTERVAL_MS, APP_PING_INTERVAL_MS, TimeUnit.MILLISECONDS)
-        }.getOrNull()
+        }.getOrElse {
+            Log.w("AkshravaVision", "app_ping_not_armed", it)
+            null
+        }
     }
 
     private fun cancelAppPing() {
@@ -866,7 +1058,6 @@ class ProtocolClient(
 
     private fun scheduleStaleInferenceWatchdog() {
         cancelStaleInferenceWatchdog()
-        staleInferenceTicks = 0
         pendingStaleInferenceWatchdog = runCatching {
             reconnect.scheduleWithFixedDelay({
                 // scheduleWithFixedDelay cancels the whole repeating task the first time it
@@ -874,14 +1065,10 @@ class ProtocolClient(
                 // retire the watchdog for the rest of the session.
                 runCatching {
                     if (closedByUser || !canStream()) return@runCatching
-                    val sentAt = frameSentAtMonoMs
-                    val frameAgeMs =
-                        if (sentAt > 0L) SystemClock.elapsedRealtime() - sentAt else 0L
-                    if (shouldTickStaleInference(inFlight.get(), frameAgeMs, staleInferenceTicks)) {
-                        staleInferenceTicks += 1
+                    claimStaleInferenceTick(SystemClock.elapsedRealtime())?.let { tick ->
                         logConnection(
                             "stale_inference_tick",
-                            mapOf("frameAgeMs" to frameAgeMs, "tick" to staleInferenceTicks)
+                            mapOf("frameAgeMs" to tick.frameAgeMs, "tick" to tick.number)
                         )
                         earcons.staleTick()
                     }
@@ -898,7 +1085,7 @@ class ProtocolClient(
     private fun cancelStaleInferenceWatchdog() {
         pendingStaleInferenceWatchdog?.cancel(false)
         pendingStaleInferenceWatchdog = null
-        staleInferenceTicks = 0
+        synchronized(frameSlotLock) { staleInferenceTicks = 0 }
     }
 
     private fun scheduleReconnect(cause: String) {
@@ -918,16 +1105,73 @@ class ProtocolClient(
                 logConnection("reconnect_executing", mapOf("attempt" to attempt))
                 openSocket("reconnect")
             }, delayMs, TimeUnit.MILLISECONDS)
-        }.getOrNull()
+        }.getOrElse {
+            Log.e("AkshravaVision", "reconnect_not_scheduled cause=$cause", it)
+            null
+        }
     }
 
     @Volatile private var configuredStaleAlertMs: Long = STALE_ALERT_MS
 
-    private fun settleFrame() {
-        cancelSettleTimeout()
-        // The in-flight slot is free again, so the next frame starts with a fresh tick budget.
-        staleInferenceTicks = 0
-        if (inFlight.getAndSet(false)) onFrameSettled()
+    private data class StaleInferenceTick(val frameAgeMs: Long, val number: Int)
+
+    private fun tryClaimFrame(frameId: Long): Boolean = synchronized(frameSlotLock) {
+        if (inFlightFrameId != null) {
+            false
+        } else {
+            inFlightFrameId = frameId
+            frameSentAtMonoMs = 0L
+            staleInferenceTicks = 0
+            true
+        }
+    }
+
+    private fun ownsInFlightFrame(frameId: Long): Boolean = synchronized(frameSlotLock) {
+        frameMaySettle(inFlightFrameId, frameId)
+    }
+
+    private fun markFrameSent(frameId: Long, sentAtMonoMs: Long): Boolean =
+        synchronized(frameSlotLock) {
+            if (!frameMaySettle(inFlightFrameId, frameId)) {
+                false
+            } else {
+                frameSentAtMonoMs = sentAtMonoMs
+                true
+            }
+        }
+
+    private fun sentAtForFrame(frameId: Long): Long? = synchronized(frameSlotLock) {
+        frameSentAtMonoMs.takeIf { frameMaySettle(inFlightFrameId, frameId) }
+    }
+
+    /** Atomically charges a bounded stale tick to the exact frame that is still outstanding. */
+    private fun claimStaleInferenceTick(nowMonoMs: Long): StaleInferenceTick? =
+        synchronized(frameSlotLock) {
+            val currentFrameId = inFlightFrameId ?: return@synchronized null
+            if (!frameMaySettle(inFlightFrameId, currentFrameId)) return@synchronized null
+            val ageMs = if (frameSentAtMonoMs > 0L) nowMonoMs - frameSentAtMonoMs else 0L
+            if (!shouldTickStaleInference(true, ageMs, staleInferenceTicks)) {
+                return@synchronized null
+            }
+            staleInferenceTicks += 1
+            StaleInferenceTick(ageMs, staleInferenceTicks)
+        }
+
+    /** Release the current slot, optionally only when [expectedFrameId] still owns it. */
+    private fun settleFrame(expectedFrameId: Long? = null): Boolean {
+        val releasedFrameId = synchronized(frameSlotLock) {
+            val current = inFlightFrameId ?: return@synchronized null
+            if (expectedFrameId != null && !frameMaySettle(current, expectedFrameId)) {
+                return@synchronized null
+            }
+            inFlightFrameId = null
+            frameSentAtMonoMs = 0L
+            staleInferenceTicks = 0
+            current
+        } ?: return false
+        cancelSettleTimeout(releasedFrameId)
+        onFrameSettled()
+        return true
     }
 
     private fun connectedDurationMs(): Long =
@@ -1001,12 +1245,10 @@ class ProtocolClient(
                 )
             )
             if (isPermanentAccessClose(code)) {
-                val message = if (code == 4403) {
-                    "Device access has been revoked. Ask a volunteer to provision this phone."
-                } else {
-                    "Device authentication failed. Ask a volunteer to provision a new token."
-                }
-                handlePermanentFailure(message)
+                val speechKey = if (code == 4403) "op_access_revoked" else "op_auth_failed"
+                handlePermanentFailure(speechKey)
+            } else if (isSessionTakenOverClose(code)) {
+                handlePermanentFailure("op_session_taken_over")
             } else {
                 handleDrop("closed_${closeClass(code)}")
             }
@@ -1031,7 +1273,7 @@ class ProtocolClient(
                 )
             )
             if (response?.code == 401 || response?.code == 403) {
-                handlePermanentFailure("Device authentication failed. Ask a volunteer to provision a new token.")
+                handlePermanentFailure(ProtocolClient.speechKeyForHandshakeHttp(response.code))
             } else {
                 handleDrop("failure_${transportFailureClass(response?.code)}")
             }

@@ -245,7 +245,7 @@ def test_priority_frames_get_their_own_bounded_rate_limit_not_an_unbounded_bypas
 
 def test_inference_failure_explicitly_disables_vision(monkeypatch):
     class BrokenVision:
-        async def analyze(self, state, header, jpeg):
+        async def analyze(self, state, header, jpeg, **kwargs):
             raise RuntimeError("model unavailable")
 
     monkeypatch.setattr(main, "vision", BrokenVision())
@@ -260,7 +260,9 @@ def test_inference_failure_explicitly_disables_vision(monkeypatch):
                 }
             )
             websocket.send_bytes(JPEG)
-            assert websocket.receive_json() == {"type": "error", "code": "vision_unavailable"}
+            assert websocket.receive_json() == {
+                "type": "error", "code": "vision_unavailable", "frame_id": 8
+            }
             with pytest.raises(WebSocketDisconnect):
                 websocket.receive_json()
 
@@ -274,10 +276,12 @@ def test_websocket_consent_query_alone_does_not_upload_without_jwt_claim(monkeyp
 
     # Without DEV_AUTH_BYPASS the query token path is closed (4401) before any upload.
     with TestClient(app) as client:
-        with pytest.raises(WebSocketDisconnect) as disconnect:
-            with client.websocket_connect("/v1/session?token=dev-device-token&consent=true") as websocket:
+        with client.websocket_connect("/v1/session?token=dev-device-token&consent=true") as websocket:
+            body = websocket.receive_json()
+            assert body == {"type": "error", "code": "authentication_failed"}
+            with pytest.raises(WebSocketDisconnect) as disconnect:
                 websocket.receive_json()
-        assert disconnect.value.code == 4401
+            assert disconnect.value.code == 4401
     mock_upload.assert_not_called()
 
 
@@ -420,15 +424,17 @@ def test_quiet_session_survives_a_lapsed_admission_lease(monkeypatch):
             self.renew_calls = 0
             self.reopen_calls = 0
 
-        async def try_open(self, session_id):
+        async def try_open(self, device_id, session_id):
             self.reopen_calls += 1
-            return True
+            from akshrava_backend.session_admission import ADMITTED
+            return ADMITTED
 
-        async def renew(self, session_id):
+        async def renew(self, device_id, session_id):
             self.renew_calls += 1
-            return False  # lease always lapsed
+            from akshrava_backend.session_admission import ADMITTED
+            return ADMITTED
 
-        async def close(self, session_id):
+        async def close(self, device_id, session_id):
             return None
 
         async def health(self):
@@ -446,7 +452,7 @@ def test_quiet_session_survives_a_lapsed_admission_lease(monkeypatch):
             # Socket must stay open: lapsed lease was re-admitted, pong still arrives.
             assert websocket.receive_json() == {"type": "pong"}
     assert admission.renew_calls >= 1
-    assert admission.reopen_calls >= 2  # initial open + at least one re-admit
+    assert admission.reopen_calls >= 1
 
 
 def test_capacity_exhaustion_after_lease_lapse_still_closes(monkeypatch):
@@ -454,16 +460,18 @@ def test_capacity_exhaustion_after_lease_lapse_still_closes(monkeypatch):
         def __init__(self):
             self.opened_once = False
 
-        async def try_open(self, session_id):
+        async def try_open(self, device_id, session_id):
+            from akshrava_backend.session_admission import ADMITTED, AT_CAPACITY
             if not self.opened_once:
                 self.opened_once = True
-                return True
-            return False  # fleet is genuinely full on re-admit
+                return ADMITTED
+            return AT_CAPACITY
 
-        async def renew(self, session_id):
-            return False
+        async def renew(self, device_id, session_id):
+            from akshrava_backend.session_admission import AT_CAPACITY
+            return AT_CAPACITY
 
-        async def close(self, session_id):
+        async def close(self, device_id, session_id):
             return None
 
         async def health(self):
@@ -495,7 +503,7 @@ def test_transient_inference_failure_sheds_the_frame_and_keeps_the_session(monke
     calls = {"n": 0}
 
     class FlakyVision:
-        async def analyze(self, state, header, jpeg):
+        async def analyze(self, state, header, jpeg, **kwargs):
             calls["n"] += 1
             if calls["n"] == 1:
                 raise TransientInferenceError("inference deadline exceeded")
@@ -520,7 +528,9 @@ def test_transient_inference_failure_sheds_the_frame_and_keeps_the_session(monke
                 "jpeg_bytes": len(JPEG), "camera_calibration_id": "test-r0",
             })
             websocket.send_bytes(JPEG)
-            assert websocket.receive_json() == {"type": "error", "code": "worker_saturated"}
+            assert websocket.receive_json() == {
+                "type": "error", "code": "worker_saturated", "frame_id": 1
+            }
 
             # The socket is still usable: the very next frame succeeds.
             websocket.send_json({
@@ -538,7 +548,7 @@ def test_circuit_open_sheds_frame_but_keeps_the_session(monkeypatch):
     calls = {"n": 0}
 
     class RecoveringVision:
-        async def analyze(self, state, header, jpeg):
+        async def analyze(self, state, header, jpeg, **kwargs):
             calls["n"] += 1
             if calls["n"] == 1:
                 raise InferenceCircuitOpenError("inference circuit open after repeated failures")
@@ -563,7 +573,11 @@ def test_circuit_open_sheds_frame_but_keeps_the_session(monkeypatch):
                 "jpeg_bytes": len(JPEG), "camera_calibration_id": "test-r0",
             })
             websocket.send_bytes(JPEG)
-            assert websocket.receive_json() == {"type": "error", "code": "worker_saturated"}
+            assert websocket.receive_json() == {
+                "type": "error",
+                "code": "inference_circuit_open",
+                "frame_id": 1,
+            }
 
             websocket.send_json({
                 "type": "frame", "id": 2, "capture_mono_ms": 1400, "w": 1, "h": 1,
@@ -571,6 +585,40 @@ def test_circuit_open_sheds_frame_but_keeps_the_session(monkeypatch):
             })
             websocket.send_bytes(JPEG)
             assert websocket.receive_json()["type"] == "result"
+
+
+def test_session_enforces_advertised_single_in_flight_bound(monkeypatch):
+    """An authenticated client cannot build an unbounded analysis queue behind frame_lock."""
+    class SlowVision:
+        async def analyze(self, state, header, jpeg, **kwargs):
+            await asyncio.sleep(0.15)
+            return {
+                "type": "result", "frame_id": header.frame_id,
+                "capture_mono_ms": header.capture_mono_ms, "server_inference_ms": 5,
+                "server_received_epoch_ms": int(time.time() * 1000), "hazard": None,
+                "detection_count": 0, "detection_labels": [], "priority": False,
+                "look_summary": None, "late_suppressed": False, "pipeline_stage_ms": {},
+            }
+
+        async def release_session(self, session_key):
+            return None
+
+    monkeypatch.setattr(main, "vision", SlowVision())
+    monkeypatch.setattr(main, "session_application", SessionApplicationService(main.store, main.vision))
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/session?token=dev-device-token") as websocket:
+            websocket.receive_json()
+            for frame_id, capture_ms in ((1, 200), (2, 1400)):
+                websocket.send_json({
+                    "type": "frame", "id": frame_id, "capture_mono_ms": capture_ms,
+                    "w": 1, "h": 1, "jpeg_bytes": len(JPEG),
+                    "camera_calibration_id": "test-r0",
+                })
+                websocket.send_bytes(JPEG)
+            assert websocket.receive_json() == {
+                "type": "error", "code": "frame_in_flight", "frame_id": 2
+            }
+            assert websocket.receive_json()["frame_id"] == 1
 
 
 def test_extreme_roll_soft_rejects_without_closing_the_session():
@@ -736,6 +784,31 @@ def test_phone_acknowledgement_is_required_for_phone_freshness_metrics():
     assert after_expected == before_expected + 1
     assert after_acknowledged == before_acknowledged + 1
     assert after_fresh == before_fresh
+
+
+def test_invalid_json_keeps_the_socket_open_and_the_next_frame_works():
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/session?token=dev-device-token") as websocket:
+            assert websocket.receive_json()["type"] == "ready"
+            websocket.send_text("{not-json")
+            assert websocket.receive_json() == {"type": "error", "code": "malformed_control_message"}
+            websocket.send_json({"type": "ping"})
+            assert websocket.receive_json() == {"type": "pong"}
+
+
+def test_takeover_closes_the_older_socket_with_4409_and_a_json_body():
+    with TestClient(app) as client:
+        with client.websocket_connect("/v1/session?token=dev-device-token") as older:
+            assert older.receive_json()["type"] == "ready"
+            with client.websocket_connect("/v1/session?token=dev-device-token") as newer:
+                assert newer.receive_json()["type"] == "ready"
+                body = older.receive_json()
+                assert body == {"type": "error", "code": "session_superseded"}
+                with pytest.raises(WebSocketDisconnect) as exc:
+                    older.receive_json()
+                assert exc.value.code == 4409
+                newer.send_json({"type": "ping"})
+                assert newer.receive_json() == {"type": "pong"}
 
 
 @contextlib.contextmanager

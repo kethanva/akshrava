@@ -84,6 +84,12 @@ final class ProtocolClientTests: XCTestCase {
         XCTAssertNoThrow(ProtocolClient().disconnect())
     }
 
+    func testLateFrameCannotSettleNewerInFlightSlot() {
+        XCTAssertTrue(ProtocolClient.frameMaySettle(inFlightFrameId: 12, receivedFrameId: 12))
+        XCTAssertFalse(ProtocolClient.frameMaySettle(inFlightFrameId: 13, receivedFrameId: 12))
+        XCTAssertFalse(ProtocolClient.frameMaySettle(inFlightFrameId: nil, receivedFrameId: 12))
+    }
+
     // ---- reconnect backoff (H3) ----
     //
     // A fixed 2s retry made every phone in the fleet retry in lockstep during a Cloud Run
@@ -124,11 +130,47 @@ final class ProtocolClientTests: XCTestCase {
     func testTerminalErrorCodesIncludeDeviceRevokedAndAuthFailed() {
         XCTAssertTrue(ProtocolClient.terminalErrorCodes.contains("device_revoked"))
         XCTAssertTrue(ProtocolClient.terminalErrorCodes.contains("authentication_failed"))
+        XCTAssertTrue(ProtocolClient.terminalErrorCodes.contains("session_superseded"))
     }
 
     func testTerminalErrorCodesDoNotIncludeOrdinaryErrors() {
         XCTAssertFalse(ProtocolClient.terminalErrorCodes.contains("worker_saturated"))
         XCTAssertFalse(ProtocolClient.terminalErrorCodes.contains("invalid_frame_header"))
         XCTAssertFalse(ProtocolClient.terminalErrorCodes.contains("vision_unavailable"))
+        XCTAssertFalse(ProtocolClient.terminalErrorCodes.contains("malformed_control_message"))
+    }
+
+    func testMalformedControlMessageIsASilentSoftError() {
+        XCTAssertTrue(ProtocolClient.silentSoftErrorCodes.contains("malformed_control_message"))
+        XCTAssertFalse(ProtocolClient.terminalErrorCodes.contains("malformed_control_message"))
+    }
+
+    func testSoftShedAnnouncementIsBounded() {
+        XCTAssertFalse(ProtocolClient.shouldAnnounceSoftShed(
+            consecutiveSoftSheds: 2, lastAnnounceAtMonoMs: 0, nowMonoMs: 1_000
+        ))
+        XCTAssertTrue(ProtocolClient.shouldAnnounceSoftShed(
+            consecutiveSoftSheds: 3, lastAnnounceAtMonoMs: 0, nowMonoMs: 1_000
+        ))
+        XCTAssertFalse(ProtocolClient.shouldAnnounceSoftShed(
+            consecutiveSoftSheds: 4, lastAnnounceAtMonoMs: 1_000, nowMonoMs: 10_000
+        ))
+        XCTAssertTrue(ProtocolClient.shouldAnnounceSoftShed(
+            consecutiveSoftSheds: 4, lastAnnounceAtMonoMs: 1_000, nowMonoMs: 16_000
+        ))
+    }
+
+    func testTransportDropTreats4409AsTerminal() {
+        XCTAssertTrue(ProtocolClient.terminalErrorCodes.contains("session_superseded"))
+        XCTAssertFalse(ProtocolClient.silentSoftErrorCodes.contains("session_superseded"))
+    }
+
+    func testTransientAndSustainedInferenceFailuresHaveDifferentPolicies() {
+        XCTAssertTrue(ProtocolClient.silentSoftErrorCodes.contains("worker_saturated"))
+        XCTAssertTrue(ProtocolClient.silentSoftErrorCodes.contains("frame_in_flight"))
+        XCTAssertTrue(ProtocolClient.silentSoftErrorCodes.contains("frame_rate_limited"))
+        XCTAssertFalse(ProtocolClient.silentSoftErrorCodes.contains("inference_circuit_open"))
+        XCTAssertTrue(ProtocolClient.isInferenceOutageError("inference_circuit_open"))
+        XCTAssertFalse(ProtocolClient.isInferenceOutageError("worker_saturated"))
     }
 }

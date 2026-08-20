@@ -3,7 +3,6 @@ import hmac
 import logging
 import secrets
 from contextlib import asynccontextmanager, suppress
-from json import JSONDecodeError
 
 from fastapi import FastAPI, Header, HTTPException, Response, WebSocket, WebSocketDisconnect
 
@@ -25,7 +24,7 @@ from .protocol import (
 )
 from .rate_limit import FrameRateLimiter
 from .service import BackgroundTaskTracker, InferenceCircuitOpenError, VisionService
-from .session_admission import session_admission_for
+from .session_admission import ADMITTED, SUPERSEDED, session_admission_for
 from .session_handler import (  # noqa: F401 — re-exported operational limit
     MAX_CONTROL_MESSAGE_BYTES,
     FrameStreamHandler,
@@ -39,12 +38,9 @@ ensure_tracer_provider()
 
 NORMAL_FRAME_BURST = 2.0
 NORMAL_FRAME_RATE_PER_SECOND = 1.2
-# On-demand look frames used to bypass ALL rate limiting (header.priority is client-asserted).
-# Any authenticated device -- including one stolen kit still inside its 30-day token window --
-# could stamp priority=true on every frame and stream at socket speed, each frame paying a full
-# validation + inference cost on the shared GPU and starving every other device's freshness
-# budget. A human physically cannot long-press a headset button faster than this; the ":priority"
-# key suffix gives it a separate bucket so a look burst never eats the ambient frame budget.
+# On-demand look frames use their own small admission bucket because header.priority is
+# client-asserted. The separate key keeps explicit requests responsive without permitting a
+# modified client to consume inference at socket speed or starve periodic frames.
 PRIORITY_FRAME_RATE_PER_SECOND = 0.5
 PRIORITY_FRAME_BURST = 2.0
 
@@ -259,6 +255,7 @@ async def _analyze_and_reply(
     frame_lock: asyncio.Lock,
     handler: FrameStreamHandler,
     ack_expected: bool,
+    server_received_epoch_ms: int | None = None,
 ) -> None:
     """Analyse one already-validated frame and write its result back to the phone.
 
@@ -278,7 +275,9 @@ async def _analyze_and_reply(
     """
     async with frame_lock:
         try:
-            result = await session_application.analyze_frame(state, header, jpeg)
+            result = await session_application.analyze_frame(
+                state, header, jpeg, server_received_epoch_ms=server_received_epoch_ms
+            )
         except TransientInferenceError:
             # One frame produced nothing usable (slow inference, worker 5xx, queue full). Shed
             # it and keep the socket: tearing the session down here made a routine CPU-path
@@ -286,20 +285,24 @@ async def _analyze_and_reply(
             # pressed Stop/Start. Sustained failure is escalated by InferenceCircuitOpenError
             # below, not by this branch.
             metrics.worker_saturated()
-            await websocket.send_json({"type": "error", "code": "worker_saturated"})
+            await websocket.send_json(
+                {"type": "error", "code": "worker_saturated", "frame_id": header.frame_id}
+            )
             return
         except InferenceCircuitOpenError:
-            # Breaker open: keep shedding while the cooldown runs, but do not close the socket.
-            # Closing forced reconnect → "Connection restored" while the circuit was still open
-            # → the next frame failed closed again, which is the unavailable↔restored flap
-            # users heard.
+            # Breaker open: this is a sustained outage, not an ordinary one-frame queue shed.
+            # Keep the socket so the phone can probe through the short cooldown without a
+            # reconnect flap, but use a distinct code: clients announce degradation once and do
+            # not announce recovery until an actual result arrives.
             logger.warning(
                 "inference circuit open for device=%s frame_id=%s; shedding frame",
                 device_id,
                 header.frame_id,
             )
-            metrics.worker_saturated()
-            await websocket.send_json({"type": "error", "code": "worker_saturated"})
+            metrics.inference_circuit_open()
+            await websocket.send_json(
+                {"type": "error", "code": "inference_circuit_open", "frame_id": header.frame_id}
+            )
             return
         except Exception:
             logger.exception(
@@ -308,11 +311,20 @@ async def _analyze_and_reply(
                 header.frame_id,
             )
             metrics.inference_failed()
-            await websocket.send_json({"type": "error", "code": "vision_unavailable"})
-            await websocket.close(code=1011)
+            await _send_error_and_close(
+                websocket,
+                1011,
+                {"type": "error", "code": "vision_unavailable", "frame_id": header.frame_id},
+            )
             return
         stages = dict(result.get("pipeline_stage_ms", {}))
         stages["decode"] = decode_ms
+        # VisionService finishes this result after inference; its default timestamp therefore
+        # describes completion, not ingress. The transport captured wall time when the JPEG
+        # arrived, before queueing/locking/inference, which is the contract this field and the
+        # capture-to-API age metric actually claim.
+        if server_received_epoch_ms is not None:
+            result["server_received_epoch_ms"] = server_received_epoch_ms
         metrics.observe_result(
             result["server_inference_ms"],
             result["hazard"] is not None,
@@ -324,12 +336,22 @@ async def _analyze_and_reply(
                 metrics.observe_frame_age(frame_age_ms)
         if result.get("late_suppressed"):
             metrics.late_suppressed()
+            if result.get("late_suppressed_reason") == "capture_age":
+                metrics.late_capture_suppressed()
+        drop_reason = result.get("alert_suppressed_reason")
+        if drop_reason == "debounce":
+            metrics.alert_debounced()
+        elif drop_reason == "global_rate":
+            metrics.alert_rate_limited()
         # Register before the await: the receive loop may process the handset's acknowledgement
         # while this task is yielding inside send_json. Roll back the bounded entry if the write
         # fails, so an unsent result cannot later be counted as handset receipt.
         handler.note_result_sent(header.frame_id, ack_expected)
         try:
             await websocket.send_json(result)
+        except asyncio.CancelledError:
+            handler.forget_result_sent(header.frame_id)
+            raise
         except Exception:
             handler.forget_result_sent(header.frame_id)
             raise
@@ -356,19 +378,81 @@ async def _analyze_and_reply(
         await websocket.send_json(quality_for_inference(result["server_inference_ms"]))
 
 
-async def _renew_or_readmit(session_id: str) -> bool:
+async def _renew_admission(device_id: str, session_id: str) -> str:
     """Keep a live socket admitted across a lapsed lease.
 
     The Redis admission lease is short (~3 min) and is only refreshed by app-level traffic.
     A perfectly healthy but *quiet* session -- a stationary user at 0.2 FPS whose frames are
     all duplicate-dropped on the phone -- legitimately sends nothing for longer than the lease,
-    so renew() failing must not be treated as an eviction: the connection is alive and the user
-    is mid-walk. Re-admit through try_open() (idempotent for an id already present) and only
-    close when fleet capacity is genuinely exhausted.
+    so a lapsed lease must not be treated as an eviction: the connection is alive and the user
+    is mid-walk. Reclaim through renew() (same fencing token) and only close when fleet
+    capacity is genuinely exhausted or a newer socket has taken over this device.
     """
-    if await session_admission.renew(session_id):
+    return await session_admission.renew(device_id, session_id)
+
+
+# Same-process dual-session close. Cross-replica losers still learn via ping/frame renew.
+_live_sessions: dict[str, tuple[str, WebSocket]] = {}
+
+
+async def _send_error_and_close(websocket: WebSocket, close_code: int, body: dict | None) -> None:
+    """Write an optional JSON error, then close. Separate suppress so a failed write still closes."""
+    if body is not None:
+        with suppress(Exception):
+            await websocket.send_json(body)
+    with suppress(Exception):
+        await websocket.close(code=close_code)
+
+
+async def _reject_before_session(websocket: WebSocket, close_code: int, body: dict | None) -> None:
+    """Reject after a handshake so close codes and JSON are not collapsed to HTTP 403.
+
+    Uvicorn maps ``websocket.close`` *before* accept to a bare HTTP 403. Phones then cannot tell
+    revoke from a bad token from overload, and Android used to speak ``op_auth_failed`` for all
+    three. Accepting without ``try_open`` does not consume admission.
+    """
+    with suppress(Exception):
+        await websocket.accept()
+    await _send_error_and_close(websocket, close_code, body)
+
+
+async def _bind_live_session(device_id: str, session_id: str, websocket: WebSocket) -> None:
+    previous = _live_sessions.get(device_id)
+    _live_sessions[device_id] = (session_id, websocket)
+    if previous is None:
+        return
+    old_session_id, old_websocket = previous
+    if old_session_id == session_id:
+        return
+    metrics.session_superseded()
+    await _send_error_and_close(
+        old_websocket, 4409, {"type": "error", "code": "session_superseded"}
+    )
+
+
+def _unbind_live_session(device_id: str, session_id: str) -> None:
+    current = _live_sessions.get(device_id)
+    if current is not None and current[0] == session_id:
+        _live_sessions.pop(device_id, None)
+
+
+async def _close_if_admission_lost(websocket: WebSocket, device_id: str, session_id: str) -> bool:
+    """Return True if the caller should stop the receive loop."""
+    try:
+        state_ = await _renew_admission(device_id, session_id)
+    except Exception:
+        logger.warning("session admission renewal failed for device=%s", device_id, exc_info=True)
+        return False
+    if state_ == SUPERSEDED:
+        metrics.session_superseded()
+        await _send_error_and_close(
+            websocket, 4409, {"type": "error", "code": "session_superseded"}
+        )
         return True
-    return await session_admission.try_open(session_id)
+    if state_ != ADMITTED:
+        await _send_error_and_close(websocket, 1013, None)
+        return True
+    return False
 
 
 def _http_device_id(authorization: str | None) -> str:
@@ -418,19 +502,27 @@ async def session(websocket: WebSocket):
         claims = device_claims_from_token(token, settings)
         device_id = claims.device_id
     except AuthError:
-        await websocket.close(code=4401)
+        await _reject_before_session(
+            websocket, 4401, {"type": "error", "code": "authentication_failed"}
+        )
         return
     if await store.is_device_revoked(device_id):
-        await websocket.close(code=4403)
+        await _reject_before_session(
+            websocket,
+            4403,
+            {"type": "error", "code": "device_revoked", "detail": "Device revoked"},
+        )
         return
     session_id = secrets.token_urlsafe(18)
     session_opened = False
-    if not await session_admission.try_open(session_id):
+    opened = await session_admission.try_open(device_id, session_id)
+    if opened != ADMITTED:
         metrics.session_admission_rejected()
-        await websocket.close(code=1013)
+        await _reject_before_session(websocket, 1013, None)
         return
     session_opened = True
     await websocket.accept()
+    await _bind_live_session(device_id, session_id, websocket)
     metrics.session_opened()
     # Diagnostic upload consent is server-side (JWT claim). Query param alone is never enough;
     # development may OR a query flag only when DEV_AUTH_BYPASS is on for local bench uploads.
@@ -461,6 +553,16 @@ async def session(websocket: WebSocket):
     # under this connection's own tracker, so nothing outlives the socket. See _analyze_and_reply.
     frame_tasks = BackgroundTaskTracker(f"frame-analysis:{session_id}")
     frame_lock = asyncio.Lock()
+    # The wire advertises max_in_flight=1, but a compromised authenticated client can ignore it.
+    # Claim this slot synchronously before task creation so analyses cannot accumulate behind the
+    # per-session lock and turn old frames into an unbounded memory/compute queue.
+    frame_slot = asyncio.Lock()
+
+    async def run_claimed_analysis(*args):
+        try:
+            await _analyze_and_reply(*args)
+        finally:
+            frame_slot.release()
 
     # Normal walking sessions are bounded at 1.2 FPS with a two-frame burst. This matches the
     # freshness policy and prevents one authenticated device from turning server queue time into
@@ -489,9 +591,9 @@ async def session(websocket: WebSocket):
                 resp = await handler.handle_text_frame(message["text"])
                 if resp is not None:
                     if resp.get("_action") == "close":
-                        if resp.get("response") is not None:
-                            await websocket.send_json(resp["response"])
-                        await websocket.close(code=resp["code"])
+                        await _send_error_and_close(
+                            websocket, int(resp["code"]), resp.get("response")
+                        )
                         return
                     if resp.get("_action") == "result_ack":
                         # Telemetry only, and already counted by handle_text_frame. A result_ack
@@ -500,36 +602,45 @@ async def session(websocket: WebSocket):
                         # traffic per frame for no reason the lease needs.
                         continue
                     # Keep admission lease alive on ping / control traffic.
-                    if not await _renew_or_readmit(session_id):
-                        await websocket.close(code=1013)
+                    if await _close_if_admission_lost(websocket, device_id, session_id):
                         return
                     await websocket.send_json(resp)
             elif message.get("bytes") is not None:
                 resp = await handler.handle_binary_frame(message["bytes"])
                 if resp.get("_action") == "close":
-                    if resp.get("response") is not None:
-                        await websocket.send_json(resp["response"])
-                    await websocket.close(code=resp["code"])
+                    await _send_error_and_close(
+                        websocket, int(resp["code"]), resp.get("response")
+                    )
                     return
                 elif resp.get("_action") == "continue":
                     continue
                 elif resp.get("_action") == "analyze":
-                    if not await _renew_or_readmit(session_id):
-                        await websocket.close(code=1013)
+                    if await _close_if_admission_lost(websocket, device_id, session_id):
                         return
+                    if frame_slot.locked():
+                        metrics.reject_frame()
+                        await websocket.send_json(
+                            {
+                                "type": "error",
+                                "code": "frame_in_flight",
+                                "frame_id": resp["header"].frame_id,
+                            }
+                        )
+                        continue
+                    await frame_slot.acquire()
                     # Tracked, not fire-and-forget: the event loop holds only a weak reference to
                     # a task, so an untracked one can be garbage-collected mid-inference. The
                     # phone would then never receive a result for a frame it believes is in
                     # flight, and its single in-flight slot stays held until the 10 s settle
                     # timeout — a stall with no error anywhere to explain it. The tracker also
                     # logs exceptions that a bare task would swallow.
-                    # Snapshot now, not read from `handler` inside the task: with two frames in
-                    # flight (max_in_flight can be 2), the header for the NEXT frame can update
+                    # Snapshot now, not read from `handler` inside the task: a client that ignores
+                    # max_in_flight=1 can send the NEXT header and update
                     # handler.result_acknowledgement_supported before this task's send_json runs,
                     # attributing this frame's expectation to the wrong frame's capability flag.
                     ack_expected = handler.result_acknowledgement_supported
                     frame_tasks.schedule(
-                        _analyze_and_reply(
+                        run_claimed_analysis(
                             websocket,
                             state,
                             resp["header"],
@@ -539,6 +650,7 @@ async def session(websocket: WebSocket):
                             frame_lock,
                             handler,
                             ack_expected,
+                            resp["server_received_epoch_ms"],
                         )
                     )
                 else:
@@ -552,23 +664,30 @@ async def session(websocket: WebSocket):
         # close message has been sent"), which is an ordinary disconnect. Anything else reaching
         # here is a real bug, and logging it as a plain "session closed" hid it completely — keep
         # the message so the two are distinguishable in production logs.
-        logger.info("session closed for device=%s (%s)", device_id, exc)
-    except (ProtocolError, JSONDecodeError) as exc:
+        message = str(exc)
+        if "Cannot call" in message and "close message" in message:
+            logger.info("session closed for device=%s (%s)", device_id, exc)
+        else:
+            logger.exception("unexpected session runtime failure for device=%s", device_id)
+    except ProtocolError as exc:
         logger.warning("protocol error for device=%s: %s", device_id, exc)
         # The socket may already be broken by the same condition that raised ProtocolError
-        # (e.g. the peer vanished mid-message). Best-effort notify-then-close; a failure here
-        # is just the disconnect racing us and must not surface as an unhandled exception.
-        with suppress(RuntimeError):
-            await websocket.send_json({"type": "error", "code": "protocol_error", "detail": str(exc)})
-            await websocket.close(code=4400)
+        # (e.g. the peer vanished mid-message). Split send/close so a failed write still closes.
+        await _send_error_and_close(
+            websocket,
+            4400,
+            {"type": "error", "code": "protocol_error", "detail": str(exc)},
+        )
     finally:
         # The socket is gone; an in-flight analysis can only fail trying to write to it, and its
         # result is for a frame the user has already walked past. Cancel before releasing session
         # state so no task touches the tracker or the admission lease after they are torn down.
         await frame_tasks.cancel_all()
+        handler.record_unacknowledged_on_close()
+        _unbind_live_session(device_id, session_id)
         if session_opened:
             try:
-                await session_admission.close(session_id)
+                await session_admission.close(device_id, session_id)
             except Exception:
                 logger.exception("Failed to close admission for %s", session_id)
             metrics.session_closed()

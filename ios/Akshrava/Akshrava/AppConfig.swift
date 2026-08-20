@@ -26,10 +26,6 @@ public struct AppConfig {
            let url = Self.validWssURL(envUrl) {
             return url
         }
-        if let stored = UserDefaults.standard.string(forKey: "akshrava_wss_url"),
-           let url = Self.validWssURL(stored) {
-            return url
-        }
         // `.invalid` is an IANA-reserved TLD (RFC 2606) guaranteed to never resolve. A build that
         // ships this placeholder must fail loudly by refusing to connect anywhere, mirroring the
         // Android rule: a build shipping its placeholder can never silently reach a real backend
@@ -38,9 +34,8 @@ public struct AppConfig {
         return URL(string: "wss://placeholder.invalid/v1/session")!
     }
 
-    /// Configuration can arrive from process environment, persisted provisioning, or a future
-    /// UI. Validate every source here rather than relying on ATS to reject plaintext after the
-    /// camera and WebSocket setup have already started.
+    /// Validate process configuration here; persisted field provisioning is owned solely by
+    /// ProvisionStore so two UserDefaults keys cannot disagree about the active endpoint.
     public static func validWssURL(_ value: String) -> URL? {
         guard let url = URL(string: value),
               url.scheme?.lowercased() == "wss",

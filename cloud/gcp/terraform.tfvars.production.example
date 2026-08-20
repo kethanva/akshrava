@@ -44,3 +44,21 @@ worker_ha_target_size = 2
 # otlp_exporter_endpoint = "http://otel-collector.internal:4318/v1/traces"
 #
 # JWT dual-key rotation: ./scripts/rotate_jwt_rs256.sh
+#
+# Paging: production MUST set at least one Cloud Monitoring channel or apply fails.
+# monitoring_notification_channels = ["projects/PROJECT/notificationChannels/CHANNEL_ID"]
+#
+# Prefer an edge invoker over a public Cloud Run invoker. Armor flips ingress to
+# internal-LB-only (see app.tf); enable only after DNS + managed cert are ready.
+# enable_cloud_armor  = true
+# cloud_armor_domain  = "api.akshrava.example.org"
+# api_invoker_members = ["serviceAccount:edge@PROJECT.iam.gserviceaccount.com"]
+# api_allow_unauthenticated = false
+#
+# Remote state: copy cloud/gcp/backend.tf.example to backend.tf (never commit live backend.tf
+# with bucket names that leak). CMEK the state bucket. If state ever left the bucket, treat
+# JWT/worker keys in it as compromised.
+#
+# Worker deadline stays below the API remote client timeout (0 = derive 0.5s GPU / 2.2s CPU).
+# worker_infer_timeout_seconds = 0
+

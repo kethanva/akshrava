@@ -20,7 +20,7 @@ class Vision:
         self.received = []
         self.closed = []
 
-    async def analyze(self, state, header, jpeg):
+    async def analyze(self, state, header, jpeg, **kwargs):
         self.received.append((state, header, jpeg))
         return {"type": "result"}
 

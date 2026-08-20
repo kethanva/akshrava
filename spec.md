@@ -1,7 +1,7 @@
 # spec.md — Session longevity fix
 
-**Status:** landed as commit `114858c`; this spec documents intended behavior and the acceptance
-bar.
+**Status:** implemented in commit `114858c`; this spec documents the behavior and the acceptance
+bar. Later releases retain the same session-longevity contract.
 
 ## Problem
 
@@ -117,9 +117,11 @@ Backend — `storage.py`: `Store.close()` awaits `self._redis_client.aclose()`.
 - `test_service.test_cancel_all_stops_tracked_work_that_has_nowhere_left_to_go` — task cancelled,
   not completed, all done; and `..._is_safe_when_nothing_is_in_flight`.
 - `test_storage` — Store.close awaits `aclose()`.
-- Full gates green: `PYTHON_BIN=python3.12 ./scripts/test_backend.sh` and
-  `./gradlew :app:testDebugUnitTest`.
-- Manual (this session): 65-min soak — display stays on the entire run, sustained frame flow,
-  zero reconnects, socket alive until the user presses Stop (`./scripts/e2e_device_soak.sh <serial> 3900` or `./scripts/e2e_device_soak.sh "" 3900` — see
-  `AGENT.md`). Invariant: **display never sleeps until the app is stopped.**
-- The 65-min soak properly verifies the 15-minute `maybeRenewWakeLocks` re-arm behavior, replacing the insufficient 10-minute test.
+- Required automated gates: `PYTHON_BIN=python3.12 ./scripts/test_backend.sh` and
+  `./gradlew :app:testDebugUnitTest`; CI must keep both green. This specification records the
+  acceptance commands rather than claiming that every workstation has rerun both gates.
+- Manual field gate: run a 65-minute soak when sign-off requires direct evidence of the
+  15-minute `maybeRenewWakeLocks` re-arm (`./scripts/e2e_device_soak.sh <serial> 3900` or
+  `./scripts/e2e_device_soak.sh "" 3900`; see `AGENT.md`). The invariant is **display never
+  sleeps until the app is stopped**. The repository's last recorded run is 11 minutes 08.9
+  seconds, so this document does not claim that the 65-minute gate has passed.

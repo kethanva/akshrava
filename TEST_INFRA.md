@@ -1,5 +1,12 @@
 # Akshrava E2E Test Suite Infrastructure & Specification Design
 
+**Status:** This is a target matrix and harness design, not a claim that every named test exists
+today. The currently executable gates are `scripts/run_e2e_tests.sh`, the tests under
+`backend/tests/` and `android/app/src/test/`, Android instrumentation under
+`android/app/src/androidTest/`, and the iOS simulator target configured in
+`ios/AkshravaApp/project.yml`. Keep proposed test IDs below aligned with those real paths before
+using them as acceptance evidence.
+
 ## 1. Executive Summary & Test Philosophy
 
 Akshrava is a safety-first **assistive vision system** designed for supervised use by blind and low-vision individuals running on recycled Android hardware communicating with a FastAPI cloud backend. Because Akshrava operates in real-world physical environments, software reliability, bounded latency, and predictable alert behavior are critical.
@@ -10,7 +17,10 @@ The E2E test infrastructure enforces an **Opaque-Box (Black-Box) Testing Methodo
 Key principles:
 1. **Opaque-Box Verification**: Tests interact strictly via public interface contracts—WebSocket frames, REST endpoints, OkHttp protocol handlers, Android CameraX frame input abstractions, and TTS output events.
 2. **Deterministic Hermetic Execution**: Tests run in isolation using lightweight, high-fidelity mock components without requiring live GCP infrastructure or physical mobile hardware.
-3. **Strict Safety Boundary Isolation**: Tests verify object and vehicle awareness alerts only. Zero navigation guidance, crossing advice, collision warnings, approach-speed calculations, clear-path assurances, or "safe" phrasing may exist in any test case, mock payload, or assertion string.
+3. **Strict Safety Boundary Isolation**: Tests verify object and vehicle awareness alerts only. No
+   test fixture or positive assertion may emit navigation guidance, crossing advice, collision
+   warnings, approach-speed calculations, clear-path assurances, or "safe" phrasing. Negative
+   policy tests may quote those prohibited terms solely to prove that they are rejected.
 4. **Reproducible Failure Diagnosis**: All E2E test runs output structured logs, metric traces, and deterministic frame timelines for instant root-cause analysis.
 
 ---
@@ -25,10 +35,10 @@ The system is evaluated as a closed loop consisting of two primary boundary endp
 +-----------------------------------------------------------------------------------+
 |                              OPAQUE-BOX E2E BOUNDARY                              |
 |                                                                                   |
-|  +--------------------+    Binary JPEGs + JSON    +----------------------------+  |
+|  +--------------------+ JSON header + JPEG bytes +----------------------------+  |
 |  |  Android Client    |-------------------------->| FastAPI Backend Endpoint   |  |
 |  |  Mock / Harness    |<--------------------------| (/v1/session WebSocket)    |  |
-|  +--------------------+     JSON Alert Responses  +----------------------------+  |
+|  +--------------------+      JSON results/errors  +----------------------------+  |
 |            |                                                    |                 |
 |     TTS Speech Output                                    Detector & Storage DB    |
 |   & Audio Focus Events                                (Mocked Remote YOLO Worker) |
@@ -37,13 +47,15 @@ The system is evaluated as a closed loop consisting of two primary boundary endp
 
 ### 2.1 Interface & Protocol Contracts
 - **WebSocket Session Handshake**:
-  - Connection: `WS /v1/session?token=<RS256_JWT>`
-  - Server Handshake: `{"type": "ready", "device_id": "...", "max_in_flight": 1, "detector": "...", "vision_enabled": true}`
+  - Connection: `WS /v1/session` with an `Authorization: Bearer <RS256_JWT>` header
+  - Server Handshake: `{"type": "ready", "device_id": "...", "max_in_flight": 1, "detector": "...", "vision_enabled": true, "alert_max_age_ms": 2500, "capabilities": [...]}`
 - **Frame Transmission Protocol**:
-  - Client sends 8-byte magic `AKSH0001` header + 4-byte JSON length + JSON metadata header (luma, MAD, pose roll/pitch/yaw, centidegrees, timestamps) + JPEG payload.
+  - Client sends one JSON text header followed immediately by one binary JPEG payload. The
+    header carries frame ID, dimensions, capture timestamps, calibration, quality/pose metadata,
+    and capability flags; there is no `AKSH0001` binary envelope.
   - Rate limits: 1.2 FPS normal, 0.5 FPS priority look requests (with burst allowance up to 2.0 FPS).
 - **Backend Alert Payload Protocol**:
-  - Server returns: `{"type": "result", "frame_id": "...", "detections": [...], "speech": {"text": "...", "lang": "en"}, "alerts": [...]}`
+  - Server returns a compact result such as `{"type": "result", "frame_id": 1, "capture_mono_ms": 123, "hazard": null, "detection_count": 0, "late_suppressed": false}`; the phone resolves any admitted message key through its local templates.
   - Error frames: `{"type": "error", "code": "worker_saturated"}` (transient, socket preserved) or disconnect codes (`4401` unauthorized, `4403` revoked).
 
 ---
@@ -56,7 +68,7 @@ The Akshrava system architecture comprises 8 core features. The table below deta
 |---|---|---|---|---|---|---|---|---|
 | **F1** | CameraX Capture & Pre-encode Frame Gating | `FrameGate.kt`, `FrameEncoder.kt`, `CapturePolicy.kt` | Luma occluded (<8, **drop is immediate**; the spoken prompt debounces ≥3 frames), glare (>230), burst MAD (<6), Laplacian variance monitoring, JPEG pre-encode | >= 5 | >= 5 | Integrated | Integrated | 10+ |
 | **F2** | Session Management & Endpoint Policy | `AssistService.kt`, `EndpointPolicy.kt`, `session_admission.py`, `SessionFlags.kt` | Session admission cap, lease renewal, HTTPS/WSS URL validation, foreground lifecycle | >= 5 | >= 5 | Integrated | Integrated | 10+ |
-| **F3** | Protocol Client Infrastructure & WS Transport | `ProtocolClient.kt`, `main.py` WS session, `FrameStreamHandler` | Handshake `ready`, binary JPEG framing, max in-flight (1), settle timeout (10s), reconnect backoff | >= 5 | >= 5 | Integrated | Integrated | 10+ |
+| **F3** | Protocol Client Infrastructure & WS Transport | `ProtocolClient.kt`, `main.py` WS session, `FrameStreamHandler` | Handshake `ready`, JSON-header + binary JPEG framing, max in-flight (1), settle timeout (10s), reconnect backoff | >= 5 | >= 5 | Integrated | Integrated | 10+ |
 | **F4** | Multi-Engine Detection Dispatch & Failover | `detector.py` (`Noop`, `Ultralytics`, `RemoteWorker`, `RegistryRemoteWorker`) | HMAC-SHA256 worker authentication, sticky multi-worker ordering, 503 worker saturation, fallback | >= 5 | >= 5 | Integrated | Integrated | 10+ |
 | **F5** | Alert Policy, Range Estimation & Speech Composition | `hazards.py`, `alert_policy.py`, `composer.py`, `AlertManager.kt` | Distance estimation (pinhole/ground), S1 urgent (1 frame) vs S2 caution (2 hit persistence), 800ms debounce, speech templates | >= 5 | >= 5 | Integrated | Integrated | 10+ |
 | **F6** | Watchdog & Platform Health Monitoring | `Watchdog.kt`, `service.py` circuit breaker, `ProtocolClient.shouldTickStaleInference`, camera rebind | Circuit breaker (3 fails -> 5s cooldown), stale-inference tick (outstanding frame >3s, **max 3 ticks**), 10s settle timeout, 15s camera rebind, 3min alarm | >= 5 | >= 5 | Integrated | Integrated | 10+ |
@@ -67,18 +79,15 @@ The Akshrava system architecture comprises 8 core features. The table below deta
 
 ## 4. E2E Test Architecture & Directory Layout
 
-To maintain strict project organization compliance (with `.agents/` reserved exclusively for agent metadata), E2E test source code and test runners are located in designated code directories:
+The executable tests live in the existing unit and instrumentation directories. The matrix below
+may refer to future target cases, but documentation must not imply that every named test or a
+separate `e2e/` package already exists:
 
 ```
 Akshrava Repo Root
 ├── backend/
 │   └── tests/
-│       ├── e2e/                           # Backend & Integrated E2E Pytest Suite
-│       │   ├── conftest.py                # 6-Component Mock Fixture Suite
-│       │   ├── test_e2e_tier1_features.py # Tier 1: Core Feature E2E Coverage
-│       │   ├── test_e2e_tier2_boundaries.py# Tier 2: Boundary & Corner Cases
-│       │   ├── test_e2e_tier3_pairwise.py # Tier 3: Pairwise Module Combinations
-│       │   └── test_e2e_tier4_scenarios.py# Tier 4: Real-World Walking Scenarios
+│       ├── test_websocket.py              # Current protocol/session integration coverage
 │       └── ... (existing backend unit tests)
 ├── android/
 │   └── app/
@@ -87,15 +96,16 @@ Akshrava Repo Root
 │               └── java/
 │                   └── org/
 │                       └── akshrava/
-│                           └── app/
-│                               └── e2e/  # Android JVM E2E Test Harness Suite
-│                                   ├── MockServerHarness.kt
-│                                   ├── MockCameraFrameFactory.kt
-│                                   └── ProtocolClientE2eTestSuite.kt
+│                           └── app/      # Current JVM unit/protocol tests
 ├── scripts/
-│   └── run_e2e_tests.sh                   # Unified E2E Test Runner Script
+│   ├── run_e2e_tests.sh                    # Backend + Android JVM baseline runner
+│   └── e2e_device_soak.sh                  # Physical-device soak runner
 └── TEST_INFRA.md                          # Main E2E Specification & Infra Document (this file)
 ```
+
+The feature IDs and mock components below remain a target matrix. The authoritative current file
+list is the filesystem under `backend/tests/`, `android/app/src/test/`, and
+`android/app/src/androidTest/`; do not cite proposed test names as executed evidence.
 
 ---
 
@@ -118,9 +128,10 @@ To support isolated, repeatable E2E testing without external cloud or hardware d
 
 ### 5.1 Mock 1: Sockets & WebSocket Transport Mock
 - **Purpose**: Simulates full binary JPEG frame transfer, JSON header parsing, WebSocket handshake, ready signals, and disconnect error handling.
-- **Implementation**: Uses Starlette `TestClient` / `AsyncTestClient` WebSocket connection context manager for backend testing, and OkHttp `MockWebServer` / custom `WebSocketListener` for Android JVM tests.
+- **Implementation**: Uses the backend's existing pytest/WebSocket fixtures and Android JVM test
+  doubles; live device behavior is covered only by `androidTest` and the documented soak scripts.
 - **Capabilities**:
-  - Validates `AKSH0001` binary framing header.
+  - Validates JSON-header followed by binary-JPEG framing and stream alignment.
   - Injects delayed frames, dropped connections, and malformed header payloads.
   - Simulates socket disconnect codes (`4401`, `4403`) and soft error frames (`worker_saturated`).
 
@@ -184,7 +195,7 @@ To support isolated, repeatable E2E testing without external cloud or hardware d
 
 #### F3: Protocol Client Infrastructure & WS Transport
 - `test_f3_01_handshake_ready`: WebSocket connection receives initial JSON `ready` message with `max_in_flight=1`.
-- `test_f3_02_binary_framing_valid`: Client sends binary frame with `AKSH0001` header and backend decodes header + JPEG payload.
+- `test_f3_02_json_header_then_jpeg`: Client sends a JSON header followed by its binary JPEG and the backend preserves pairing/alignment.
 - `test_f3_03_single_in_flight_enforcement`: Second frame sent while previous frame is in-flight is dropped or queued per client policy.
 - `test_f3_04_frame_settle_timeout`: Frame with no response within 10,000ms triggers client frame settle timeout log and reset.
 - `test_f3_05_reconnect_exponential_backoff`: Network disconnection triggers client exponential reconnect backoff strategy.
@@ -320,7 +331,7 @@ Tier 4 tests execute multi-step end-to-end user journeys:
   2. Receives `"ready"` handshake frame.
   3. Transmits 1.2 FPS frame stream with synchronized pose data for 10 simulated minutes.
   4. Encounters obstacle (`chair` at 2.5m) -> receives persistence S2 caution alert.
-  5. Encounters approaching vehicle (`car` at 4.0m) -> receives single-frame S1 urgent alert.
+  5. Encounters a nearby vehicle -> receives the policy-admitted awareness alert when freshness and calibration gates allow it.
   6. Speech engine renders localized TTS utterances with audio focus ducking.
   7. Client cleanly disconnects socket upon session completion.
 
@@ -337,8 +348,8 @@ Tier 4 tests execute multi-step end-to-end user journeys:
 - **Workflow**:
   1. Device battery drops to 14% (triggering low battery warning alert).
   2. User triggers priority look request (double-shake gesture — the gesture requests a look and speaks nothing extra, so it cannot flush a live hazard alert; 3s trigger cooldown).
-  3. Client bypasses normal 1.2 FPS cap and sends priority frame header.
-  4. Backend allocates priority frame budget, dispatches to detector, and returns immediate alert summary.
+  3. Client sends a priority frame into its separate bounded admission bucket.
+  4. Backend dispatches it through the same freshness and awareness policy and returns one bounded summary.
 
 #### Scenario 4: Mid-Session Device Revocation & Key Cutover
 - **Workflow**:
@@ -357,7 +368,9 @@ Tier 4 tests execute multi-step end-to-end user journeys:
 
 ## 7. Test Execution & Verification Protocol
 
-The primary entry point for executing all E2E test suites is `/Volumes/SSD/projects/Akshrava/scripts/run_e2e_tests.sh`.
+The executable baseline entry point is `scripts/run_e2e_tests.sh`; it runs the production-source
+safety scan, backend pytest suite, and Android JVM suite. It does not replace physical-device
+instrumentation or the iOS simulator target.
 
 ### 7.1 Script Execution Architecture
 ```
@@ -365,10 +378,10 @@ The primary entry point for executing all E2E test suites is `/Volumes/SSD/proje
                                            |
                     +----------------------+----------------------+
                     |                                             |
-          Backend E2E Pytest Suite                     Android JVM E2E Test Suite
+          Backend pytest suite                         Android JVM unit/protocol suite
        (PYTHON_BIN=python3.12 pytest)             (./gradlew :app:testDebugUnitTest)
                     |                                             |
-         backend/tests/e2e/                              android/app/src/test/
+         backend/tests/                                 android/app/src/test/
                     |                                             |
          All 4 Tiers (1, 2, 3, 4)                     ProtocolClient & AlertManager
 ```
@@ -378,9 +391,8 @@ The primary entry point for executing all E2E test suites is `/Volumes/SSD/proje
   ```bash
   ./scripts/run_e2e_tests.sh
   ```
-- **Run Backend E2E Suite Direct**:
+- **Run Backend Suite Direct**:
   ```bash
-  cd backend
   PYTHON_BIN=python3.12 ./scripts/test_backend.sh
   ```
 - **Run Android JVM Unit & E2E Suite Direct**:
@@ -396,7 +408,11 @@ The primary entry point for executing all E2E test suites is `/Volumes/SSD/proje
 ### 8.1 Mandatory Safety Boundary Principle
 Akshrava is an **awareness system only**. It provides object and vehicle presence information to supplement human judgment and mobility aids (e.g. white canes, guide dogs).
 
-> **SAFETY BOUNDARY MANDATE**: Akshrava MUST NEVER claim, imply, or add navigation guidance, street crossing decisions, collision avoidance warnings, approach-speed calculations, clear-path assurances, or "safe" guarantees in code, strings, TTS output, test assertions, or documentation.
+> **SAFETY BOUNDARY MANDATE**: Akshrava product code, user-facing strings, TTS output, and
+> positive test fixtures MUST NEVER claim, imply, or add navigation guidance, street crossing
+> decisions, collision avoidance warnings, approach-speed calculations, clear-path assurances, or
+> "safe" guarantees. Policy tests and documentation may quote these terms only to explain or
+> enforce that they are prohibited.
 
 ### 8.2 Prohibited Terms & Concepts Audit Checklist
 
@@ -407,10 +423,12 @@ Akshrava is an **awareness system only**. It provides object and vehicle presenc
 | **Collision Avoidance** | `collision imminent`, `avoid collision`, `impact in`, `crash warning` | Zero collision avoidance or time-to-impact phrasing allowed. | **COMPLIANT** |
 | **Approach Speed** | `approaching at`, `speed`, `km/h`, `mph`, `closing speed`, `time to arrival` | Zero speed or approach rate calculations allowed. | **COMPLIANT** |
 | **Clear Path** | `clear path`, `path is clear`, `way is clear`, `all clear`, `safe path` | "No alert in this recent view. Continue using cane or guide" MUST be used instead of "clear". | **COMPLIANT** |
-| **Safe Guarantees** | `safe`, `safety confirmed`, `guaranteed clear`, `secure walk` | The word "safe" MUST NOT be used in any alert, speech output, or documentation. | **COMPLIANT** |
+| **Safe Guarantees** | `safe`, `safety confirmed`, `guaranteed clear`, `secure walk` | These phrases MUST NOT appear in alerts, speech output, or positive fixtures; policy documentation may quote them as forbidden examples. | **COMPLIANT** |
 
 ### 8.3 Automated CI Safety Boundary Scanner
-As part of `scripts/run_e2e_tests.sh`, an automated grep check audits all test files, mocks, speech templates, and source strings to guarantee 0 violations of the prohibited terms:
+As part of `scripts/run_e2e_tests.sh`, an automated grep check audits the current backend and
+Android production-source paths. It is a source guard, not a substitute for runtime tests or the
+iOS audit:
 
 ```bash
 grep -rnE -i \
@@ -419,4 +437,7 @@ grep -rnE -i \
   | grep -v "STRICT SAFETY BOUNDARY" || true
 ```
 
-*Verification Result*: Zero violations found across all production source files and test suites.
+The production-source scan is expected to report zero matches in a passing run. It intentionally
+does not scan this design document or policy-focused tests, which quote prohibited terms to prove
+that those terms are rejected; a passing scan is evidence for source hygiene, not a field-safety
+or runtime-perception claim.

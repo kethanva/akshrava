@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import time
@@ -187,10 +188,19 @@ class Store:
                 await session.rollback()
                 async with self.sessions() as retry_session:
                     device = await retry_session.get(Device, device_id)
-                    if device is not None:
-                        device.calibration_id = calibration_id
-                        device.updated_at = datetime.now(timezone.utc)
-                        await retry_session.commit()
+                    if device is None:
+                        # A duplicate insert race must reveal the winning row. If no row exists,
+                        # this was a different integrity failure (constraint, corrupt schema,
+                        # etc.); swallowing it makes the authenticated session look registered
+                        # while no durable device record exists.
+                        logger.error(
+                            "device upsert integrity failure was not a duplicate device_id=%s",
+                            device_id,
+                        )
+                        raise
+                    device.calibration_id = calibration_id
+                    device.updated_at = datetime.now(timezone.utc)
+                    await retry_session.commit()
 
     async def geometry_profile(self, calibration_id: str):
         """Return only a verified profile; unverified or unknown IDs fail closed.
@@ -282,7 +292,7 @@ class Store:
                 if client:
                     cached = await client.get(f"revocation:{device_id}")
                     if cached is not None:
-                        return cached == b"1"
+                        return cached in ("1", b"1", True)
             except Exception:
                 logger.warning("Redis cache lookup failed for revocation, falling back to local/db", exc_info=True)
 
@@ -392,11 +402,13 @@ class Store:
                 return await self.purge_alert_events_older_than(retention_days)
             finally:
                 try:
-                    await session.execute(
-                        text("SELECT pg_advisory_unlock(:key)"),
-                        {"key": _RETENTION_ADVISORY_LOCK_KEY},
+                    await asyncio.shield(
+                        session.execute(
+                            text("SELECT pg_advisory_unlock(:key)"),
+                            {"key": _RETENTION_ADVISORY_LOCK_KEY},
+                        )
                     )
-                except Exception:
+                except BaseException:
                     # A normal AsyncConnection.close() returns the physical PostgreSQL session to
                     # SQLAlchemy's pool. Session advisory locks survive that return, so merely
                     # logging here could strand the leader lock on a pooled connection. Invalidate

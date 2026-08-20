@@ -68,6 +68,12 @@ if not allow_public and not has_invoker:
     )
     sys.exit(1)
 
+environment = vals.get("environment", '"pilot"').strip('"').strip("'")
+channels = vals.get("monitoring_notification_channels", "[]")
+if environment == "production" and "notificationChannels" not in channels:
+    print("production requires monitoring_notification_channels (see OPERATIONS.md)", file=sys.stderr)
+    sys.exit(1)
+
 manage_pki = vals.get("manage_pki_in_terraform", "false").lower() in {"true", "1"}
 if not manage_pki:
     pem_files = {

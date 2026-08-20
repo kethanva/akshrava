@@ -16,6 +16,10 @@
 
 locals {
   worker_ha_enabled = var.enable_worker_ha && local.deploy_remote_worker
+  # The worker must fail before Cloud Run's client timeout (600 ms GPU / 2400 ms CPU), leaving
+  # enough time for the signed HTTP error to traverse mTLS and trip the API circuit accurately.
+  worker_infer_timeout_seconds = var.worker_infer_timeout_seconds > 0 ? var.worker_infer_timeout_seconds : (var.worker_use_gpu ? 0.5 : 2.2)
+  remote_inference_timeout_ms  = var.detector != "remote" ? 450 : (var.worker_use_gpu ? 600 : 2400)
 }
 
 resource "google_compute_instance_template" "worker" {
@@ -57,12 +61,13 @@ resource "google_compute_instance_template" "worker" {
   metadata = {
     google-logging-enabled = "true"
     startup-script = templatefile("${path.module}/scripts/worker-startup.sh.tftpl", {
-      project_id          = var.project_id
-      region              = var.region
-      worker_image        = local.worker_image
-      environment         = var.environment
-      yolo_weights_sha256 = var.yolo_weights_sha256
-      worker_use_gpu      = var.worker_use_gpu
+      project_id                   = var.project_id
+      region                       = var.region
+      worker_image                 = local.worker_image
+      environment                  = var.environment
+      yolo_weights_sha256          = var.yolo_weights_sha256
+      worker_use_gpu               = var.worker_use_gpu
+      worker_infer_timeout_seconds = local.worker_infer_timeout_seconds
     })
   }
 
@@ -77,13 +82,14 @@ resource "google_compute_instance_template" "worker" {
     google_secret_manager_secret_version.worker_tls_server_cert,
     google_secret_manager_secret_version.worker_tls_server_key,
     google_secret_manager_secret_version.metrics_scrape_token,
+    google_secret_manager_secret_version.redis_ca,
     google_artifact_registry_repository.containers,
   ]
 }
 
-# TCP-only: the health check cannot complete an mTLS handshake (it presents no client
-# certificate), so it only verifies the port accepts a connection, not that a request succeeds.
-# /healthz on the FastAPI app behind Caddy is verified operationally, not by this check.
+# The public inference port remains mTLS-only. Port 8001 bypasses Caddy solely for Google's
+# health-check ranges (restricted by both VPC firewall and host iptables), allowing auto-healing
+# to detect a wedged detector thread or unavailable replay-protection store via /readyz.
 resource "google_compute_region_health_check" "worker" {
   count               = local.worker_ha_enabled ? 1 : 0
   name                = "akshrava-worker-health"
@@ -93,8 +99,9 @@ resource "google_compute_region_health_check" "worker" {
   healthy_threshold   = 2
   unhealthy_threshold = 3
 
-  tcp_health_check {
-    port = 8443
+  http_health_check {
+    port         = 8001
+    request_path = "/readyz"
   }
 }
 
@@ -135,7 +142,7 @@ resource "google_compute_firewall" "allow_health_check_to_worker" {
 
   allow {
     protocol = "tcp"
-    ports    = ["8443"]
+    ports    = ["8001"]
   }
 
   source_ranges = ["130.211.0.0/22", "35.191.0.0/16"]

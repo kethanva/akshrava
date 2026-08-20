@@ -51,10 +51,36 @@ final class AlertManagerTests: XCTestCase {
     }
 
     func testSpeakFallsBackToEnglishTemplateForUnsupportedLanguage() {
-        // "ta" has no template entries; speak(messageKey:language:) must fall back to the
-        // English template text (paired with the English voice) rather than a Tamil voice
-        // reading English words it has no phonemes for, and never the raw key itself.
-        XCTAssertNoThrow(AlertManager.shared.speak(messageKey: "camera_dark", language: "ta"))
+        // A language with no template dictionary must use the English camera-status string.
+        let resolved = AlertManager.shared.resolvedTemplate(
+            messageKey: "camera_dark",
+            language: "xx-XX"
+        )
+        XCTAssertEqual(resolved?.language, "en")
+        XCTAssertEqual(resolved?.text, "Camera is dark. Uncover the rear lens.")
+    }
+
+    func testBCP47ProvisionedLanguageUsesLocalizedHazardTemplate() {
+        let hindi = AlertManager.shared.resolvedTemplate(
+            messageKey: "vehicle_nearby",
+            language: "hi-IN"
+        )
+        XCTAssertEqual(hindi?.language, "hi")
+        XCTAssertEqual(hindi?.text, "वाहन पास है")
+
+        let tamil = AlertManager.shared.resolvedTemplate(
+            messageKey: "busy_road",
+            language: "ta-IN"
+        )
+        XCTAssertEqual(tamil?.language, "ta")
+        XCTAssertEqual(tamil?.text, "பரபரப்பான சாலை, கவனம்")
+
+        let englishBusy = AlertManager.shared.resolvedTemplate(
+            messageKey: "busy_road",
+            language: "en"
+        )
+        XCTAssertEqual(englishBusy?.language, "en")
+        XCTAssertEqual(englishBusy?.text, "Busy road, careful")
     }
 
     func testLookClearMessageDoesNotContainSafeOrClear() {

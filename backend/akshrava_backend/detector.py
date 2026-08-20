@@ -40,10 +40,8 @@ class Detector(ABC):
     """Inference port.
 
     `infer_*` plus `inference_mode()` is the interface the application layer uses. It exists
-    because VisionService previously had to ask `isinstance(detector, RemoteWorkerDetector)` and
-    probe five optional attributes to work out how to call its own dependency -- so the core knew
-    every adapter by name, and adding a detector meant editing the service. An adapter now
-    *declares* how it wants to be driven and the service just does it.
+    It keeps the application core independent of concrete adapters: an adapter declares how it
+    wants to be driven and the service invokes only this port.
 
     The legacy `detect*` methods remain: they are the adapter-facing surface each concrete
     detector implements, and the defaults below build `infer_*` on top of them, so a detector
@@ -63,7 +61,12 @@ class Detector(ABC):
         return INFERENCE_MODE_SYNC
 
     def infer_sync(self, device_id: str, jpeg: bytes) -> InferenceOutcome:
-        """Blocking inference for one device. Called on a bounded worker thread."""
+        """Blocking inference for one device. Called on a bounded worker thread.
+
+        This detection-only default cannot invent adapter availability status. A synchronous
+        adapter that can report ``cloud_fallback_unavailable`` must override this port and return
+        the complete :class:`InferenceOutcome`; otherwise that status would be silently lost.
+        """
         return InferenceOutcome(self.detect_for_device(device_id, jpeg))
 
     async def infer_async(self, device_id: str, jpeg: bytes) -> InferenceOutcome:
@@ -218,11 +221,9 @@ class RemoteWorkerDetector(Detector):
     def _signed_headers(self, body: bytes) -> dict[str, str]:
         """Build the authenticated request headers for one frame.
 
-        Shared by the sync and async transports on purpose. These two paths previously carried
-        independent copies of the signing scheme, the response cap, and the response parser, and
-        had already drifted apart on 503 handling. Duplicated *security* code is the worst kind to
-        let drift: a fix applied to one copy silently leaves the other exploitable, and the nonce
-        and timestamp here are what make replay protection work at all.
+        Shared by the sync and async transports so signing, response limits, and replay protection
+        cannot drift between implementations. The nonce and timestamp are generated here for
+        every request.
         """
         timestamp = str(int(time.time()))
         nonce = secrets.token_urlsafe(18)

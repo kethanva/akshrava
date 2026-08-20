@@ -104,10 +104,14 @@ class Settings:
             raise ValueError("JWT_PUBLIC_KEY_FILE is required when JWT_ALGORITHM=RS256")
         if not 1 <= settings.max_active_sessions <= 100_000:
             raise ValueError("MAX_ACTIVE_SESSIONS must be between 1 and 100000")
-        if settings.alert_max_age_ms <= 0:
-            raise ValueError("ALERT_MAX_AGE_MS must be positive")
-        if settings.min_frame_interval_ms < 0:
-            raise ValueError("MIN_FRAME_INTERVAL_MS must be non-negative")
+        if not 1 <= settings.max_image_bytes <= 1_000_000:
+            raise ValueError("MAX_IMAGE_BYTES must be between 1 and 1000000")
+        if not 1 <= settings.max_frame_side <= 8192:
+            raise ValueError("MAX_FRAME_SIDE must be between 1 and 8192")
+        if not 1 <= settings.alert_max_age_ms <= 2_500:
+            raise ValueError("ALERT_MAX_AGE_MS must be between 1 and 2500")
+        if not 0 <= settings.min_frame_interval_ms <= 60_000:
+            raise ValueError("MIN_FRAME_INTERVAL_MS must be between 0 and 60000")
         if not 1 <= settings.alert_retention_days <= 3650:
             raise ValueError("ALERT_RETENTION_DAYS must be between 1 and 3650")
         if settings.cloud_fallback_provider not in {"none", "aws", "gcp", "azure"}:
@@ -153,6 +157,10 @@ class Settings:
             raise ValueError("REDIS_URL is required outside development for distributed session and rate limits")
         if not 50 <= settings.inference_timeout_ms <= 10_000:
             raise ValueError("INFERENCE_TIMEOUT_MS must be between 50 and 10000")
+        if settings.inference_timeout_ms > settings.alert_max_age_ms:
+            raise ValueError("INFERENCE_TIMEOUT_MS must not exceed ALERT_MAX_AGE_MS")
+        if settings.detector == "remote" and settings.remote_inference_timeout_ms > settings.inference_timeout_ms:
+            raise ValueError("REMOTE_INFERENCE_TIMEOUT_MS must not exceed INFERENCE_TIMEOUT_MS")
         if not 1 <= settings.inference_executor_workers <= 32:
             raise ValueError("INFERENCE_EXECUTOR_WORKERS must be between 1 and 32")
         if settings.environment != "development" and not settings.expected_schema_revision:

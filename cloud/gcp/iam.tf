@@ -94,13 +94,17 @@ resource "google_artifact_registry_repository_iam_member" "worker_ar_reader" {
   member     = "serviceAccount:${google_service_account.worker_sa.email}"
 }
 
+data "google_compute_default_service_account" "default" {
+  project = var.project_id
+}
+
 # Cloud Run uses the default compute SA to pull unless the runtime SA is also granted.
 resource "google_artifact_registry_repository_iam_member" "cloudrun_ar_reader" {
   project    = var.project_id
   location   = var.region
   repository = google_artifact_registry_repository.containers.name
   role       = "roles/artifactregistry.reader"
-  member     = "serviceAccount:${google_service_account.api_sa.email}"
+  member     = "serviceAccount:${data.google_compute_default_service_account.default.email}"
 }
 
 # COS metadata enables google-logging; the worker SA still needs IAM to write log entries.

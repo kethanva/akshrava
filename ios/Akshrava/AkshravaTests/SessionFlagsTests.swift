@@ -62,4 +62,14 @@ final class SessionFlagsTests: XCTestCase {
         suite.set(1, forKey: "heartbeat_ms") // 1ms after the Unix epoch: always in the deep past
         XCTAssertTrue(SessionFlags.isStale())
     }
+
+    func testFutureHeartbeatAfterClockCorrectionFailsTowardRecovery() {
+        let suite = UserDefaults(suiteName: "org.akshrava.ios.prefs")!
+        suite.set(true, forKey: "session_active")
+        suite.set(
+            Int64(Date().timeIntervalSince1970 * 1000) + 24 * 60 * 60 * 1000,
+            forKey: "heartbeat_ms"
+        )
+        XCTAssertTrue(SessionFlags.isStale())
+    }
 }

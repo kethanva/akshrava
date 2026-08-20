@@ -2,8 +2,8 @@
 //  FrameGate.swift
 //  Akshrava iOS
 //
-//  Frame quality gate. Occlusion / glare may drop a frame. Blur never drops (F-72) —
-//  it only drives a wipe-lens announce after consecutive evidence + cooldown.
+//  Frame quality gate. Occlusion may drop a black frame. Glare and blur never drop —
+//  they only drive a bounded announce after consecutive evidence + cooldown.
 //
 
 import Foundation

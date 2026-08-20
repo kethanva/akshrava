@@ -125,8 +125,8 @@ async def test_timely_vehicle_detection_reports_telemetry_and_conservative_s2_wi
 
 @pytest.mark.asyncio
 async def test_shared_alert_budget_scores_under_limit_and_keeps_labels_when_late():
-    # CPU remote pilot uses ALERT_MAX_AGE_MS=8500 so multi-second YOLO can still score.
-    # Slow-but-under-budget inference must still speak; over-budget keeps detector telemetry.
+    # The service supports an explicit budget in isolation. Deployment pins this to the shared
+    # 2.5 s ceiling; this test only proves under-budget scoring and over-budget telemetry.
     store = RecordingStore()
     detector = SlowFixedPersonDetector(delay_s=0.05)
     service = VisionService(detector, store, alert_max_age_ms=8_500)
@@ -354,9 +354,12 @@ async def test_inference_circuit_is_per_device():
     )
     service._CIRCUIT_OPEN_AFTER = 2
     service._CIRCUIT_COOLDOWN_SECONDS = 30.0
-    for _ in range(2):
-        with pytest.raises(RuntimeError, match="deadline exceeded"):
-            await service._detect("bad-phone", b"jpeg")
+    with pytest.raises(RuntimeError, match="deadline exceeded"):
+        await service._detect("bad-phone", b"jpeg")
+    # The underlying thread is still running. The same phone is shed instead of consuming
+    # the second worker, and that failure still advances its own circuit breaker.
+    with pytest.raises(RuntimeError, match="executor saturated"):
+        await service._detect("bad-phone", b"jpeg")
     with pytest.raises(RuntimeError, match="circuit open"):
         await service._detect("bad-phone", b"jpeg")
     service.detector = PeerDetector()
@@ -542,6 +545,83 @@ async def test_sync_detectors_run_off_the_event_loop_on_the_bounded_pool():
     await service._detect("device-1", b"jpeg")
     assert seen["thread"] != loop_thread
     assert seen["thread"].startswith("akshrava-local-infer")
+
+
+@pytest.mark.asyncio
+async def test_timed_out_sync_detector_cannot_build_an_unbounded_executor_queue():
+    """A timed-out thread keeps its admission slot until the actual blocking call exits."""
+    import threading
+
+    release = threading.Event()
+    started = threading.Event()
+    calls = 0
+
+    class WedgedDetector(Detector):
+        def detect(self, jpeg):
+            nonlocal calls
+            calls += 1
+            started.set()
+            release.wait(timeout=2.0)
+            return []
+
+    service = VisionService(
+        WedgedDetector(), RecordingStore(), inference_timeout_ms=10, inference_executor_workers=1
+    )
+    service._CIRCUIT_OPEN_AFTER = 100
+    try:
+        with pytest.raises(TransientInferenceError, match="deadline exceeded"):
+            await service._detect("wedged-phone", b"jpeg")
+        assert started.is_set()
+        with pytest.raises(TransientInferenceError, match="executor saturated"):
+            await service._detect("wedged-phone", b"next")
+        assert calls == 1, "the second frame must be shed, not queued behind the wedged thread"
+    finally:
+        release.set()
+        await asyncio.sleep(0.02)
+        service.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_timed_out_cloud_fallback_cannot_escape_bounded_executor_admission():
+    """A blocking vendor SDK call remains admitted until its worker really exits."""
+    import threading
+
+    from akshrava_backend.cloud_fallback import (
+        CloudFallbackDetector,
+        CloudImageProvider,
+        CloudResult,
+    )
+
+    release = threading.Event()
+    started = threading.Event()
+    provider_calls = 0
+
+    class WedgedProvider(CloudImageProvider):
+        name = "wedged"
+
+        def analyze(self, jpeg):
+            nonlocal provider_calls
+            provider_calls += 1
+            started.set()
+            release.wait(timeout=2.0)
+            return CloudResult(self.name, [])
+
+    detector = CloudFallbackDetector(EmptyDetector(), WedgedProvider(), 0.55)
+    service = VisionService(
+        detector, RecordingStore(), inference_timeout_ms=10, inference_executor_workers=1
+    )
+    service._CIRCUIT_OPEN_AFTER = 100
+    try:
+        with pytest.raises(TransientInferenceError, match="deadline exceeded"):
+            await service._detect("cloud-phone", b"jpeg")
+        assert started.is_set()
+        with pytest.raises(TransientInferenceError, match="executor saturated"):
+            await service._detect("cloud-phone", b"next")
+        assert provider_calls == 1, "the second frame must not queue behind the vendor call"
+    finally:
+        release.set()
+        await asyncio.sleep(0.02)
+        service.shutdown()
 
 
 @pytest.mark.asyncio

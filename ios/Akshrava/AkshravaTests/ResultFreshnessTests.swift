@@ -37,7 +37,7 @@ final class ResultFreshnessTests: XCTestCase {
             isUrgent: true,
             configuredStaleAlertMs: ProtocolClient.staleAlertMs
         )
-        XCTAssertEqual(urgent, max(ProtocolClient.urgentFreshnessMs, ProtocolClient.staleAlertMs))
+        XCTAssertEqual(urgent, ProtocolClient.urgentFreshnessMs)
     }
 
     func testPriorityUsesLookBudget() {
@@ -46,6 +46,17 @@ final class ResultFreshnessTests: XCTestCase {
             isUrgent: true,
             configuredStaleAlertMs: ProtocolClient.staleAlertMs
         )
-        XCTAssertEqual(look, max(ProtocolClient.lookFreshnessMs, ProtocolClient.staleAlertMs))
+        XCTAssertEqual(look, ProtocolClient.lookFreshnessMs)
+    }
+
+    func testServerCannotWidenPhoneOwnedFreshnessBudget() {
+        XCTAssertEqual(
+            ProtocolClient.configuredSpeakBudget(serverAdvertisedMs: 8_500),
+            ProtocolClient.staleAlertMs
+        )
+        XCTAssertEqual(
+            ProtocolClient.configuredSpeakBudget(serverAdvertisedMs: 1_000),
+            1_000
+        )
     }
 }

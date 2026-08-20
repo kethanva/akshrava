@@ -27,15 +27,23 @@ public struct DeviceProvision {
     }
 
     public var isReady: Bool {
-        !deviceToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-            !calibrationId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-            calibrationId != "unprovisioned" &&
-            URL(string: endpoint) != nil
+        let endpointValue = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        let calibration = calibrationId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let languageValue = language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let languageIsSupported = SupportedLanguages.all.contains {
+            languageValue == $0.tag.lowercased() || languageValue == $0.wireCode
+        }
+        guard let endpointURL = AppConfig.validWssURL(endpointValue) else { return false }
+        return !deviceToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            !calibration.isEmpty &&
+            calibration != "unprovisioned" &&
+            calibration.count <= 128 &&
+            languageIsSupported &&
+            endpointURL.host?.hasSuffix(".invalid") != true
     }
 }
 
 public enum ProvisionStore {
-    private static let defaultsSuite = "org.akshrava.ios.provision"
     private static let endpointKey = "endpoint"
     private static let languageKey = "language"
     private static let calibrationKey = "calibration"
@@ -62,11 +70,19 @@ public enum ProvisionStore {
 
     @discardableResult
     public static func save(_ provision: DeviceProvision) -> Bool {
+        let token = provision.deviceToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Update the Keychain first. UserDefaults writes cannot report a recoverable error, while
+        // a Keychain write can; doing them in the opposite order left a partially updated endpoint
+        // and calibration behind when secure token persistence failed.
+        guard saveToken(token) else {
+            AgentDebugLog.error(event: "provision_token_save_failed")
+            return false
+        }
         let defaults = UserDefaults.standard
         defaults.set(provision.endpoint.trimmingCharacters(in: .whitespacesAndNewlines), forKey: endpointKey)
-        defaults.set(provision.language, forKey: languageKey)
+        defaults.set(provision.language.trimmingCharacters(in: .whitespacesAndNewlines), forKey: languageKey)
         defaults.set(provision.calibrationId.trimmingCharacters(in: .whitespacesAndNewlines), forKey: calibrationKey)
-        return saveToken(provision.deviceToken.trimmingCharacters(in: .whitespacesAndNewlines))
+        return true
     }
 
     /// Debug-only convenience: loads a bundled `provision.json` for local development builds and
@@ -91,13 +107,15 @@ public enum ProvisionStore {
         let token = (json["token"] as? String) ?? (json["device_token"] as? String) ?? ""
         let language = (json["language"] as? String) ?? "en"
         let calibration = (json["calibration_id"] as? String) ?? (json["camera_calibration_id"] as? String) ?? "unprovisioned"
-        var provision = DeviceProvision(
+        let provision = DeviceProvision(
             endpoint: endpoint,
             deviceToken: token,
             language: language,
             calibrationId: calibration
         )
-        _ = save(provision)
+        // Even a debug bundle must not become an in-memory plaintext fallback when Keychain is
+        // unavailable. A failed secure write leaves provisioning incomplete and visible.
+        guard save(provision) else { return nil }
         return provision
         #else
         return nil
@@ -114,26 +132,45 @@ public enum ProvisionStore {
         ]
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
-        guard status == errSecSuccess, let data = item as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess, let data = item as? Data else {
+            AgentDebugLog.error(
+                event: "provision_token_load_failed",
+                detail: "keychain_status=\(status)"
+            )
+            return nil
+        }
+        guard let token = String(data: data, encoding: .utf8) else {
+            AgentDebugLog.error(event: "provision_token_load_failed", detail: "invalid_utf8")
+            return nil
+        }
+        return token
     }
 
     private static func saveToken(_ token: String) -> Bool {
-        SecItemDelete([
+        let identity: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: tokenService,
             kSecAttrAccount as String: tokenAccount,
-        ] as CFDictionary)
+        ]
 
-        guard !token.isEmpty else { return true }
+        guard !token.isEmpty else {
+            let status = SecItemDelete(identity as CFDictionary)
+            return status == errSecSuccess || status == errSecItemNotFound
+        }
 
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: tokenService,
-            kSecAttrAccount as String: tokenAccount,
+        let attributes: [String: Any] = [
             kSecValueData as String: Data(token.utf8),
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
         ]
-        return SecItemAdd(query as CFDictionary, nil) == errSecSuccess
+        let updateStatus = SecItemUpdate(identity as CFDictionary, attributes as CFDictionary)
+        if updateStatus == errSecSuccess { return true }
+        guard updateStatus == errSecItemNotFound else { return false }
+
+        // Add only when there was no old item. Delete-then-add used to destroy a valid field
+        // credential before knowing whether Keychain could store its replacement.
+        var addition = identity
+        attributes.forEach { addition[$0.key] = $0.value }
+        return SecItemAdd(addition as CFDictionary, nil) == errSecSuccess
     }
 }

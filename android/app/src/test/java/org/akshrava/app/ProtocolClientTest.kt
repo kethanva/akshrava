@@ -86,6 +86,10 @@ class ProtocolClientTest {
         assertTrue(ProtocolClient.isPermanentAccessClose(4403))
         assertFalse(ProtocolClient.isPermanentAccessClose(1011))
         assertFalse(ProtocolClient.isPermanentAccessClose(1006))
+        assertFalse(ProtocolClient.isPermanentAccessClose(4409))
+        assertTrue(ProtocolClient.isSessionTakenOverClose(4409))
+        assertFalse(ProtocolClient.isSessionTakenOverClose(4401))
+        assertFalse(ProtocolClient.isSessionTakenOverClose(4403))
     }
 
     @Test
@@ -109,11 +113,28 @@ class ProtocolClientTest {
     }
 
     @Test
+    fun lateResultCannotSettleANewerFrameSlot() {
+        assertTrue(ProtocolClient.frameMaySettle(currentFrameId = 41L, responseFrameId = 41L))
+        assertFalse(ProtocolClient.frameMaySettle(currentFrameId = 42L, responseFrameId = 41L))
+        assertFalse(ProtocolClient.frameMaySettle(currentFrameId = null, responseFrameId = 41L))
+    }
+
+    @Test
     fun speakBudgetPreservesSharedSafetyBoundary() {
         assertEquals(2_500L, ProtocolClient.STALE_ALERT_MS)
         assertEquals(2_500L, ProtocolClient.LOOK_FRESHNESS_MS)
         assertEquals(1_500L, ProtocolClient.URGENT_FRESHNESS_MS)
         assertTrue(ProtocolClient.FRAME_SETTLE_TIMEOUT_MS > ProtocolClient.STALE_ALERT_MS)
+        assertEquals(2_500L, ProtocolClient.configuredSpeakBudget(8_500L))
+        assertEquals(1_000L, ProtocolClient.configuredSpeakBudget(1_000L))
+        assertEquals(
+            1_500L,
+            ProtocolClient.maxSpeakAgeMs(
+                priority = false,
+                isUrgent = true,
+                configuredMs = ProtocolClient.STALE_ALERT_MS
+            )
+        )
     }
 
     @Test
@@ -138,18 +159,33 @@ class ProtocolClientTest {
         assertEquals("server_error", ProtocolClient.closeClass(1011))
         assertEquals("temporary_overload", ProtocolClient.closeClass(1013))
         assertEquals("authentication", ProtocolClient.closeClass(4401))
+        assertEquals("session_conflict", ProtocolClient.closeClass(4409))
         assertEquals("other", ProtocolClient.closeClass(1006))
     }
 
     @Test
     fun softServerErrorsKeepTheSocketAndFreeTheInFlightSlot() {
         assertTrue(ProtocolClient.isSoftServerError("worker_saturated"))
+        assertTrue(ProtocolClient.isSoftServerError("frame_in_flight"))
         assertTrue(ProtocolClient.isSoftServerError("frame_rate_limited"))
         assertTrue(ProtocolClient.isSoftServerError("jpeg_dimension_mismatch"))
         assertTrue(ProtocolClient.isSoftServerError("non_monotonic_capture"))
         assertTrue(ProtocolClient.isSoftServerError("invalid_frame_header"))
+        assertTrue(ProtocolClient.isSoftServerError("malformed_control_message"))
+        assertFalse(ProtocolClient.shouldSettleUnownedSoftError("malformed_control_message"))
+        assertFalse(ProtocolClient.shouldSettleUnownedSoftError("unknown_message"))
+        assertTrue(ProtocolClient.shouldSettleUnownedSoftError("invalid_frame_header"))
+        assertTrue(ProtocolClient.shouldSettleUnownedSoftError("worker_saturated"))
         assertFalse(ProtocolClient.isSoftServerError("vision_unavailable"))
+        assertFalse(ProtocolClient.isSoftServerError("inference_circuit_open"))
         assertFalse(ProtocolClient.isSoftServerError("protocol_violation"))
+    }
+
+    @Test
+    fun sustainedInferenceOutageHasItsOwnRecoverableClassification() {
+        assertTrue(ProtocolClient.isInferenceOutageError("inference_circuit_open"))
+        assertFalse(ProtocolClient.isInferenceOutageError("worker_saturated"))
+        assertFalse(ProtocolClient.isInferenceOutageError("vision_unavailable"))
     }
 
     @Test

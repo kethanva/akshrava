@@ -21,4 +21,8 @@ final class AgentDebugLogTests: XCTestCase {
     func testLogAcceptsUnicodeMessage() {
         XCTAssertNoThrow(AgentDebugLog.log(message: "वाहन पास है 車 🚗"))
     }
+
+    func testOperationalErrorLogDoesNotCrash() {
+        XCTAssertNoThrow(AgentDebugLog.error(event: "test_failure", detail: "private detail"))
+    }
 }

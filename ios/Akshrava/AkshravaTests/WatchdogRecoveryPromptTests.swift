@@ -44,6 +44,18 @@ final class WatchdogRecoveryPromptTests: XCTestCase {
             "Watchdog interval and session staleness threshold must be aligned")
     }
 
+    func testStaleRecoverySpeechIsThePressStartPrompt() {
+        let en = AlertManager.shared.resolvedTemplate(
+            messageKey: Watchdog.stalledRecoverySpeechKey,
+            language: "en"
+        )
+        XCTAssertEqual(
+            en?.text,
+            "Open Akshrava and press Start assistance again. Keep using your cane."
+        )
+        XCTAssertNoThrow(Watchdog.promptStaleSessionRecovery(language: "en"))
+    }
+
     func testSessionIsRecognisedAsStaleAfterHeartbeatGap() {
         // Simulate stale state by calling setActive(false) and waiting — but since we can't
         // mock time, we at least verify isStale() doesn't crash after toggling active state.

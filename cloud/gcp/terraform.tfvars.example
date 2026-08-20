@@ -42,3 +42,8 @@ manage_pki_in_terraform = false
 # When ready for GPU inference:
 # detector            = "remote"
 # yolo_weights_sha256 = "hex64..."
+#
+# Remote state: copy backend.tf.example → backend.tf (gitignored / untracked). See OPERATIONS.md.
+# worker_infer_timeout_seconds = 0   # derive 0.5s GPU / 2.2s CPU; must stay below API remote timeout
+# monitoring_notification_channels = []  # required when environment = "production"
+

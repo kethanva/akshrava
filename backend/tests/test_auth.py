@@ -221,6 +221,18 @@ def test_auth_error_branches(tmp_path, monkeypatch):
     with pytest.raises(AuthError, match="token missing subject"):
         device_claims_from_token(token_blank_sub, settings_hs)
 
+    token_long_sub = jwt.encode(
+        {
+            "sub": "d" * 129,
+            "aud": "akshrava-device",
+            "exp": datetime.now(timezone.utc) + timedelta(minutes=5),
+        },
+        settings_hs.jwt_secret,
+        algorithm="HS256",
+    )
+    with pytest.raises(AuthError, match="subject is too long"):
+        device_claims_from_token(token_long_sub, settings_hs)
+
     # 5. Non-boolean consent
     token_int_consent = jwt.encode(
         {"sub": "phone-1", "aud": "akshrava-device", "diagnostic_consent": 123, "exp": datetime.now(timezone.utc) + timedelta(minutes=5)},
@@ -229,4 +241,3 @@ def test_auth_error_branches(tmp_path, monkeypatch):
     )
     claims = device_claims_from_token(token_int_consent, settings_hs)
     assert claims.diagnostic_consent is False
-

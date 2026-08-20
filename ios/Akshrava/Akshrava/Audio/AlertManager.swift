@@ -59,7 +59,7 @@ public class AlertManager: NSObject, AVSpeechSynthesizerDelegate {
             "vehicle_nearby": "Vehicle nearby",
             "person_ahead": "Person ahead",
             "obstacle_ahead": "Obstacle ahead",
-            "look_clear": "No alert in recent view. Continue using cane or guide",
+            "busy_road": "Busy road, careful",
             "connection_open": "Vision assistance connected",
             "connection_dropped": "Connection lost. Use cane or guide",
             "connection_restored": "Connection restored",
@@ -68,20 +68,90 @@ public class AlertManager: NSObject, AVSpeechSynthesizerDelegate {
             "camera_glare": "Camera blinded by light. Turn slightly.",
             "camera_blur": "Camera is blurry. Wipe the lens. Use cane or guide.",
             "camera_stall": "Camera stalled. Recovering.",
+            "look_unavailable": "Look unavailable. Use cane or guide.",
+            "server_shedding": "Server busy. Use cane or guide.",
+            "watchdog_stalled": "Open Akshrava and press Start assistance again. Keep using your cane.",
         ],
         "hi": [
             "vehicle_nearby": "वाहन पास है",
             "person_ahead": "व्यक्ति आगे है",
             "obstacle_ahead": "बाधा आगे है",
-            "look_clear": "हाल के दृश्य में कोई अलर्ट नहीं. बेंत या गाइड का उपयोग जारी रखें",
-            "connection_open": "दृष्टि सहायता कनेक्ट हो गई है",
-            "connection_dropped": "कनेक्शन टूट गया. बेंत या गाइड का प्रयोग करें",
+            "busy_road": "व्यस्त सड़क, सावधान",
+            "connection_open": "दृष्टि सहायता जुड़ गई",
+            "connection_dropped": "दृष्टि सहायता उपलब्ध नहीं। बेंत या गाइड का उपयोग करें।",
             "connection_restored": "कनेक्शन बहाल हो गया",
             "provisioning_required": "प्रावधान आवश्यक है. शुरू करने से पहले डिवाइस टोकन जोड़ें.",
             "camera_dark": "कैमरा अँधेरा है. पीछे का लेंस खोलें.",
             "camera_glare": "कैमरे पर तेज़ रोशनी है. थोड़ा मुड़ें.",
             "camera_blur": "कैमरा धुँधला है. लेंस पोंछें. बेंत या गाइड का उपयोग करें.",
             "camera_stall": "कैमरा रुक गया. पुनर्प्राप्ति हो रही है.",
+            "look_unavailable": "लुक उपलब्ध नहीं। बेंत या गाइड का उपयोग करें।",
+            "server_shedding": "सर्वर व्यस्त है। बेंत या गाइड का उपयोग करें।",
+            "watchdog_stalled": "अक्षरव खोलें और सहायता शुरू करें दबाएँ। छड़ी का उपयोग जारी रखें।",
+        ],
+        "ta": [
+            "vehicle_nearby": "அருகில் வாகனம்",
+            "person_ahead": "முன்னே நபர் உள்ளார்",
+            "obstacle_ahead": "முன்னே தடையுள்ளது",
+            "busy_road": "பரபரப்பான சாலை, கவனம்",
+            "connection_open": "பார்வை உதவி இணைந்தது",
+            "connection_dropped": "பார்வை உதவி கிடைக்கவில்லை. கோல் அல்லது வழிகாட்டியைப் பயன்படுத்தவும்.",
+            "connection_restored": "இணைப்பு மீண்டும் வந்தது",
+            "provisioning_required": "சாதன அங்கீகாரம் தேவை. தொடங்குவதற்கு முன் சாதன அடையாளத்தைச் சேர்க்கவும்.",
+            "camera_dark": "கேமரா இருட்டாக உள்ளது. பின்புற வில்லையைத் திறக்கவும்.",
+            "camera_glare": "கேமரா ஒளியால் மறைந்துள்ளது. சற்று திரும்பவும்.",
+            "camera_blur": "கேமரா மங்கலாக உள்ளது. வில்லையைத் துடைக்கவும். கோல் அல்லது வழிகாட்டியைப் பயன்படுத்தவும்.",
+            "camera_stall": "கேமரா நின்றது. மீட்டெடுக்கிறது.",
+            "look_unavailable": "பார்வை கிடைக்கவில்லை. கோல் அல்லது வழிகாட்டியைப் பயன்படுத்தவும்.",
+            "server_shedding": "சேவையகம் பணிமிகுதியில் உள்ளது. கோல் அல்லது வழிகாட்டியைப் பயன்படுத்தவும்.",
+        ],
+        "kn": [
+            "vehicle_nearby": "ಹತ್ತಿರ ವಾಹನ",
+            "person_ahead": "ಮುಂದೆ ವ್ಯಕ್ತಿ ಇದ್ದಾರೆ",
+            "obstacle_ahead": "ಮುಂದೆ ಅಡಚಣೆ ಇದೆ",
+            "busy_road": "ಗಿಜಿಗುಡಿದ ರಸ್ತೆ, ಎಚ್ಚರಿಕೆ",
+            "connection_open": "ದೃಷ್ಟಿ ಸಹಾಯ ಸಂಪರ್ಕಗೊಂಡಿದೆ",
+            "connection_dropped": "ದೃಷ್ಟಿ ಸಹಾಯ ಲಭ್ಯವಿಲ್ಲ. ಕೋಲು ಅಥವಾ ಮಾರ್ಗದರ್ಶಕ ಬಳಸಿ.",
+            "connection_restored": "ಸಂಪರ್ಕ ಮರುಸ್ಥಾಪಿತವಾಗಿದೆ",
+            "provisioning_required": "ಸಾಧನದ ಸಿದ್ಧತೆ ಅಗತ್ಯವಿದೆ. ಪ್ರಾರಂಭಿಸುವ ಮೊದಲು ಸಾಧನ ಚೀಟಿ ಸೇರಿಸಿ.",
+            "camera_dark": "ಕ್ಯಾಮೆರಾ ಕತ್ತಲಾಗಿದೆ. ಹಿಂದಿನ ಮಸೂರವನ್ನು ತೆರೆಯಿರಿ.",
+            "camera_glare": "ಕ್ಯಾಮೆರಾ ಬೆಳಕಿನಿಂದ ಕುರುಡಾಗಿದೆ. ಸ್ವಲ್ಪ ತಿರುಗಿ.",
+            "camera_blur": "ಕ್ಯಾಮೆರಾ ಮಬ್ಬಾಗಿದೆ. ಮಸೂರವನ್ನು ಒರೆಸಿ. ಕೋಲು ಅಥವಾ ಮಾರ್ಗದರ್ಶಕ ಬಳಸಿ.",
+            "camera_stall": "ಕ್ಯಾಮೆರಾ ನಿಂತಿದೆ. ಮರುಪಡೆಯಲಾಗುತ್ತಿದೆ.",
+            "look_unavailable": "ನೋಟ ಲಭ್ಯವಿಲ್ಲ. ಕೋಲು ಅಥವಾ ಮಾರ್ಗದರ್ಶಕ ಬಳಸಿ.",
+            "server_shedding": "ಪೂರೈಕೆಗಣಕ ಕಾರ್ಯನಿರತ. ಕೋಲು ಅಥವಾ ಮಾರ್ಗದರ್ಶಕ ಬಳಸಿ.",
+        ],
+        "ml": [
+            "vehicle_nearby": "അടുത്ത് വാഹനം",
+            "person_ahead": "മുന്നിൽ വ്യക്തിയുണ്ട്",
+            "obstacle_ahead": "മുന്നിൽ തടസ്സമുണ്ട്",
+            "busy_road": "തിരക്കേറിയ റോഡ്, ശ്രദ്ധിക്കുക",
+            "connection_open": "കാഴ്ച സഹായം ബന്ധിപ്പിച്ചു",
+            "connection_dropped": "കാഴ്ച സഹായം ലഭ്യമല്ല. വടി അല്ലെങ്കിൽ ഗൈഡ് ഉപയോഗിക്കുക.",
+            "connection_restored": "ബന്ധം വീണ്ടും ലഭിച്ചു",
+            "provisioning_required": "ഉപകരണ ക്രമീകരണം ആവശ്യമാണ്. ആരംഭിക്കുന്നതിന് മുമ്പ് ഉപകരണ ടോക്കൺ ചേർക്കുക.",
+            "camera_dark": "ക്യാമറ ഇരുണ്ടതാണ്. പിന്നിലെ ലെൻസ് തുറന്ന് വയ്ക്കുക.",
+            "camera_glare": "ക്യാമറ വെളിച്ചത്താൽ തിളങ്ങുന്നു. അൽപ്പം തിരിയുക.",
+            "camera_blur": "ക്യാമറ മങ്ങിയിരിക്കുന്നു. ലെൻസ് തുടയ്ക്കുക. വടി അല്ലെങ്കിൽ ഗൈഡ് ഉപയോഗിക്കുക.",
+            "camera_stall": "ക്യാമറ നിന്നു. വീണ്ടെടുക്കുന്നു.",
+            "look_unavailable": "നോട്ട് ലഭ്യമല്ല. വടി അല്ലെങ്കിൽ ഗൈഡ് ഉപയോഗിക്കുക.",
+            "server_shedding": "സെർവർ തിരക്കിലാണ്. വടി അല്ലെങ്കിൽ ഗൈഡ് ഉപയോഗിക്കുക.",
+        ],
+        "te": [
+            "vehicle_nearby": "సమీపంలో వాహనం",
+            "person_ahead": "ముందు వ్యక్తి ఉన్నారు",
+            "obstacle_ahead": "ముందు అడ్డంకి ఉంది",
+            "busy_road": "రద్దీగా ఉన్న రహదారి, జాగ్రత్త",
+            "connection_open": "దృష్టి సహాయం అనుసంధానమైంది",
+            "connection_dropped": "దృష్టి సహాయం అందుబాటులో లేదు. కర్ర లేదా గైడ్ ఉపయోగించండి.",
+            "connection_restored": "కనెక్షన్ తిరిగి వచ్చింది",
+            "provisioning_required": "పరికర సన్నాహం అవసరం. ప్రారంభించే ముందు పరికర టోకెన్ జోడించండి.",
+            "camera_dark": "కెమెరా చీకటిగా ఉంది. వెనుక లెన్స్‌ను తెరవండి.",
+            "camera_glare": "కెమెరా వెలుతురుతో కప్పబడింది. కొద్దిగా తిరగండి.",
+            "camera_blur": "కెమెరా మసకగా ఉంది. లెన్స్ తుడవండి. కర్ర లేదా గైడ్ ఉపయోగించండి.",
+            "camera_stall": "కెమెరా ఆగింది. పునరుద్ధరిస్తోంది.",
+            "look_unavailable": "చూపు అందుబాటులో లేదు. కర్ర లేదా గైడ్ ఉపయోగించండి.",
+            "server_shedding": "సర్వర్ బిజీగా ఉంది. కర్ర లేదా గైడ్ ఉపయోగించండి.",
         ],
     ]
 
@@ -116,7 +186,7 @@ public class AlertManager: NSObject, AVSpeechSynthesizerDelegate {
             try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers, .mixWithOthers])
             try session.setActive(true)
         } catch {
-            AgentDebugLog.log(message: "AudioSession setup failed: \(error)")
+            AgentDebugLog.error(event: "audio_session_setup_failed", detail: String(describing: error))
         }
         #endif
     }
@@ -136,7 +206,7 @@ public class AlertManager: NSObject, AVSpeechSynthesizerDelegate {
         do {
             try AVAudioSession.sharedInstance().setActive(true)
         } catch {
-            AgentDebugLog.log(message: "audio_session_reactivate_failed \(error)")
+            AgentDebugLog.error(event: "audio_session_reactivate_failed", detail: String(describing: error))
         }
         enqueueSpeak(
             "Audio output changed. Assistance continues.",
@@ -153,13 +223,30 @@ public class AlertManager: NSObject, AVSpeechSynthesizerDelegate {
     /// "vehicle_nearby" verbatim, in whatever voice `language` selected -- unintelligible in any
     /// language, and especially so when a Tamil/Kannada/Malayalam/Telugu voice was asked to read
     /// English words it has no phonemes for.
+    func resolvedTemplate(messageKey: String, language: String) -> (text: String, language: String)? {
+        let languageCode = SupportedLanguages.wireCode(for: language)
+        if let localized = templates[languageCode]?[messageKey] {
+            return (localized, languageCode)
+        }
+        if let english = templates["en"]?[messageKey] {
+            return (english, "en")
+        }
+        return nil
+    }
+
     public func speak(messageKey: String, language: String = "en", force: Bool = false) {
-        if let localized = templates[language]?[messageKey] {
-            enqueueSpeak(localized, language: language, force: force, priority: .status)
-        } else if let english = templates["en"]?[messageKey] {
-            enqueueSpeak(english, language: "en", force: force, priority: .status)
+        if let resolved = resolvedTemplate(messageKey: messageKey, language: language) {
+            enqueueSpeak(
+                resolved.text,
+                language: resolved.language,
+                force: force,
+                priority: .status
+            )
         } else {
-            AgentDebugLog.log(message: "missing_speech_template key=\(messageKey) language=\(language)")
+            AgentDebugLog.error(
+                event: "missing_speech_template",
+                detail: "key=\(messageKey) language=\(language)"
+            )
         }
     }
 
@@ -179,12 +266,18 @@ public class AlertManager: NSObject, AVSpeechSynthesizerDelegate {
     /// Resolve a server message key before it reaches the synthesizer. Keys are protocol tokens,
     /// not user-facing speech; unknown keys are logged and suppressed by `speak`.
     public func speakHazard(messageKey: String, language: String = "en") {
-        if let localized = templates[language]?[messageKey] {
-            enqueueSpeak(localized, language: language, force: true, priority: .hazard)
-        } else if let english = templates["en"]?[messageKey] {
-            enqueueSpeak(english, language: "en", force: true, priority: .hazard)
+        if let resolved = resolvedTemplate(messageKey: messageKey, language: language) {
+            enqueueSpeak(
+                resolved.text,
+                language: resolved.language,
+                force: true,
+                priority: .hazard
+            )
         } else {
-            AgentDebugLog.log(message: "missing_hazard_template key=\(messageKey) language=\(language)")
+            AgentDebugLog.error(
+                event: "missing_hazard_template",
+                detail: "key=\(messageKey) language=\(language)"
+            )
             return
         }
         hazardLock.lock()
@@ -263,12 +356,20 @@ public class AlertManager: NSObject, AVSpeechSynthesizerDelegate {
     }
 
     private func toggleMuteOnMain() {
-        isMuted.toggle()
         muteExpiryWorkItem?.cancel()
         muteExpiryWorkItem = nil
-        guard isMuted else { return }
+        if isMuted {
+            isMuted = false
+            speakOnMain("Speech resumed.", language: "en", force: true, priority: .status)
+            return
+        }
         synthesizer.stopSpeaking(at: .immediate)
         currentPriority = .status
+        // Confirm the deliberate control before engaging the gate. Once AVSpeechSynthesizer has
+        // accepted this utterance, the local mute flag does not cancel it; subsequent speech is
+        // suppressed until the expiry or another double-press.
+        speakOnMain("Speech muted for two minutes.", language: "en", force: true, priority: .status)
+        isMuted = true
         // An accidental headset double-press must not silence the app's only feedback channel
         // forever on a screen the user cannot see to notice and undo. Auto-expire, matching the
         // Android mute policy.

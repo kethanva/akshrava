@@ -15,7 +15,7 @@ public class HeadsetControls {
 
     private init() {}
 
-    /// Register the headset double-press (toggle-play/pause) as a mute trigger.
+    /// Register the headset double-press (next-track command) as a mute trigger.
     /// MPRemoteCommandCenter is iOS-only; on macOS this is a no-op.
     public func setup() {
         #if os(iOS)
@@ -33,7 +33,11 @@ public class HeadsetControls {
             MPMediaItemPropertyTitle: "Akshrava assistance"
         ]
         let commandCenter = MPRemoteCommandCenter.shared()
-        commandCenter.togglePlayPauseCommand.addTarget { _ in
+        // iOS translates a headset double-press into the media "next track" command. Binding
+        // togglePlayPause instead made a single accidental press mute the app, violating the
+        // deliberate-double-press-only contract for the one action allowed to silence speech.
+        commandCenter.nextTrackCommand.isEnabled = true
+        commandCenter.nextTrackCommand.addTarget { _ in
             AlertManager.shared.toggleMute()
             return .success
         }

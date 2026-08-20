@@ -54,7 +54,7 @@ class WorkerSettings:
     environment: str = "development"
     nonce_redis_url: str = ""
     yolo_weights_sha256: str = ""
-    infer_timeout_seconds: float = 5.0
+    infer_timeout_seconds: float = 1.0
     metrics_scrape_token: str = ""
 
     @classmethod
@@ -71,15 +71,19 @@ class WorkerSettings:
             batch_wait_ms=int(os.getenv("WORKER_BATCH_WAIT_MS", "12")),
             environment=os.getenv("AKSHRAVA_ENV", "development").lower(),
             nonce_redis_url=os.getenv("NONCE_REDIS_URL", "").strip(),
-            infer_timeout_seconds=float(os.getenv("WORKER_INFER_TIMEOUT_SECONDS", "5.0")),
+            infer_timeout_seconds=float(os.getenv("WORKER_INFER_TIMEOUT_SECONDS", "1.0")),
             metrics_scrape_token=os.getenv("METRICS_SCRAPE_TOKEN", "").strip(),
         )
         if len(settings.shared_secret) < 32:
             raise ValueError("WORKER_SHARED_SECRET must be at least 32 characters")
         if settings.max_image_bytes < 1:
             raise ValueError("MAX_IMAGE_BYTES must be positive")
+        if settings.max_image_bytes > 1_000_000:
+            raise ValueError("MAX_IMAGE_BYTES must not exceed 1000000")
         if settings.max_frame_side < 1:
             raise ValueError("MAX_FRAME_SIDE must be positive")
+        if settings.max_frame_side > 8192:
+            raise ValueError("MAX_FRAME_SIDE must not exceed 8192")
         if not 5 <= settings.request_max_age_seconds <= 300:
             raise ValueError("WORKER_REQUEST_MAX_AGE_SECONDS must be between 5 and 300")
         if not 1 <= settings.batch_max_size <= 64:
@@ -88,6 +92,12 @@ class WorkerSettings:
             raise ValueError("WORKER_BATCH_WAIT_MS must be between 0 and 50")
         if not 0.5 <= settings.infer_timeout_seconds <= 30.0:
             raise ValueError("WORKER_INFER_TIMEOUT_SECONDS must be between 0.5 and 30")
+        if settings.environment != "development" and settings.infer_timeout_seconds > 3.0:
+            raise ValueError(
+                "WORKER_INFER_TIMEOUT_SECONDS must not exceed 3.0 outside development: the API's "
+                "REMOTE_INFERENCE_TIMEOUT_MS is 450-2400 ms, so a longer worker deadline only holds a "
+                "GPU slot for a request the API already abandoned."
+            )
         if settings.environment not in {"development", "pilot", "production"}:
             raise ValueError("AKSHRAVA_ENV must be development, pilot or production")
         if settings.environment != "development" and not settings.yolo_weights_sha256:
@@ -105,6 +115,16 @@ async def _batch_loop(app: FastAPI):
     settings = app.state.worker_settings
     while True:
         jpeg, future = await queue.get()
+        # Requests can time out while waiting behind the active batch. Their futures are then
+        # cancelled by asyncio.wait_for; never spend detector capacity on those stale JPEGs.
+        if future.done():
+            # If the deadline fired before this idle consumer even dequeued the request, no
+            # detector call is wedged and there will be no batch ``finally`` block to clear the
+            # timeout marker. Clear it here or one scheduler-delayed request can leave /readyz
+            # returning 503 forever despite an idle, responsive detector.
+            if app.state.batch_started_at <= 0:
+                app.state.detector_unresponsive = False
+            continue
         batch = [(jpeg, future)]
         deadline = time.monotonic() + settings.batch_wait_ms / 1000.0
         while len(batch) < settings.batch_max_size:
@@ -112,10 +132,13 @@ async def _batch_loop(app: FastAPI):
             if remaining <= 0:
                 break
             try:
-                batch.append(await asyncio.wait_for(queue.get(), remaining))
+                candidate = await asyncio.wait_for(queue.get(), remaining)
+                if not candidate[1].done():
+                    batch.append(candidate)
             except asyncio.TimeoutError:
                 break
         try:
+            app.state.batch_started_at = time.monotonic()
             detections = await asyncio.get_running_loop().run_in_executor(
                 None, app.state.worker_detector.detect_batch, [item[0] for item in batch]
             )
@@ -128,6 +151,23 @@ async def _batch_loop(app: FastAPI):
             for _, item_future in batch:
                 if not item_future.done():
                     item_future.set_exception(exc)
+        finally:
+            app.state.batch_started_at = 0.0
+            app.state.detector_unresponsive = False
+
+
+def _detector_is_responsive(app: FastAPI) -> bool:
+    """Return false once the only batch consumer is dead or past its inference deadline."""
+    batch_task = getattr(app.state, "batch_task", None)
+    if batch_task is None or batch_task.done():
+        return False
+    if getattr(app.state, "detector_unresponsive", False):
+        return False
+    started_at = getattr(app.state, "batch_started_at", 0.0)
+    if started_at <= 0:
+        return True
+    timeout = app.state.worker_settings.infer_timeout_seconds
+    return time.monotonic() - started_at <= timeout
 
 
 def _authenticated_body(request: Request, body: bytes, settings: WorkerSettings):
@@ -150,6 +190,29 @@ def _authenticated_body(request: Request, body: bytes, settings: WorkerSettings)
     if not hmac.compare_digest(expected, signature):
         raise HTTPException(status_code=401, detail="invalid worker signature")
     return nonce
+
+
+async def _bounded_request_body(request: Request, maximum: int) -> bytes:
+    """Read at most one configured image into memory, including for unauthenticated requests.
+
+    ``await request.body()`` buffers the entire entity before code can inspect its length. A peer
+    able to reach the private worker could therefore force an arbitrarily large allocation with
+    an invalid signature. Bound while streaming and use Content-Length only as an early reject,
+    never as the sole enforcement (chunked bodies need the same limit).
+    """
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > maximum:
+                raise HTTPException(status_code=413, detail="worker request too large")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid content length") from None
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > maximum:
+            raise HTTPException(status_code=413, detail="worker request too large")
+    return bytes(body)
 
 
 def get_settings(request: Request) -> WorkerSettings:
@@ -194,6 +257,8 @@ def create_worker_app(
         app.state.worker_settings = configured_settings
         app.state.worker_detector = configured_detector
         app.state.inference_queue = asyncio.Queue(maxsize=configured_settings.batch_max_size * 8)
+        app.state.batch_started_at = 0.0
+        app.state.detector_unresponsive = False
         app.state.batch_task = asyncio.create_task(_batch_loop(app))
         app.state.nonce_store = nonce_store_for(
             redis_url=configured_settings.nonce_redis_url,
@@ -226,7 +291,9 @@ def create_worker_app(
         return {"ok": True, "role": "gpu-worker"}
 
     @app.get("/readyz")
-    async def readyz(nonce_store=Depends(get_nonce_store)):
+    async def readyz(request: Request, nonce_store=Depends(get_nonce_store)):
+        if not _detector_is_responsive(request.app):
+            raise HTTPException(status_code=503, detail="worker detector unavailable")
         try:
             await nonce_store.health()
         except Exception as exc:
@@ -262,9 +329,12 @@ def create_worker_app(
         metrics: Metrics = Depends(get_metrics)
     ):
         trace_id = _trace_id(request)
-        body = await request.body()
-        if len(body) > settings_value.max_image_bytes:
-            raise HTTPException(status_code=413, detail="worker request too large")
+        # A timed-out request does not stop a blocking detector thread. Reject new work while the
+        # single batch consumer remains wedged instead of filling the queue behind work that can no
+        # longer meet the phone's freshness budget. /readyz exposes the same state to auto-healing.
+        if not _detector_is_responsive(request.app):
+            raise HTTPException(status_code=503, detail="worker detector unavailable")
+        body = await _bounded_request_body(request, settings_value.max_image_bytes)
         try:
             nonce = _authenticated_body(request, body, settings_value)
         except HTTPException as exc:
@@ -305,12 +375,15 @@ def create_worker_app(
         except asyncio.QueueFull as exc:
             raise HTTPException(status_code=503, detail="worker inference queue full") from exc
         try:
-            # Unbounded here previously: a stuck detector call, or a future left in the queue
-            # when the batch loop is cancelled during shutdown, would hang this request forever
-            # instead of failing within the control plane's own remote_inference_timeout_ms.
+            # Bound every request by the worker deadline, including time spent waiting in the
+            # batch queue. A stuck detector is surfaced through readiness below.
             detections = await asyncio.wait_for(future, timeout=settings_value.infer_timeout_seconds)
         except asyncio.TimeoutError as exc:
             future.cancel()
+            # The deadline includes queue/batch coalescing time, whereas batch_started_at does
+            # not. Mark the worker unavailable immediately at the externally visible deadline;
+            # the batch loop clears this only if/when the blocking detector invocation returns.
+            request.app.state.detector_unresponsive = True
             logger.warning(
                 "worker inference deadline exceeded trace=%s timeout_s=%.1f",
                 trace_id, settings_value.infer_timeout_seconds,

@@ -31,7 +31,7 @@
     <string name="status_configure">स्वयंसेवक के साथ एक बार सेट करें, फिर सहायता शुरू करें दबाएँ।</string>
     <string name="status_ready">तैयार। जब सहायता चाहिए तब सहायता शुरू करें दबाएँ।</string>
     <string name="status_stopped">सहायता बंद।</string>
-    <string name="status_starting">सहायता शुरू हो रही है। अब स्क्रीन लॉक कर सकते हैं।</string>
+    <string name="status_starting">सहायता शुरू हो रही है। स्क्रीन चालू रखें; फ़ोन लॉक न करें।</string>
     <string name="status_need_provisioning">स्वयंसेवक को WSS पता, डिवाइस टोकन और कैलिब्रेशन आईडी भरना होगा।</string>
     <string name="status_camera_permission">सहायता शुरू करने के लिए कैमरा अनुमति आवश्यक है।</string>
     <string name="status_notification_permission">दिखाई देने वाले नियंत्रणों के लिए सूचना अनुमति आवश्यक है।</string>

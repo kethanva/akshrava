@@ -5,6 +5,7 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import android.util.Log
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -18,6 +19,11 @@ data class AppConfig(
     val calibrationId: String,
     val debugTelemetry: Boolean
 )
+
+internal fun AppConfig.hasRequiredProvisioning(): Boolean =
+    endpoint.isNotBlank() &&
+        deviceToken.isNotBlank() &&
+        calibrationId.trim().let { it.isNotEmpty() && it != "unprovisioned" }
 
 object AppConfigStore {
     private const val PREFS = "akshrava"
@@ -109,9 +115,10 @@ object AppConfigStore {
                 .putString(ENCRYPTED_TOKEN, Base64.encodeToString(ciphertext, Base64.NO_WRAP))
                 .putString(TOKEN_IV, Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
                 .commit()
-        } catch (_: Exception) {
+        } catch (ex: Exception) {
             // An unavailable Android Keystore is a provisioning failure, not a reason to retain
             // a bearer token in plaintext storage.
+            Log.e("AkshravaVision", "device token encryption failed", ex)
             invalidateTokenKey()
             editor.remove(ENCRYPTED_TOKEN).remove(TOKEN_IV).commit()
             false

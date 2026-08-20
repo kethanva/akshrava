@@ -74,7 +74,8 @@ jobs:
       - run: ./scripts/gcp_preflight.sh --ci
 
   android:
-    if: github.event_name == 'pull_request'
+    # Test steps run on pull requests *and* pushes to main: a merge commit is not the PR head
+    # and was previously never Android-tested. The participant client is this APK.
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -91,10 +92,9 @@ jobs:
       - run: ./gradlew --no-daemon :app:testDebugUnitTest
 
   ios:
-    # Same gate shape as `android`: the unit suite is the PR gate. macOS minutes are billed at a
-    # multiple of Linux, so this does not also run on every push to main -- the release workflow
-    # rebuilds and retests iOS from scratch before publishing anything.
-    if: github.event_name == 'pull_request'
+    # Test steps run on pull requests *and* pushes to main: a merge commit is not the PR head
+    # and was previously never iOS-tested. Archive/IPA steps stay PR-only to bound macOS minutes
+    # and because iOS remains an unsigned prototype (NOT_NOW.md).
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -135,6 +135,7 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             -quiet
       - name: Build the unsigned archive artifact
+        if: github.event_name == 'pull_request'
         run: |
           set -euo pipefail
           mkdir -p ios-pr-artifacts
@@ -163,7 +164,7 @@ jobs:
           mv "$RUNNER_TEMP/SHA256SUMS-ios-pr.txt" ios-pr-artifacts/SHA256SUMS-ios-pr.txt
           ls -la ios-pr-artifacts
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && github.event_name == 'pull_request'
         with:
           name: ios-pr-artifacts
           path: ios-pr-artifacts/

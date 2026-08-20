@@ -60,4 +60,19 @@ class AppConfigTest {
         val result = AppConfigStore.save(mockContext, config)
         assertTrue(result)
     }
+
+    @Test
+    fun requiredProvisioningRejectsTheDefaultCalibrationSentinel() {
+        val base = AppConfig(
+            endpoint = "wss://test.example.com/v1/session",
+            deviceToken = "token",
+            language = "en-IN",
+            calibrationId = "unprovisioned",
+            debugTelemetry = false
+        )
+        assertFalse(base.hasRequiredProvisioning())
+        assertFalse(base.copy(deviceToken = "").hasRequiredProvisioning())
+        assertFalse(base.copy(endpoint = "").hasRequiredProvisioning())
+        assertTrue(base.copy(calibrationId = "test-r0").hasRequiredProvisioning())
+    }
 }

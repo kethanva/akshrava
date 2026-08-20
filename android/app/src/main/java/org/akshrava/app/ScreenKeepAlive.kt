@@ -6,6 +6,7 @@ import android.graphics.PixelFormat
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
+import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
@@ -81,7 +82,8 @@ class ScreenKeepAlive(private val context: Context) {
             wm.addView(view, params)
             overlay = view
             true
-        } catch (_: Exception) {
+        } catch (ex: Exception) {
+            Log.w("AkshravaVision", "screen overlay keep-alive unavailable", ex)
             overlay = null
             false
         }
@@ -105,7 +107,8 @@ class ScreenKeepAlive(private val context: Context) {
             wl.acquire(WAKE_LOCK_TIMEOUT_MS)
             screenWakeLock = wl
             true
-        } catch (_: Exception) {
+        } catch (ex: Exception) {
+            Log.e("AkshravaVision", "screen wake-lock keep-alive unavailable", ex)
             screenWakeLock = null
             false
         }
@@ -122,10 +125,16 @@ class ScreenKeepAlive(private val context: Context) {
      * mid-walk on precisely the phones that lacked overlay permission — the case this fallback
      * exists to cover. Safe to call repeatedly; the lock is not reference counted.
      */
-    fun renew() {
-        if (mode != Mode.WAKE_LOCK) return
-        val wl = screenWakeLock ?: return
-        runCatching { wl.acquire(WAKE_LOCK_TIMEOUT_MS) }
+    fun renew(): Boolean {
+        if (mode != Mode.WAKE_LOCK) return isHoldingScreenOn()
+        val wl = screenWakeLock ?: return false
+        return try {
+            wl.acquire(WAKE_LOCK_TIMEOUT_MS)
+            wl.isHeld
+        } catch (ex: Exception) {
+            Log.e("AkshravaVision", "screen wake-lock renewal failed", ex)
+            false
+        }
     }
 
     fun stop() {
@@ -134,13 +143,16 @@ class ScreenKeepAlive(private val context: Context) {
         if (view != null) {
             try {
                 wm.removeView(view)
-            } catch (_: Exception) {
+            } catch (ex: Exception) {
+                Log.w("AkshravaVision", "screen overlay removal failed", ex)
             }
         }
         val wl = screenWakeLock
         screenWakeLock = null
         if (wl != null && wl.isHeld) {
-            runCatching { wl.release() }
+            runCatching { wl.release() }.onFailure {
+                Log.w("AkshravaVision", "screen wake-lock release failed", it)
+            }
         }
         mode = Mode.NONE
     }

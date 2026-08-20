@@ -31,7 +31,7 @@
     <string name="status_configure">Configure once with a volunteer, then press Start assistance.</string>
     <string name="status_ready">Ready. Press Start assistance when you want help.</string>
     <string name="status_stopped">Assistance stopped.</string>
-    <string name="status_starting">Starting assistance. You can now lock the screen.</string>
+    <string name="status_starting">Starting assistance. Keep the screen on; do not lock the phone.</string>
     <string name="status_need_provisioning">A volunteer must enter a WSS endpoint, device token, and calibration ID.</string>
     <string name="status_camera_permission">Camera permission is required to start assistance.</string>
     <string name="status_notification_permission">Notification permission is required for visible assistance controls.</string>

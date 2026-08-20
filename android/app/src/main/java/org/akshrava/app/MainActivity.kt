@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import android.text.InputType
+import android.util.Log
 import android.view.View
 import android.view.WindowManager
 import android.widget.ArrayAdapter
@@ -34,6 +35,7 @@ class MainActivity : AppCompatActivity() {
 
     private val languageTags = SupportedLanguages.all.map { it.tag }
     private var setupExpanded = false
+    private var awaitingOverlaySettings = false
 
     private val permissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         when {
@@ -93,13 +95,22 @@ class MainActivity : AppCompatActivity() {
         }
         toggleSetup.setOnClickListener { setSetupExpanded(!setupExpanded) }
 
-        val provisioned = config.deviceToken.isNotBlank() &&
-            config.calibrationId.isNotBlank() &&
-            config.endpoint.isNotBlank()
+        val provisioned = config.hasRequiredProvisioning()
         setSetupExpanded(!provisioned)
         setStatus(
             if (provisioned) getString(R.string.status_ready) else getString(R.string.status_configure)
         )
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (awaitingOverlaySettings) {
+            // The overlay screen was opened only after the foreground service had started. Once
+            // the user returns, continue the one-time power setup instead of silently skipping
+            // battery exemption for every phone that followed the preferred overlay path.
+            awaitingOverlaySettings = false
+            requestBatteryExemption()
+        }
     }
 
     private fun setSetupExpanded(expanded: Boolean) {
@@ -169,19 +180,23 @@ class MainActivity : AppCompatActivity() {
             setSetupExpanded(true)
             return
         }
-        if (config.deviceToken.isBlank() || config.calibrationId.isBlank()) {
+        if (!config.hasRequiredProvisioning()) {
             setStatus(getString(R.string.status_need_provisioning))
             setSetupExpanded(true)
-            return
-        }
-        requestBatteryExemption()
-        if (requestOverlayPermissionIfNeeded()) {
-            setStatus("Please grant overlay permission and press Start again")
             return
         }
         val intent = Intent(this, AssistService::class.java).setAction(AssistService.ACTION_START)
         ContextCompat.startForegroundService(this, intent)
         setStatus(getString(R.string.status_starting))
+        // Overlay is preferred, not mandatory: ScreenKeepAlive has a timed wake-lock fallback for
+        // OEMs that do not offer or grant this special permission. Start first so the Settings
+        // prompt can never become a gate that permanently withholds assistance.
+        val overlaySettingsOpened = requestOverlayPermissionIfNeeded()
+        if (overlaySettingsOpened) {
+            awaitingOverlaySettings = true
+        } else {
+            requestBatteryExemption()
+        }
     }
 
     private fun requestBatteryExemption() {
@@ -191,24 +206,29 @@ class MainActivity : AppCompatActivity() {
                 startActivity(
                     Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
                 )
-            }
+            }.onFailure { Log.w("AkshravaVision", "battery_exemption_settings_unavailable", it) }
         }
     }
 
     /**
-     * Open the overlay-permission screen if permission is missing when Start is pressed.
+     * Open the optional overlay-permission screen if permission is missing when Start is pressed.
      *
-     * Without this permission ScreenKeepAlive cannot hold the display awake, the screen sleeps
-     * on its normal timeout, OEM ROMs stop CameraX, and the session dies with no visible cause.
+     * ScreenKeepAlive immediately uses its wake-lock fallback while this prompt is unresolved, so
+     * a missing/unsupported permission never blocks the session.
      */
     private fun requestOverlayPermissionIfNeeded(): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return false
         if (Settings.canDrawOverlays(this)) return false
-        runCatching {
+        return runCatching {
             startActivity(
                 Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
             )
+            true
+        }.getOrElse {
+            // Some OEMs remove or replace this Settings activity. Do not strand Start behind a
+            // screen that never opened; ScreenKeepAlive will announce the explicit fallback.
+            Log.w("AkshravaVision", "overlay_settings_unavailable", it)
+            false
         }
-        return true
     }
 }

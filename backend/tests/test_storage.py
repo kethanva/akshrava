@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import DateTime, text
+from sqlalchemy.exc import IntegrityError
 
 from akshrava_backend.storage import AlertEvent, Base, CalibrationProfileRecord, Device, Store
 
@@ -117,6 +118,38 @@ async def test_revoked_device_is_denied_by_the_connection_check(tmp_path):
         assert await store.revoke_device("pilot-phone-1")
         assert await store.is_device_revoked("pilot-phone-1")
         assert not await store.revoke_device("missing-device")
+    finally:
+        await store.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_device_upsert_reraises_non_duplicate_integrity_failure():
+    """The retry path may suppress only a real concurrent insert of the same device."""
+    store = Store("sqlite+aiosqlite:///:memory:")
+    first_session = MagicMock()
+    first_session.get = AsyncMock(return_value=None)
+    first_session.commit = AsyncMock()
+    first_session.rollback = AsyncMock()
+    failure = Exception("constraint failure")
+    first_session.commit.side_effect = IntegrityError("INSERT INTO devices", {}, failure)
+    retry_session = MagicMock()
+    retry_session.get = AsyncMock(return_value=None)
+    retry_session.commit = AsyncMock()
+
+    def session_context(session):
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=session)
+        context.__aexit__ = AsyncMock(return_value=False)
+        return context
+
+    store.sessions = MagicMock(
+        side_effect=[session_context(first_session), session_context(retry_session)]
+    )
+    try:
+        with pytest.raises(IntegrityError):
+            await store.upsert_device("device-with-bad-row", "r0")
+        first_session.rollback.assert_awaited_once()
+        retry_session.commit.assert_not_awaited()
     finally:
         await store.engine.dispose()
 

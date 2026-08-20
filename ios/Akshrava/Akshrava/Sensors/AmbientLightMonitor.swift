@@ -3,8 +3,8 @@
 //  Akshrava iOS
 //
 //  Ambient light edge context (F-71) — mirrors Android AmbientLightMonitor.kt.
-//  Pure step/classify are platform-agnostic; iOS samples lux via CoreMotion is unavailable,
-//  so the camera ISO×exposure proxy feeds the same lux FSM when a device is provided.
+//  Pure step/classify are platform-agnostic. iOS has no public ambient-light sensor API, so a
+//  camera ISO×exposure brightness index feeds the state machine when a device is provided.
 //
 
 import Foundation
@@ -47,19 +47,23 @@ public struct AmbientLightStep: Equatable {
 }
 
 public final class AmbientLightMonitor {
-    public static let darkLux: Float = 10
-    public static let brightLux: Float = 50
+    public static let darkBrightnessIndex: Float = 10
+    public static let brightBrightnessIndex: Float = 50
     public static let holdMs: Int64 = 3_000
     public static let cooldownMs: Int64 = 8_000
 
-    public static func classify(lux: Float) -> AmbientLightLevel? {
-        if lux < darkLux { return .dark }
-        if lux > brightLux { return .bright }
+    public static func classify(brightnessIndex: Float) -> AmbientLightLevel? {
+        if brightnessIndex < darkBrightnessIndex { return .dark }
+        if brightnessIndex > brightBrightnessIndex { return .bright }
         return nil
     }
 
-    public static func step(state: AmbientLightState, lux: Float, nowMs: Int64) -> AmbientLightStep {
-        guard let level = classify(lux: lux) else {
+    public static func step(
+        state: AmbientLightState,
+        brightnessIndex: Float,
+        nowMs: Int64
+    ) -> AmbientLightStep {
+        guard let level = classify(brightnessIndex: brightnessIndex) else {
             return AmbientLightStep(state: state, announce: nil)
         }
 
@@ -102,12 +106,11 @@ public final class AmbientLightMonitor {
         return AmbientLightStep(state: settled, announce: suppressed ? nil : level)
     }
 
-    /// Maps camera exposure metrics into an approximate lux so the same FSM can run without
-    /// a dedicated ambient-light sensor (common on donated / older iPhones).
-    public static func approximateLux(iso: Float, exposureSeconds: Double) -> Float {
+    /// Maps camera exposure metrics into a relative brightness index. This is deliberately not
+    /// called lux: the camera metadata orders darker/brighter conditions but is not calibrated.
+    public static func brightnessIndex(iso: Float, exposureSeconds: Double) -> Float {
         let index = Double(iso) * exposureSeconds
-        // Tuned so ISO×t ≈ 2.0 (prior low-light heuristic) lands near darkLux.
-        return Float(darkLux * 2.0 / max(index, 0.0001))
+        return Float(darkBrightnessIndex * 2.0 / max(index, 0.0001))
     }
 
     public static func statusText(for level: AmbientLightLevel) -> String {
@@ -161,9 +164,13 @@ public final class AmbientLightMonitor {
         state = AmbientLightState()
     }
 
-    /// Feed a lux reading (tests and alternate sensors).
-    public func ingestLux(_ lux: Float, nowMs: Int64) {
-        let stepped = Self.step(state: state, lux: lux, nowMs: nowMs)
+    /// Feed a relative brightness index (tests and alternate sensors).
+    public func ingestBrightnessIndex(_ brightnessIndex: Float, nowMs: Int64) {
+        let stepped = Self.step(
+            state: state,
+            brightnessIndex: brightnessIndex,
+            nowMs: nowMs
+        )
         state = stepped.state
         if let announce = stepped.announce {
             onEdge(announce)
@@ -173,9 +180,12 @@ public final class AmbientLightMonitor {
     #if os(iOS)
     private func sample() {
         guard let device = device else { return }
-        let lux = Self.approximateLux(iso: device.iso, exposureSeconds: device.exposureDuration.seconds)
+        let index = Self.brightnessIndex(
+            iso: device.iso,
+            exposureSeconds: device.exposureDuration.seconds
+        )
         let nowMs = Int64(ProcessInfo.processInfo.systemUptime * 1000)
-        ingestLux(lux, nowMs: nowMs)
+        ingestBrightnessIndex(index, nowMs: nowMs)
     }
     #endif
 }

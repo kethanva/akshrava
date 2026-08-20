@@ -18,6 +18,7 @@ from akshrava_backend.metrics import Metrics
 from akshrava_backend.protocol import ProtocolError
 from akshrava_backend.rate_limit import FrameRateLimiter
 from akshrava_backend.session_handler import (
+    CONTROL_MESSAGE_BURST,
     MAX_CONTROL_MESSAGE_BYTES,
     MAX_PENDING_RESULT_ACKS,
     FrameStreamHandler,
@@ -155,6 +156,15 @@ async def test_result_ack_counts_only_one_matching_sent_result(handler):
     assert "akshrava_phone_results_acknowledged_fresh_total 1" in rendered
 
 
+async def test_result_ack_is_ignored_when_that_result_did_not_negotiate_acknowledgements(handler):
+    handler.note_result_sent(9, False)
+
+    assert await handler.handle_text_frame(
+        json.dumps({"type": "result_ack", "frame_id": 9, "fresh": True})
+    ) == {"_action": "result_ack"}
+    assert "akshrava_phone_results_acknowledged_total 0" in handler.metrics.render()
+
+
 async def test_evicting_a_pending_ack_slot_counts_it_as_unacknowledged(handler):
     """The delivery-failure metric is exact: it counts evictions, not window subtraction."""
     handler.result_acknowledgement_supported = True
@@ -172,6 +182,16 @@ async def test_results_still_in_flight_are_never_counted_as_unacknowledged(handl
         handler.note_result_sent(frame_id, True)
 
     assert "akshrava_phone_results_unacknowledged_total 0" in handler.metrics.render()
+
+
+async def test_pending_ack_slots_are_counted_when_session_closes(handler):
+    handler.note_result_sent(1, True)
+    handler.note_result_sent(2, True)
+
+    handler.record_unacknowledged_on_close()
+    handler.record_unacknowledged_on_close()
+
+    assert "akshrava_phone_results_unacknowledged_total 2" in handler.metrics.render()
 
 
 async def test_legacy_phones_do_not_generate_unacknowledged_delivery_alarms(handler):
@@ -215,6 +235,21 @@ async def test_oversized_control_message_is_a_protocol_error(handler):
 async def test_non_object_control_message_is_a_protocol_error(handler):
     with pytest.raises(ProtocolError):
         await handler.handle_text_frame(json.dumps(["not", "an", "object"]))
+
+
+async def test_all_non_frame_control_messages_share_a_bounded_rate_limit(handler):
+    handler._control_message_limiter = FrameRateLimiter(
+        4.0,
+        CONTROL_MESSAGE_BURST,
+        clock=lambda: 0.0,
+    )
+    for _ in range(int(CONTROL_MESSAGE_BURST)):
+        assert await handler.handle_text_frame(json.dumps({"type": "status"})) == {
+            "type": "status_ack"
+        }
+    # Unknown/status/look traffic must not bypass the limiter and drive response allocations or
+    # Redis admission renewals at socket speed.
+    assert await handler.handle_text_frame(json.dumps({"type": "unknown"})) is None
 
 
 # ---------------------------------------------------------------------------
@@ -390,5 +425,55 @@ async def test_matching_header_and_payload_are_handed_off_for_analysis(handler):
     assert result["_action"] == "analyze"
     assert result["header"].frame_id == 1
     assert result["decode_ms"] >= 0
+    assert result["server_received_epoch_ms"] > 0
     # The slot is released so the next header can bind.
     assert handler.pending_header is None
+
+
+async def test_malformed_json_control_message_is_shed_without_closing(handler):
+    resp = await handler.handle_text_frame("{not-json")
+    assert resp == {"type": "error", "code": "malformed_control_message"}
+    pong = await handler.handle_text_frame(json.dumps({"type": "ping"}))
+    assert pong == {"type": "pong"}
+
+
+async def test_malformed_json_then_orphan_jpeg_does_not_close_the_session(handler):
+    assert await handler.handle_text_frame("{not-json") == {
+        "type": "error",
+        "code": "malformed_control_message",
+    }
+    jpeg = jpeg_of(32, 32)
+    assert await handler.handle_binary_frame(jpeg) == {"_action": "continue"}
+    pong = await handler.handle_text_frame(json.dumps({"type": "ping"}))
+    assert pong == {"type": "pong"}
+
+
+async def test_malformed_control_message_is_counted_in_metrics(handler):
+    await handler.handle_text_frame("{not-json")
+    assert "akshrava_control_messages_rejected_total 1" in handler.metrics.render()
+
+
+async def test_oversized_control_message_is_still_a_protocol_error(handler):
+    oversized = json.dumps({"type": "ping", "pad": "x" * MAX_CONTROL_MESSAGE_BYTES})
+    with pytest.raises(ProtocolError):
+        await handler.handle_text_frame(oversized)
+
+
+async def test_ping_closes_4403_when_the_device_was_revoked_mid_session(make_handler, store):
+    store.is_device_revoked = AsyncMock(return_value=True)
+    handler = make_handler()
+    resp = await handler.handle_text_frame(json.dumps({"type": "ping"}))
+    assert resp["_action"] == "close"
+    assert resp["code"] == 4403
+    assert resp["response"]["code"] == "device_revoked"
+
+
+async def test_ping_does_not_renew_the_lease_after_revocation(make_handler, store):
+    # main.py handles `_action == close` before `_renew_admission`. A revoked ping must
+    # therefore never keep the admission lease warm.
+    store.is_device_revoked = AsyncMock(return_value=True)
+    handler = make_handler()
+    resp = await handler.handle_text_frame(json.dumps({"type": "ping"}))
+    assert resp.get("type") != "pong"
+    assert resp["_action"] == "close"
+

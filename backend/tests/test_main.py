@@ -11,7 +11,8 @@ from akshrava_backend.main import (
     session_application,
     store,
     _retention_loop,
-    _renew_or_readmit,
+    _renew_admission,
+    ADMITTED,
 )
 
 # The suite runs with DEV_AUTH_BYPASS=true, so auth.device_claims_from_token accepts exactly this
@@ -269,13 +270,9 @@ async def test_lifespan_does_not_block_startup_on_a_retention_purge():
 
 
 @pytest.mark.asyncio
-async def test_renew_or_readmit():
-    with patch("akshrava_backend.main.session_admission.renew", AsyncMock(return_value=True)):
-        assert await _renew_or_readmit("sess-1") is True
-
-    with patch("akshrava_backend.main.session_admission.renew", AsyncMock(return_value=False)), \
-         patch("akshrava_backend.main.session_admission.try_open", AsyncMock(return_value=True)):
-        assert await _renew_or_readmit("sess-2") is True
+async def test_renew_admission():
+    with patch("akshrava_backend.main.session_admission.renew", AsyncMock(return_value=ADMITTED)):
+        assert await _renew_admission("dev-1", "sess-1") == ADMITTED
 
 
 def test_device_events_endpoint():
@@ -311,28 +308,46 @@ def test_device_events_endpoint():
 
 def test_websocket_rejects_invalid_token():
     with TestClient(app) as client:
-        with pytest.raises(WebSocketDisconnect) as exc:
-            with client.websocket_connect("/v1/session?token=not-a-real-token"):
-                pass
-        assert exc.value.code == 4401
+        with client.websocket_connect("/v1/session?token=not-a-real-token") as websocket:
+            assert websocket.receive_json() == {"type": "error", "code": "authentication_failed"}
+            with pytest.raises(WebSocketDisconnect) as exc:
+                websocket.receive_json()
+            assert exc.value.code == 4401
 
 
 def test_websocket_revoked_device_rejection():
-    # Asserting the close code matters: every rejection path here disconnects, so a bare
-    # `raises(Exception)` would pass even when the socket died for an unrelated reason.
+    # Close-before-accept collapsed to HTTP 403 on a real phone, so the JSON body is the
+    # durable signal (same as mid-session revoke). Admission must not be consumed.
     with TestClient(app) as client:
         with patch.object(store, "is_device_revoked", AsyncMock(return_value=True)):
-            with pytest.raises(WebSocketDisconnect) as exc:
-                with client.websocket_connect(f"/v1/session?token={DEV_TOKEN}"):
-                    pass
-            assert exc.value.code == 4403
+            with client.websocket_connect(f"/v1/session?token={DEV_TOKEN}") as websocket:
+                assert websocket.receive_json() == {
+                    "type": "error",
+                    "code": "device_revoked",
+                    "detail": "Device revoked",
+                }
+                with pytest.raises(WebSocketDisconnect) as exc:
+                    websocket.receive_json()
+                assert exc.value.code == 4403
+
+
+def test_revoked_handshake_does_not_open_admission():
+    opener = AsyncMock(return_value="admitted")
+    with TestClient(app) as client:
+        with patch.object(store, "is_device_revoked", AsyncMock(return_value=True)), \
+             patch("akshrava_backend.main.session_admission.try_open", opener):
+            with client.websocket_connect(f"/v1/session?token={DEV_TOKEN}") as websocket:
+                assert websocket.receive_json()["code"] == "device_revoked"
+                with pytest.raises(WebSocketDisconnect):
+                    websocket.receive_json()
+    opener.assert_not_called()
 
 
 def test_websocket_session_admission_rejection():
     with TestClient(app) as client:
         with patch.object(store, "is_device_revoked", AsyncMock(return_value=False)), \
-             patch("akshrava_backend.main.session_admission.try_open", AsyncMock(return_value=False)):
-            with pytest.raises(WebSocketDisconnect) as exc:
-                with client.websocket_connect(f"/v1/session?token={DEV_TOKEN}"):
-                    pass
-            assert exc.value.code == 1013
+             patch("akshrava_backend.main.session_admission.try_open", AsyncMock(return_value="at_capacity")):
+            with client.websocket_connect(f"/v1/session?token={DEV_TOKEN}") as websocket:
+                with pytest.raises(WebSocketDisconnect) as exc:
+                    websocket.receive_json()
+                assert exc.value.code == 1013

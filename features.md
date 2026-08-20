@@ -2,7 +2,10 @@
 
 **Last researched:** 2026-07-30  
 **Platform floor:** `minSdk 26` (Android 8.0) → `compileSdk 36`. Field phones: API 28–36 ([`AndroidSupportMatrix`](android/app/src/main/java/org/akshrava/app/AndroidSupportMatrix.kt)).  
-**Safety boundary:** object/vehicle *awareness only*. Never navigation, crossing decisions, collision avoidance, approach-speed, clear-path, distance-to-object guidance, or "safe" guarantees — in code, strings, TTS, tests, or docs.  
+**Safety boundary:** object/vehicle *awareness only*. Product code, user-facing strings, TTS, and
+positive fixtures must never add navigation, crossing decisions, collision avoidance, approach-speed,
+clear-path, distance-to-object guidance, or "safe" guarantees. Policy tests and docs may quote those
+prohibited concepts only to enforce or explain the boundary.
 **Hard deferrals:** [`NOT_NOW.md`](NOT_NOW.md) · field architecture: [`Important Architecture.md`](Important%20Architecture.md).
 
 This file is the live product backlog. Every backlog row must stay API 26+, safety-clean, and either JVM-testable or soak-signed.
@@ -130,7 +133,7 @@ Do not implement from this document until [`NOT_NOW.md`](NOT_NOW.md) preconditio
 | Optical-flow looming, local “approaching” tracker, vehicle TTC | NOT_NOW; Insufficient FPS + ego-motion |
 | F-51 SLAM, F-52 on-device LLM, F-56 continuous VQA, F-59 ESP32, F-63 ToF, F-64 ASL, F-69 medical gait, F-70 IR | Extreme cost or rare hardware on recycled phones |
 | F-35 enrolled face as continuous walk alert | Privacy + false confidence |
-| iOS port | NOT_NOW Phase 4+ |
+| iOS participant/release support | Prototype exists; NOT_NOW until simulator, physical-device, accessibility, and supervised-trial gates pass |
 | Invented modules with no tree base (`CautionPointStore`, `ObjectFinder`, `SlamMemory`, …) | Speculative |
 
 ---

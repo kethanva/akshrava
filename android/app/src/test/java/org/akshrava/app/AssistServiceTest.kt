@@ -77,13 +77,16 @@ class AssistServiceTest {
 
     @Test
     fun `cross-thread frame pipeline fields are volatile`() {
-        // lastAnalyzeAtMs is written on the CameraX analyzer executor and read/written by the
-        // stall check on the main thread; lastQualityRebindAtMs is read-modify-written from the
-        // OkHttp listener thread and the reconnect scheduler thread. Neither has a happens-before
-        // edge, so a stale read either rebinds a healthy camera (a 1-2 s detection blackout) or
-        // fails to rebind a dead one. LinkQualityController already marks all its shared state
-        // volatile; these two were the inconsistency.
-        for (name in listOf("lastAnalyzeAtMs", "lastQualityRebindAtMs")) {
+        // Camera state is published by the main thread and consumed by the analyzer; timing state
+        // also crosses the analyzer, OkHttp listener, reconnect scheduler, and main threads. These
+        // references must not be cached across a Stop/Start generation boundary.
+        for (name in listOf(
+            "lastAnalyzeAtMs",
+            "lastQualityRebindAtMs",
+            "frameEncoder",
+            "poseTracker",
+            "alertManager"
+        )) {
             val field = AssistService::class.java.getDeclaredField(name)
             assertTrue(
                 "$name is shared across threads and must be @Volatile",

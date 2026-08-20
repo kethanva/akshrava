@@ -32,14 +32,32 @@ fi
 if command -v iptables >/dev/null 2>&1; then
   iptables -C INPUT -p tcp --dport 8443 -j ACCEPT 2>/dev/null \
     || iptables -A INPUT -p tcp --dport 8443 -j ACCEPT
+  # The MIG health checker must reach FastAPI /readyz without a client certificate. Limit this
+  # cleartext port to Google's documented health-check source ranges; VPC firewall repeats the
+  # same restriction. The inference endpoint still requires HMAC even on this port.
+  for health_range in 130.211.0.0/22 35.191.0.0/16; do
+    iptables -C INPUT -p tcp -s "$health_range" --dport 8001 -j ACCEPT 2>/dev/null \
+      || iptables -A INPUT -p tcp -s "$health_range" --dport 8001 -j ACCEPT
+  done
 fi
+
+ACCESS_TOKEN="$(curl -fsS -H 'Metadata-Flavor: Google' \
+  'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token' 2>/dev/null \
+  | sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
 
 access_secret() {
   local name="$1"
-  docker run --rm \
-    -e "CLOUDSDK_CORE_PROJECT=${project_id}" \
-    google/cloud-sdk:slim \
-    gcloud secrets versions access latest --secret="$name"
+  if [[ -n "$ACCESS_TOKEN" ]]; then
+    curl -fsS -H "Authorization: Bearer $ACCESS_TOKEN" \
+      "https://secretmanager.googleapis.com/v1/projects/${project_id}/secrets/$${name}/versions/latest:access" \
+      | sed -n 's/.*"data"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+      | base64 -d
+  else
+    docker run --rm \
+      -e "CLOUDSDK_CORE_PROJECT=${project_id}" \
+      google/cloud-sdk:slim \
+      gcloud secrets versions access latest --secret="$name"
+  fi
 }
 
 access_secret akshrava-worker-tls-ca >"$CERT_DIR/ca.pem"
@@ -101,11 +119,13 @@ if [[ "$WORKER_USE_GPU" == "true" ]]; then
   docker run -d --restart=always --name akshrava-worker \
     --device /dev/nvidia0 --device /dev/nvidia-uvm --device /dev/nvidiactl \
     -p 127.0.0.1:8000:8000 \
+    -p 8001:8000 \
     -e AKSHRAVA_ENV="${environment}" \
     -e WORKER_SHARED_SECRET="$WORKER_SECRET" \
     -e NONCE_REDIS_URL="$NONCE_REDIS_URL" \
     -e METRICS_SCRAPE_TOKEN="$METRICS_TOKEN" \
     -e REQUIRE_GPU="$REQUIRE_GPU" \
+    -e WORKER_INFER_TIMEOUT_SECONDS="${worker_infer_timeout_seconds}" \
     -e YOLO_WEIGHTS=/models/yolo11s.pt \
     -e YOLO_WEIGHTS_SHA256="${yolo_weights_sha256}" \
     "$${REDIS_CA_ENV[@]}" \
@@ -114,11 +134,13 @@ if [[ "$WORKER_USE_GPU" == "true" ]]; then
 else
   docker run -d --restart=always --name akshrava-worker \
     -p 127.0.0.1:8000:8000 \
+    -p 8001:8000 \
     -e AKSHRAVA_ENV="${environment}" \
     -e WORKER_SHARED_SECRET="$WORKER_SECRET" \
     -e NONCE_REDIS_URL="$NONCE_REDIS_URL" \
     -e METRICS_SCRAPE_TOKEN="$METRICS_TOKEN" \
     -e REQUIRE_GPU="$REQUIRE_GPU" \
+    -e WORKER_INFER_TIMEOUT_SECONDS="${worker_infer_timeout_seconds}" \
     -e YOLO_WEIGHTS=/models/yolo11s.pt \
     -e YOLO_WEIGHTS_SHA256="${yolo_weights_sha256}" \
     -e YOLO_CONFIG_DIR=/tmp/Ultralytics \

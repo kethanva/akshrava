@@ -8,7 +8,7 @@ from akshrava_backend.cloud_fallback import (
     CloudObject,
     CloudResult,
 )
-from akshrava_backend.detector import Detector
+from akshrava_backend.detector import Detector, INFERENCE_MODE_SYNC
 from akshrava_backend.domain import Detection
 
 
@@ -92,6 +92,15 @@ def test_cloud_fallback_status_is_returned_with_its_own_frame():
 def test_cloud_wrapper_preserves_a_stateless_remote_detector_parallel_contract():
     detector = CloudFallbackDetector(ParallelLocalDetector(), StubCloudProvider(), 0.55)
     assert detector.requires_serial_execution() is False
+
+
+def test_cloud_wrapper_declares_blocking_vendor_work_as_sync_and_returns_frame_status():
+    detector = CloudFallbackDetector(EmptyLocalDetector(), StubCloudProvider(), 0.55)
+
+    assert detector.inference_mode() == INFERENCE_MODE_SYNC
+    outcome = detector.infer_sync("phone-a", jpeg())
+    assert outcome.detections == [Detection("car", 0.8, (1.0, 0.4, 3.0, 1.8))]
+    assert outcome.cloud_fallback_unavailable is False
 
 
 import pytest
@@ -283,4 +292,3 @@ def test_make_cloud_provider():
 
     with pytest.raises(CloudProviderError, match="unknown CLOUD_FALLBACK_PROVIDER"):
         make_cloud_provider("invalid_kind", "", "", "")
-

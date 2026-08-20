@@ -183,6 +183,27 @@ def test_config_additional_validations(monkeypatch):
         with pytest.raises(ValueError, match="ALERT_MAX_AGE_MS"):
             Settings.from_env()
 
+    # A deployment cannot widen the shared phone/server freshness ceiling.
+    with monkeypatch.context() as m:
+        m.setenv("ALERT_MAX_AGE_MS", "2501")
+        with pytest.raises(ValueError, match="ALERT_MAX_AGE_MS"):
+            Settings.from_env()
+
+    with monkeypatch.context() as m:
+        m.setenv("MAX_IMAGE_BYTES", "0")
+        with pytest.raises(ValueError, match="MAX_IMAGE_BYTES"):
+            Settings.from_env()
+
+    with monkeypatch.context() as m:
+        m.setenv("MAX_IMAGE_BYTES", "1000001")
+        with pytest.raises(ValueError, match="MAX_IMAGE_BYTES"):
+            Settings.from_env()
+
+    with monkeypatch.context() as m:
+        m.setenv("MAX_FRAME_SIDE", "0")
+        with pytest.raises(ValueError, match="MAX_FRAME_SIDE"):
+            Settings.from_env()
+
     # Invalid MIN_FRAME_INTERVAL_MS
     with monkeypatch.context() as m:
         m.setenv("MIN_FRAME_INTERVAL_MS", "-1")
@@ -255,6 +276,19 @@ def test_config_additional_validations(monkeypatch):
         with pytest.raises(ValueError, match="INFERENCE_TIMEOUT_MS"):
             Settings.from_env()
 
+    with monkeypatch.context() as m:
+        m.setenv("INFERENCE_TIMEOUT_MS", "2501")
+        with pytest.raises(ValueError, match="must not exceed ALERT_MAX_AGE_MS"):
+            Settings.from_env()
+
+    with monkeypatch.context() as m:
+        m.setenv("DETECTOR", "remote")
+        m.setenv("REMOTE_INFERENCE_URL", "http://127.0.0.1:8090")
+        m.setenv("REMOTE_WORKER_SECRET", "s" * 32)
+        m.setenv("REMOTE_INFERENCE_TIMEOUT_MS", "801")
+        with pytest.raises(ValueError, match="must not exceed INFERENCE_TIMEOUT_MS"):
+            Settings.from_env()
+
     # Invalid INFERENCE_EXECUTOR_WORKERS
     with monkeypatch.context() as m:
         m.setenv("INFERENCE_EXECUTOR_WORKERS", "0")
@@ -274,4 +308,3 @@ def test_config_additional_validations(monkeypatch):
         m.delenv("METRICS_SCRAPE_TOKEN", raising=False)
         with pytest.raises(ValueError, match="METRICS_SCRAPE_TOKEN is required"):
             Settings.from_env()
-

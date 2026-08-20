@@ -1,5 +1,6 @@
 package org.akshrava.app
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -76,5 +77,11 @@ class FrameGateTest {
         assertFalse(FrameGate.shouldAnnounceBlur(cooldown - 1, frames, lastAnnounceMs = 0L))
         assertTrue(FrameGate.shouldAnnounceBlur(cooldown, frames, lastAnnounceMs = 0L))
         assertTrue(FrameGate.shouldAnnounceBlur(120_000L, frames, lastAnnounceMs = 30_000L))
+    }
+
+    @Test
+    fun glareAnnouncementThresholdMatchesBlur() {
+        assertEquals(3, FrameGate.GLARE_FRAMES_BEFORE_ANNOUNCE)
+        assertTrue(FrameGate.BLUR_FRAMES_BEFORE_ANNOUNCE > 0)
     }
 }

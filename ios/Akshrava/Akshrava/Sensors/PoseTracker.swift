@@ -23,6 +23,12 @@ public class PoseTracker {
     public private(set) var poseAgeMs: Int = 999
     
     private var lastUpdateMonoMs: Int64 = 0
+    private var extremeSinceMonoMs: Int64?
+    private var lastAnnounceMonoMs: Int64 = 0
+    
+    public static let extremePitchCdeg = 4500
+    public static let tiltHoldMs: Int64 = 2000
+    public static let tiltCooldownMs: Int64 = 8000
     
     public init() {}
     
@@ -42,11 +48,18 @@ public class PoseTracker {
             let nowMs = Int64(ProcessInfo.processInfo.systemUptime * 1000)
             self.lastUpdateMonoMs = nowMs
             
-            // Extreme tilt check (> 45 degrees pitch = 4500 centidegrees)
-            if abs(pitchCdeg) > 4500 {
-                DispatchQueue.main.async {
-                    self.delegate?.poseTracker(self, didDetectExtremeTilt: pitchCdeg)
+            // Extreme tilt check (> 45 degrees pitch = 4500 centidegrees with 2s hold and 8s cooldown)
+            if abs(pitchCdeg) > Self.extremePitchCdeg {
+                let since = self.extremeSinceMonoMs ?? nowMs
+                self.extremeSinceMonoMs = since
+                if nowMs - since >= Self.tiltHoldMs && (self.lastAnnounceMonoMs == 0 || nowMs - self.lastAnnounceMonoMs >= Self.tiltCooldownMs) {
+                    self.lastAnnounceMonoMs = nowMs
+                    DispatchQueue.main.async {
+                        self.delegate?.poseTracker(self, didDetectExtremeTilt: pitchCdeg)
+                    }
                 }
+            } else {
+                self.extremeSinceMonoMs = nil
             }
         }
     }

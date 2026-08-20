@@ -19,7 +19,7 @@ resource "google_monitoring_uptime_check_config" "api_readyz" {
     type = "uptime_url"
     labels = {
       project_id = var.project_id
-      host       = trimprefix(google_cloud_run_v2_service.api.uri, "https://")
+      host       = local.cloud_armor_enabled ? var.cloud_armor_domain : trimprefix(google_cloud_run_v2_service.api.uri, "https://")
     }
   }
 }
@@ -42,9 +42,18 @@ resource "google_monitoring_alert_policy" "api_uptime" {
     }
   }
 
+  notification_channels = var.monitoring_notification_channels
+
   documentation {
     content   = "Akshrava API /readyz uptime check failed for 5 minutes. Check Cloud Run revisions and worker health."
     mime_type = "text/markdown"
+  }
+
+  lifecycle {
+    precondition {
+      condition     = var.environment != "production" || length(var.monitoring_notification_channels) > 0
+      error_message = "production requires at least one monitoring_notification_channels entry; see OPERATIONS.md."
+    }
   }
 }
 
@@ -67,6 +76,8 @@ resource "google_monitoring_alert_policy" "worker_saturated_slo" {
       }
     }
   }
+
+  notification_channels = var.monitoring_notification_channels
 
   documentation {
     content   = "Worker saturation soft-sheds are elevated. Scale the worker MIG (enable_worker_ha) or reduce client FPS."
@@ -147,12 +158,9 @@ resource "google_monitoring_alert_policy" "phone_result_ack_missing" {
   display_name = "akshrava-phone-result-acknowledgements-missing"
   combiner     = "OR"
 
-  # The underlying metric is now an EXACT count of results whose acknowledgement slot was evicted
-  # without ever being acknowledged (see Metrics.phone_result_unacknowledged). It was previously
-  # derived as `expected - acknowledged` per 60s export window, which counted every frame merely
-  # in flight across a window boundary as a failure -- permanently nonzero at any real fleet size.
-  # Because the signal is now exact, a plain threshold is both correct and, unlike an MQL query,
-  # fully validated by `terraform plan` before it can reach production.
+  # This is an exact count of result slots evicted without acknowledgement (see
+  # Metrics.phone_result_unacknowledged), so acknowledgements straddling export boundaries do not
+  # create false positives. A plain threshold remains fully plan-validatable without MQL.
   conditions {
     display_name = "Phone acknowledgements missing"
     condition_threshold {
@@ -167,6 +175,8 @@ resource "google_monitoring_alert_policy" "phone_result_ack_missing" {
       }
     }
   }
+
+  notification_channels = var.monitoring_notification_channels
 
   documentation {
     content   = "Results were sent to phones that advertised acknowledgement support and were never acknowledged, sustained over 15 minutes. Check API revisions, WebSocket transport, and handset connectivity. This signal reports receipt/freshness processing, not TTS playback."

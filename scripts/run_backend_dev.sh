@@ -19,4 +19,10 @@ python -m pip install --upgrade 'pip>=26.1.2' 'setuptools>=83'
 python -m pip install '.[dev]'
 export DEV_AUTH_BYPASS=true
 export DETECTOR=ultralytics
-exec uvicorn akshrava_backend.main:app --host 0.0.0.0 --port 8000 --reload
+exec uvicorn akshrava_backend.main:app \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --reload \
+  --ws-max-size 1048576 \
+  --ws-max-queue 8 \
+  --ws-per-message-deflate false

@@ -2,6 +2,10 @@
 
 Akshrava was built as a safety-first assistive vision system for supervised use by blind and low-vision people, with a deliberate focus on recycled Android phones, conservative alerts, and cloud-assisted inference. This document is a short build history of how the project came together with Codex, what was learned along the way, and how the implementation was tested and debugged end to end.
 
+The current repository is tagged `v0.2.14`. Android remains the signed field platform; the backend
+and Android gates are release-enforced, while the Swift/iOS tree is an unsigned experimental
+prototype covered by an iOS simulator CI target and separate physical-device evidence gates.
+
 ## How the project was created
 
 The project started from architecture and safety reviews rather than from a blank app. The early work defined the core boundary first: Akshrava must help with object and vehicle awareness, but it must not claim navigation, collision avoidance, crossing decisions, or “safe” guarantees.
@@ -20,6 +24,7 @@ The git log shows the project evolving in a clear sequence:
 
 - early documentation work established the end-to-end architecture and safety boundary;
 - the Android client was then hardened around capture, session state, alerts, icons, language support, and provisioning;
+- an experimental iOS client was added with its own provisioning, capture, audio, interruption, and simulator-test path;
 - the backend was aligned with conservative detection, calibration, and session admission rules;
 - GCP and deployment scripts were added to make the cloud path real instead of theoretical;
 - later commits focused on reconnect stability, freshness budgets, session longevity, and release/debug workflows;

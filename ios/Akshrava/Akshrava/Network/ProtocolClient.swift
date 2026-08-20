@@ -74,9 +74,14 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
         isUrgent: Bool,
         configuredStaleAlertMs: Int64
     ) -> Int64 {
-        if priority { return max(lookFreshnessMs, configuredStaleAlertMs) }
-        if isUrgent { return max(urgentFreshnessMs, configuredStaleAlertMs) }
+        if priority { return min(lookFreshnessMs, configuredStaleAlertMs) }
+        if isUrgent { return min(urgentFreshnessMs, configuredStaleAlertMs) }
         return configuredStaleAlertMs
+    }
+
+    /// A server may ask the phone to be stricter, but cannot expand the phone-owned 2.5 s cap.
+    public static func configuredSpeakBudget(serverAdvertisedMs: Int64) -> Int64 {
+        min(max(0, serverAdvertisedMs), staleAlertMs)
     }
 
     public static func jsonInt64(_ value: Any?) -> Int64? {
@@ -122,12 +127,51 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
         return capped * random
     }
 
+    /// A late result/send callback may release only the exact frame whose slot it owns.
+    static func frameMaySettle(inFlightFrameId: Int64?, receivedFrameId: Int64) -> Bool {
+        inFlightFrameId == receivedFrameId
+    }
+
     /// Terminal error codes the server can send in an "error" message body ahead of (or instead
     /// of) a close frame carrying an application close code. iOS's public WebSocket API cannot
     /// represent a close code outside 1000-1015 -- it collapses any such code to a generic
     /// "invalid" value and discards the number -- so a revoked/rejected session can only be
     /// reliably distinguished from an ordinary transport drop via this message body.
-    public static let terminalErrorCodes: Set<String> = ["device_revoked", "authentication_failed"]
+    public static let terminalErrorCodes: Set<String> = [
+        "device_revoked",
+        "authentication_failed",
+        "session_superseded",
+    ]
+    public static let softShedAnnounceAfter = 3
+    public static let softShedAnnounceCooldownMs: Int64 = 15_000
+
+    public static func shouldAnnounceSoftShed(
+        consecutiveSoftSheds: Int,
+        lastAnnounceAtMonoMs: Int64,
+        nowMonoMs: Int64
+    ) -> Bool {
+        guard consecutiveSoftSheds >= softShedAnnounceAfter else { return false }
+        if lastAnnounceAtMonoMs == 0 { return true }
+        return nowMonoMs - lastAnnounceAtMonoMs >= softShedAnnounceCooldownMs
+    }
+
+    public static let silentSoftErrorCodes: Set<String> = [
+        "worker_saturated",
+        "frame_in_flight",
+        "frame_rate_limited",
+        "non_monotonic_capture",
+        "invalid_image_size",
+        "invalid_jpeg",
+        "jpeg_dimension_mismatch",
+        "unsupported_frame_size",
+        "invalid_frame_header",
+        "unknown_message",
+        "malformed_control_message",
+    ]
+
+    public static func isInferenceOutageError(_ code: String) -> Bool {
+        code == "inference_circuit_open"
+    }
 
     /// Builds the JSON header dictionary that must precede the JPEG binary on the wire.
     public static func buildFrameHeader(
@@ -211,16 +255,29 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
     private var serverProtocolVersion = 0
     private var configuredStaleAlertMs: Int64 = staleAlertMs
     private var inFlight = false
+    /// Frame occupying the one phone-side slot. Completion callbacks and results must match it;
+    /// a late callback from an earlier frame must never settle a newer frame.
+    private var inFlightFrameId: Int64?
     private var consecutiveSettleTimeouts = 0
     private var settleWorkItem: DispatchWorkItem?
+    private var settleWorkFrameId: Int64?
+    private var settleWorkGeneration: Int?
     private var staleInferenceWorkItem: DispatchWorkItem?
+    private var staleInferenceWorkFrameId: Int64?
+    private var staleInferenceWorkGeneration: Int?
     private var staleInferenceTicks = 0
     private var frameSentAtMonoMs: Int64 = 0
     private var receiveLoopActive = false
     private var permanentFailure = false
     private var pingWorkItem: DispatchWorkItem?
+    private var pingWorkGeneration: Int?
     private var reconnectAttempt = 0
     private var reconnectScheduled = false
+    private var reconnectWorkItem: DispatchWorkItem?
+    private var reconnectTicket = 0
+    /// True after the backend's per-device breaker reports sustained inference failure. The
+    /// socket stays open for recovery probes; only a real result clears this state.
+    private var inferenceUnavailable = false
     private let webSocketDispatchQueue = DispatchQueue(label: "org.akshrava.ios.ws.delegate")
 
     public override init() {
@@ -280,6 +337,7 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
             }
             return
         }
+        cancelReconnect()
         stateLock.lock()
         closedByUser = false
         permanentFailure = false
@@ -287,6 +345,7 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
         self.reconnectURL = url
         reconnectAttempt = 0
         reconnectScheduled = false
+        inferenceUnavailable = false
         stateLock.unlock()
         openSocket(url: url, token: trimmed, origin: "initial")
     }
@@ -299,8 +358,10 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
         let session = urlSession
         webSocketTask = nil
         urlSession = nil
+        inferenceUnavailable = false
         stateLock.unlock()
 
+        cancelReconnect()
         cancelSettleTimeout()
         cancelStaleInferenceWatchdog()
         cancelPing()
@@ -330,8 +391,10 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
             return failSendFrame(priority: priority, reason: "socket_missing")
         }
         guard sessionReady && visionEnabled else {
+            // Drop this JPEG only. A transport blip between canStream() and send is recoverable;
+            // stopping the session here set closedByUser and cancelled reconnect.
+            // Bench-mode `ready` with vision_enabled=false is the terminal path.
             stateLock.unlock()
-            delegate?.protocolClientVisionNotReady(self)
             return failSendFrame(priority: priority, reason: "vision_not_ready")
         }
         if inFlight {
@@ -339,6 +402,8 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
             return failSendFrame(priority: priority, reason: "frame_in_flight")
         }
         inFlight = true
+        inFlightFrameId = frameId
+        let sendGeneration = connectionGeneration
         let fullPose = serverCapabilities.contains(Self.capabilityPoseCdegFullRange)
         frameSentAtMonoMs = Int64(ProcessInfo.processInfo.systemUptime * 1000)
         stateLock.unlock()
@@ -361,7 +426,7 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
         guard JSONSerialization.isValidJSONObject(header),
               let headerData = try? JSONSerialization.data(withJSONObject: header),
               let headerString = String(data: headerData, encoding: .utf8) else {
-            settleFrame()
+            settleFrame(frameId: frameId, generation: sendGeneration)
             return failSendFrame(priority: priority, reason: "header_encode_failed")
         }
 
@@ -371,22 +436,24 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
         // seconds; during that whole window the client previously had a frame marked in-flight
         // with no timeout armed at all, so a wedged write had no recovery path until the app was
         // restarted.
-        scheduleSettleTimeout(isLook: look)
-        scheduleStaleInferenceWatchdog()
+        scheduleSettleTimeout(isLook: look, frameId: frameId, generation: sendGeneration)
+        scheduleStaleInferenceWatchdog(frameId: frameId, generation: sendGeneration)
 
         task?.send(.string(headerString)) { [weak self] error in
             guard let self = self else { return }
             if let error = error {
-                AgentDebugLog.log(message: "header_send_failed \(error.localizedDescription)")
-                self.settleFrame()
+                AgentDebugLog.error(event: "header_send_failed", detail: error.localizedDescription)
+                self.settleFrame(frameId: frameId, generation: sendGeneration)
+                _ = self.failSendFrame(priority: look, reason: "header_send_failed")
                 return
             }
             task?.send(.data(frame.jpegData)) { [weak self] error in
                 guard let self = self else { return }
                 if let error = error {
-                    AgentDebugLog.log(message: "jpeg_send_failed \(error.localizedDescription)")
+                    AgentDebugLog.error(event: "jpeg_send_failed", detail: error.localizedDescription)
                     task?.cancel(with: .abnormalClosure, reason: Data("incomplete frame".utf8))
-                    self.settleFrame()
+                    self.settleFrame(frameId: frameId, generation: sendGeneration)
+                    _ = self.failSendFrame(priority: look, reason: "jpeg_send_failed")
                 }
             }
         }
@@ -407,8 +474,16 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
         let generation = connectionGeneration
         let previousTask = webSocketTask
         let previousSession = urlSession
+        // Unpublish the old objects in the same transaction that advances the generation. If
+        // cancellation delivers an old didClose callback before the new task is assigned, that
+        // callback must fail isCurrentTask instead of being mislabeled with the new generation
+        // and poisoning dropHandledGeneration for the replacement connection.
+        webSocketTask = nil
+        urlSession = nil
+        receiveLoopActive = false
         stateLock.unlock()
 
+        cancelPing()
         clearNegotiatedState()
         previousTask?.cancel(with: .goingAway, reason: nil)
         previousSession?.invalidateAndCancel()
@@ -432,6 +507,12 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
         let task = session.webSocketTask(with: request)
 
         stateLock.lock()
+        guard generation == connectionGeneration, !closedByUser, !permanentFailure else {
+            stateLock.unlock()
+            task.cancel(with: .goingAway, reason: nil)
+            session.invalidateAndCancel()
+            return
+        }
         urlSession = session
         webSocketTask = task
         receiveLoopActive = true
@@ -444,7 +525,7 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
     }
 
     private func schedulePing(generation: Int) {
-        cancelPing()
+        cancelPing(generation: generation)
         let work = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
             self.stateLock.lock()
@@ -457,12 +538,25 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
             let body: [String: Any] = ["type": "ping"]
             if let data = try? JSONSerialization.data(withJSONObject: body),
                let text = String(data: data, encoding: .utf8) {
-                task?.send(.string(text)) { _ in }
+                task?.send(.string(text)) { error in
+                    if let error = error {
+                        AgentDebugLog.error(
+                            event: "app_ping_send_failed",
+                            detail: error.localizedDescription
+                        )
+                    }
+                }
             }
             self.schedulePing(generation: generation)
         }
         stateLock.lock()
+        guard generation == connectionGeneration, !closedByUser else {
+            stateLock.unlock()
+            work.cancel()
+            return
+        }
         pingWorkItem = work
+        pingWorkGeneration = generation
         stateLock.unlock()
         DispatchQueue.global().asyncAfter(
             deadline: .now() + .milliseconds(Int(Self.appPingIntervalMs)),
@@ -470,10 +564,15 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
         )
     }
 
-    private func cancelPing() {
+    private func cancelPing(generation: Int? = nil) {
         stateLock.lock()
+        if let generation = generation, pingWorkGeneration != generation {
+            stateLock.unlock()
+            return
+        }
         pingWorkItem?.cancel()
         pingWorkItem = nil
+        pingWorkGeneration = nil
         stateLock.unlock()
     }
 
@@ -486,9 +585,8 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
         stateLock.unlock()
     }
 
-    private func scheduleSettleTimeout(isLook: Bool) {
+    private func scheduleSettleTimeout(isLook: Bool, frameId: Int64, generation: Int) {
         cancelSettleTimeout()
-        let generation = currentGeneration()
         let work = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
             self.stateLock.lock()
@@ -497,22 +595,33 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
                 return
             }
             self.stateLock.unlock()
+            // The timer belongs to one exact frame. If a late timer runs after that frame was
+            // already settled and a newer frame claimed the slot, it must be a complete no-op.
+            guard self.settleFrame(frameId: frameId, generation: generation) else { return }
             if isLook {
                 AlertManager.shared.speakStatus("Look failed. Try again.", force: true)
             }
-            self.settleFrame()
             self.stateLock.lock()
             self.consecutiveSettleTimeouts += 1
             let shouldReconnect = self.consecutiveSettleTimeouts >= Self.settleTimeoutsBeforeReconnect
             if shouldReconnect { self.consecutiveSettleTimeouts = 0 }
             self.stateLock.unlock()
             if shouldReconnect {
-                AgentDebugLog.log(message: "reconnect reason=repeated_settle_timeout")
+                AgentDebugLog.error(event: "repeated_settle_timeout")
                 self.scheduleReconnect(origin: "settle_timeout")
             }
         }
         stateLock.lock()
+        guard generation == connectionGeneration,
+              inFlight,
+              Self.frameMaySettle(inFlightFrameId: inFlightFrameId, receivedFrameId: frameId) else {
+            stateLock.unlock()
+            work.cancel()
+            return
+        }
         settleWorkItem = work
+        settleWorkFrameId = frameId
+        settleWorkGeneration = generation
         stateLock.unlock()
         DispatchQueue.global().asyncAfter(
             deadline: .now() + .milliseconds(Int(Self.frameSettleTimeoutMs)),
@@ -520,10 +629,20 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
         )
     }
 
-    private func cancelSettleTimeout() {
+    private func cancelSettleTimeout(frameId: Int64? = nil, generation: Int? = nil) {
         stateLock.lock()
+        if let frameId = frameId, settleWorkFrameId != frameId {
+            stateLock.unlock()
+            return
+        }
+        if let generation = generation, settleWorkGeneration != generation {
+            stateLock.unlock()
+            return
+        }
         settleWorkItem?.cancel()
         settleWorkItem = nil
+        settleWorkFrameId = nil
+        settleWorkGeneration = nil
         stateLock.unlock()
     }
 
@@ -533,17 +652,45 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
         return connectionGeneration
     }
 
-    private func scheduleStaleInferenceWatchdog() {
-        cancelStaleInferenceWatchdog()
-        let generation = currentGeneration()
+    private func isCurrentGeneration(_ generation: Int) -> Bool {
         stateLock.lock()
+        defer { stateLock.unlock() }
+        return generation == connectionGeneration
+    }
+
+    private func ownsInFlightFrame(_ frameId: Int64, generation: Int) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return generation == connectionGeneration &&
+            inFlight &&
+            Self.frameMaySettle(inFlightFrameId: inFlightFrameId, receivedFrameId: frameId)
+    }
+
+    private func scheduleStaleInferenceWatchdog(frameId: Int64, generation: Int) {
+        cancelStaleInferenceWatchdog()
+        stateLock.lock()
+        guard generation == connectionGeneration,
+              inFlight,
+              Self.frameMaySettle(inFlightFrameId: inFlightFrameId, receivedFrameId: frameId) else {
+            stateLock.unlock()
+            return
+        }
         staleInferenceTicks = 0
         stateLock.unlock()
         let work = DispatchWorkItem { [weak self] in
-            self?.staleInferenceTick(generation: generation)
+            self?.staleInferenceTick(frameId: frameId, generation: generation)
         }
         stateLock.lock()
+        guard generation == connectionGeneration,
+              inFlight,
+              Self.frameMaySettle(inFlightFrameId: inFlightFrameId, receivedFrameId: frameId) else {
+            stateLock.unlock()
+            work.cancel()
+            return
+        }
         staleInferenceWorkItem = work
+        staleInferenceWorkFrameId = frameId
+        staleInferenceWorkGeneration = generation
         stateLock.unlock()
         DispatchQueue.global().asyncAfter(
             deadline: .now() + .milliseconds(Int(Self.staleInferenceTickAfterMs)),
@@ -551,33 +698,47 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
         )
     }
 
-    private func staleInferenceTick(generation: Int) {
+    private func staleInferenceTick(frameId: Int64, generation: Int) {
         stateLock.lock()
-        guard generation == connectionGeneration, !closedByUser else {
+        guard generation == connectionGeneration,
+              !closedByUser,
+              inFlight,
+              Self.frameMaySettle(inFlightFrameId: inFlightFrameId, receivedFrameId: frameId) else {
             stateLock.unlock()
             return
         }
-        let flying = inFlight
         let sentAt = frameSentAtMonoMs
-        let ticks = staleInferenceTicks
-        stateLock.unlock()
         let now = Int64(ProcessInfo.processInfo.systemUptime * 1000)
         let age = sentAt > 0 ? now - sentAt : 0
-        var nextTicks = ticks
-        if Self.shouldTickStaleInference(inFlight: flying, frameAgeMs: age, ticksAlready: ticks) {
-            stateLock.lock()
+        let shouldPlay = Self.shouldTickStaleInference(
+            inFlight: true,
+            frameAgeMs: age,
+            ticksAlready: staleInferenceTicks
+        )
+        if shouldPlay {
             staleInferenceTicks += 1
-            nextTicks = staleInferenceTicks
-            stateLock.unlock()
+        }
+        let nextTicks = staleInferenceTicks
+        let shouldContinue = nextTicks < Self.staleInferenceMaxTicks
+        stateLock.unlock()
+        if shouldPlay {
             ConnectionEarcons.playDropped() // bounded tick — not an unbounded loop
             AgentDebugLog.log(message: "stale_inference_tick age=\(age) ticks=\(nextTicks)")
         }
-        guard flying, nextTicks < Self.staleInferenceMaxTicks else { return }
+        guard shouldContinue else { return }
         let work = DispatchWorkItem { [weak self] in
-            self?.staleInferenceTick(generation: generation)
+            self?.staleInferenceTick(frameId: frameId, generation: generation)
         }
         stateLock.lock()
+        guard generation == connectionGeneration,
+              inFlight,
+              Self.frameMaySettle(inFlightFrameId: inFlightFrameId, receivedFrameId: frameId) else {
+            stateLock.unlock()
+            return
+        }
         staleInferenceWorkItem = work
+        staleInferenceWorkFrameId = frameId
+        staleInferenceWorkGeneration = generation
         stateLock.unlock()
         DispatchQueue.global().asyncAfter(
             deadline: .now() + .milliseconds(Int(Self.staleInferenceTickPeriodMs)),
@@ -585,27 +746,53 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
         )
     }
 
-    private func cancelStaleInferenceWatchdog() {
+    private func cancelStaleInferenceWatchdog(frameId: Int64? = nil, generation: Int? = nil) {
         stateLock.lock()
+        if let frameId = frameId, staleInferenceWorkFrameId != frameId {
+            stateLock.unlock()
+            return
+        }
+        if let generation = generation, staleInferenceWorkGeneration != generation {
+            stateLock.unlock()
+            return
+        }
         staleInferenceWorkItem?.cancel()
         staleInferenceWorkItem = nil
+        staleInferenceWorkFrameId = nil
+        staleInferenceWorkGeneration = nil
         staleInferenceTicks = 0
         stateLock.unlock()
     }
 
-    private func settleFrame() {
-        cancelSettleTimeout()
-        cancelStaleInferenceWatchdog()
+    @discardableResult
+    private func settleFrame(frameId: Int64? = nil, generation: Int? = nil) -> Bool {
         stateLock.lock()
-        let wasInFlight = inFlight
-        inFlight = false
-        stateLock.unlock()
-        if wasInFlight {
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
-                self.delegate?.protocolClientDidSettleFrame(self)
-            }
+        if let generation = generation, generation != connectionGeneration {
+            stateLock.unlock()
+            return false
         }
+        if let frameId = frameId,
+           (!inFlight || !Self.frameMaySettle(
+               inFlightFrameId: inFlightFrameId,
+               receivedFrameId: frameId
+           )) {
+            stateLock.unlock()
+            return false
+        }
+        let wasInFlight = inFlight
+        let releasedFrameId = inFlightFrameId
+        let releasedGeneration = connectionGeneration
+        inFlight = false
+        inFlightFrameId = nil
+        stateLock.unlock()
+        guard wasInFlight, let releasedFrameId = releasedFrameId else { return false }
+        cancelSettleTimeout(frameId: releasedFrameId, generation: releasedGeneration)
+        cancelStaleInferenceWatchdog(frameId: releasedFrameId, generation: releasedGeneration)
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, self.isCurrentGeneration(releasedGeneration) else { return }
+            self.delegate?.protocolClientDidSettleFrame(self)
+        }
+        return true
     }
 
     private func listen(generation: Int) {
@@ -626,10 +813,10 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
             case .success(let message):
                 switch message {
                 case .string(let text):
-                    self.handleMessage(text)
+                    self.handleMessage(text, generation: generation)
                 case .data(let data):
                     if let text = String(data: data, encoding: .utf8) {
-                        self.handleMessage(text)
+                        self.handleMessage(text, generation: generation)
                     }
                 @unknown default:
                     break
@@ -644,13 +831,14 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
         }
     }
 
-    private func handleMessage(_ text: String) {
+    private func handleMessage(_ text: String, generation: Int) {
+        guard isCurrentGeneration(generation) else { return }
         guard let data = text.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = json["type"] as? String else {
-            settleFrame()
+            AgentDebugLog.error(event: "invalid_server_json")
             DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
+                guard let self = self, self.isCurrentGeneration(generation) else { return }
                 self.delegate?.protocolClient(
                     self,
                     didReceiveError: ["type": "error", "code": "invalid_server_response"]
@@ -666,18 +854,22 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
             let version = (json["protocol_version"] as? Int) ?? 0
             let maxAge = (json["alert_max_age_ms"] as? Int).map { Int64($0) } ?? Self.staleAlertMs
             stateLock.lock()
+            guard generation == connectionGeneration else {
+                stateLock.unlock()
+                return
+            }
             sessionReady = true
             visionEnabled = vision
             serverCapabilities = caps
             serverProtocolVersion = version
-            configuredStaleAlertMs = max(maxAge, Self.staleAlertMs)
+            configuredStaleAlertMs = Self.configuredSpeakBudget(serverAdvertisedMs: maxAge)
             // A working `ready` proves this connection is healthy end to end. Reset the backoff
             // counter here, not merely on the next successful frame, so a flapping link that
             // reconnects and gets a ready every time never accumulates a runaway backoff.
             reconnectAttempt = 0
             stateLock.unlock()
             DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
+                guard let self = self, self.isCurrentGeneration(generation) else { return }
                 if vision {
                     self.delegate?.protocolClientDidConnect(self)
                 } else {
@@ -689,14 +881,28 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
                 }
             }
         case "result":
-            handleResult(json)
+            handleResult(json, generation: generation)
         case "quality":
             DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
+                guard let self = self, self.isCurrentGeneration(generation) else { return }
                 self.delegate?.protocolClient(self, didReceiveQuality: json)
             }
         case "error":
-            settleFrame()
+            let errorCode = json["code"] as? String
+            if let frameId = Self.jsonInt64(json["frame_id"]), frameId >= 0 {
+                guard ownsInFlightFrame(frameId, generation: generation) else {
+                    AgentDebugLog.error(
+                        event: "late_frame_error_ignored",
+                        detail: "frame=\(frameId)"
+                    )
+                    return
+                }
+                settleFrame(frameId: frameId, generation: generation)
+            } else if errorCode != "malformed_control_message" && errorCode != "unknown_message" {
+                // Older servers did not identify frame-scoped errors. Keep compatibility while
+                // new revisions provide exact ownership to prevent late errors freeing a newer slot.
+                settleFrame(generation: generation)
+            }
             let code = json["code"] as? String
             if let code = code, Self.terminalErrorCodes.contains(code) {
                 // The close frame that follows this message may carry an application close code
@@ -704,11 +910,22 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
                 // a generic "invalid" close code and the number is lost. This message body is the
                 // reliable channel: act on it now rather than waiting for a close event that may
                 // never distinguish itself from an ordinary transport drop.
-                handleTerminalRejection(code: code)
+                handleTerminalRejection(code: code, generation: generation)
                 return
             }
+            if let code = code, Self.isInferenceOutageError(code) {
+                stateLock.lock()
+                guard generation == connectionGeneration else {
+                    stateLock.unlock()
+                    return
+                }
+                let shouldAnnounce = !inferenceUnavailable
+                inferenceUnavailable = true
+                stateLock.unlock()
+                guard shouldAnnounce else { return }
+            }
             DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
+                guard let self = self, self.isCurrentGeneration(generation) else { return }
                 self.delegate?.protocolClient(self, didReceiveError: json)
             }
         case "pong":
@@ -718,11 +935,22 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
         }
     }
 
-    private func handleResult(_ payload: [String: Any]) {
-        cancelSettleTimeout()
-        stateLock.lock()
-        consecutiveSettleTimeouts = 0
-        stateLock.unlock()
+    private func handleResult(_ payload: [String: Any], generation: Int) {
+        guard let receivedFrameId = Self.jsonInt64(payload["frame_id"]), receivedFrameId >= 0 else {
+            AgentDebugLog.error(event: "result_missing_frame_id")
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self, self.isCurrentGeneration(generation) else { return }
+                self.delegate?.protocolClient(
+                    self,
+                    didReceiveError: ["type": "error", "code": "invalid_server_response"]
+                )
+            }
+            return
+        }
+        guard ownsInFlightFrame(receivedFrameId, generation: generation) else {
+            AgentDebugLog.error(event: "late_result_ignored", detail: "frame=\(receivedFrameId)")
+            return
+        }
 
         let captureMono = Self.jsonInt64(payload["capture_mono_ms"])
         let nowMs = Int64(ProcessInfo.processInfo.systemUptime * 1000)
@@ -732,9 +960,14 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
         let isUrgent = (hazard?["level"] as? String) == "urgent"
 
         stateLock.lock()
+        guard generation == connectionGeneration else {
+            stateLock.unlock()
+            return
+        }
         let configured = configuredStaleAlertMs
         let ackSupported = serverCapabilities.contains(Self.capabilityResultAcknowledgement)
         let task = webSocketTask
+        let wasInferenceUnavailable = inferenceUnavailable
         stateLock.unlock()
 
         let maxAge = Self.maxSpeakAgeMs(
@@ -744,19 +977,49 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
         )
         let fresh = age <= maxAge
 
+        var recoveredInference = false
+        if fresh && wasInferenceUnavailable {
+            stateLock.lock()
+            if generation == connectionGeneration, inferenceUnavailable {
+                inferenceUnavailable = false
+                recoveredInference = true
+            }
+            stateLock.unlock()
+        }
+
         if fresh {
             DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
+                guard let self = self, self.isCurrentGeneration(generation) else { return }
                 self.delegate?.protocolClient(self, didReceiveResult: payload)
             }
         } else {
             AgentDebugLog.log(message: "result_stale age=\(age) max=\(maxAge) priority=\(priority)")
         }
 
-        if ackSupported, let frameId = Self.jsonInt64(payload["frame_id"]), frameId >= 0 {
-            acknowledgeResult(task: task, frameId: Int(frameId), fresh: fresh)
+        if recoveredInference {
+            // Queue after the result callback. If that result contains an awareness utterance,
+            // AlertManager's priority gate refuses to let this lower-priority status truncate it;
+            // if it contains no spoken content, the user still hears explicit recovery.
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self, self.isCurrentGeneration(generation) else { return }
+                self.delegate?.protocolClient(
+                    self,
+                    didReceiveError: ["type": "status", "code": "inference_restored"]
+                )
+            }
         }
-        settleFrame()
+
+        if ackSupported {
+            acknowledgeResult(task: task, frameId: Int(receivedFrameId), fresh: fresh)
+        }
+        // A valid fresh result proves a settle-timeout reconnect is no longer needed. Without a
+        // cancellable handle, that delayed work replaced the now-healthy socket seconds later.
+        if fresh { cancelReconnect() }
+        if settleFrame(frameId: receivedFrameId, generation: generation) {
+            stateLock.lock()
+            if generation == connectionGeneration { consecutiveSettleTimeouts = 0 }
+            stateLock.unlock()
+        }
     }
 
     private func acknowledgeResult(task: URLSessionWebSocketTask?, frameId: Int, fresh: Bool) {
@@ -778,8 +1041,14 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
     /// The authenticated device has been permanently rejected (revoked, or auth failed and the
     /// server said so explicitly). No reconnect: retrying against a revoked/rejected identity
     /// would just reproduce the same rejection every 1-60s forever.
-    private func handleTerminalRejection(code: String) {
+    private func handleTerminalRejection(code: String, generation: Int? = nil) {
+        AgentDebugLog.error(event: "terminal_access_rejection", detail: code)
         stateLock.lock()
+        if let generation = generation, generation != connectionGeneration {
+            stateLock.unlock()
+            return
+        }
+        let terminalGeneration = connectionGeneration
         if permanentFailure || closedByUser {
             stateLock.unlock()
             return
@@ -789,8 +1058,12 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
         receiveLoopActive = false
         let task = webSocketTask
         let session = urlSession
+        webSocketTask = nil
+        urlSession = nil
+        inferenceUnavailable = false
         stateLock.unlock()
 
+        cancelReconnect()
         cancelSettleTimeout()
         cancelStaleInferenceWatchdog()
         cancelPing()
@@ -799,12 +1072,23 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
         task?.cancel(with: .policyViolation, reason: nil)
         session?.invalidateAndCancel()
 
-        let message = code == "device_revoked"
-            ? "Device revoked. Assistance stopped."
-            : "Authentication failed. Re-provision required."
-        let closeCode = code == "device_revoked" ? 4403 : 4401
+        let message: String
+        let closeCode: Int
+        switch code {
+        case "device_revoked":
+            message = "Device revoked. Assistance stopped."
+            closeCode = 4403
+        case "session_superseded":
+            // Close 4409 is not representable on iOS's public WebSocket API; this JSON body is
+            // the durable signal. Reconnecting would flap both devices forever.
+            message = "Session taken over on another device. Use cane or guide."
+            closeCode = 4409
+        default:
+            message = "Authentication failed. Re-provision required."
+            closeCode = 4401
+        }
         DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
+            guard let self = self, self.isCurrentGeneration(terminalGeneration) else { return }
             AlertManager.shared.speakStatus(message, force: true)
             self.delegate?.protocolClient(self, didDisconnectWithCode: closeCode, reason: code)
         }
@@ -824,22 +1108,43 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
         reconnectAttempt += 1
         let attempt = reconnectAttempt
         let token = authToken
+        reconnectTicket += 1
+        let ticket = reconnectTicket
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.stateLock.lock()
+            guard ticket == self.reconnectTicket,
+                  !self.closedByUser, !self.permanentFailure else {
+                self.stateLock.unlock()
+                return
+            }
+            self.reconnectScheduled = false
+            self.reconnectWorkItem = nil
+            self.stateLock.unlock()
+            self.openSocket(url: url, token: token, origin: origin)
+        }
+        reconnectWorkItem = work
         stateLock.unlock()
 
         let delay = Self.reconnectDelaySeconds(attempt: attempt)
         AgentDebugLog.log(message: "reconnect_scheduled origin=\(origin) attempt=\(attempt) delaySec=\(delay)")
-        DispatchQueue.global().asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let self = self else { return }
-            self.stateLock.lock()
-            self.reconnectScheduled = false
-            let shouldGo = !self.closedByUser && !self.permanentFailure
-            self.stateLock.unlock()
-            guard shouldGo else { return }
-            self.openSocket(url: url, token: token, origin: origin)
-        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func cancelReconnect() {
+        stateLock.lock()
+        reconnectTicket += 1
+        reconnectWorkItem?.cancel()
+        reconnectWorkItem = nil
+        reconnectScheduled = false
+        stateLock.unlock()
     }
 
     private func handleTransportDrop(code: Int, reason: String?, generation: Int) {
+        AgentDebugLog.error(
+            event: "transport_drop",
+            detail: "code=\(code) reason=\(reason ?? "-")"
+        )
         stateLock.lock()
         guard generation == connectionGeneration, dropHandledGeneration != generation else {
             stateLock.unlock()
@@ -858,15 +1163,23 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
         // these values through this delegate path at all -- but keep the check for a server that
         // sends the close before any message, or for a future close code Foundation does add
         // native support for.
-        if code == 4401 || code == 4403 {
-            handleTerminalRejection(code: code == 4403 ? "device_revoked" : "authentication_failed")
+        if code == 4401 || code == 4403 || code == 4409 {
+            let terminal: String
+            if code == 4403 {
+                terminal = "device_revoked"
+            } else if code == 4409 {
+                terminal = "session_superseded"
+            } else {
+                terminal = "authentication_failed"
+            }
+            handleTerminalRejection(code: terminal, generation: generation)
             return
         }
         DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
+            guard let self = self, self.isCurrentGeneration(generation) else { return }
             self.delegate?.protocolClient(self, didDisconnectWithCode: code, reason: reason)
         }
-        guard !isTerminal() else { return }
+        guard isCurrentGeneration(generation), !isTerminal() else { return }
         scheduleReconnect(origin: "transport_drop")
     }
 
@@ -899,7 +1212,10 @@ public final class ProtocolClient: NSObject, URLSessionWebSocketDelegate, URLSes
     public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard isCurrentTask(task) else { return }
         if let http = task.response as? HTTPURLResponse, http.statusCode == 401 || http.statusCode == 403 {
-            handleTerminalRejection(code: http.statusCode == 403 ? "device_revoked" : "authentication_failed")
+            handleTerminalRejection(
+                code: http.statusCode == 403 ? "device_revoked" : "authentication_failed",
+                generation: currentGeneration()
+            )
         }
         // Any other completion (including a plain network error) is already handled by
         // listen()'s `.failure` case or by didCloseWith; nothing further to do here.

@@ -3,6 +3,7 @@ import logging
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from threading import BoundedSemaphore, Lock
 
 from .alert_policy import AlertPolicy
 from .composer import hazard_payload, look_summary
@@ -120,15 +121,14 @@ class VisionService:
         self.alert_max_age_ms = alert_max_age_ms
         self.inference_timeout_seconds = inference_timeout_ms / 1000.0
         self._inference_executor_workers = inference_executor_workers
-        # One bounded pool for blocking (sync-mode) detectors. asyncio.wait_for cannot cancel a
-        # running thread, so the bound is what fails closed under saturation: a hung model can
-        # occupy at most this many threads instead of every worker on the instance.
-        #
-        # There used to be a second "remote" pool here, described as isolating a hung cloud call
-        # from local inference. No dispatch path ever used it -- remote adapters are async and
-        # never touch a thread pool -- so it allocated threads, was shut down and recreated on
-        # every lifespan, and documented an isolation property the code did not actually have.
+        # One bounded pool for blocking (sync-mode) detectors. ThreadPoolExecutor's worker count
+        # does NOT bound its internal submission queue, so a separate non-blocking admission gate
+        # is required: timed-out calls keep their slot until the underlying thread really exits.
+        # A hung model can therefore occupy at most this many threads and zero queued frames.
         self._local_executor = self._new_executor("akshrava-local-infer")
+        self._local_inference_slots = BoundedSemaphore(self._inference_executor_workers)
+        self._local_inference_gate_lock = Lock()
+        self._local_inference_keys: set[tuple[str, str]] = set()
         # Per-device breakers: one hung phone/GPU path must not silence the fleet.
         self._timeout_streak: dict[str, int] = {}
         self._circuit_open_until: dict[str, float] = {}
@@ -150,7 +150,14 @@ class VisionService:
             self._trackers[session_key] = self._tracker_factory()
         return self._trackers[session_key]
 
-    async def analyze(self, state: SessionState, header: FrameHeader, jpeg: bytes) -> dict:
+    async def analyze(
+        self,
+        state: SessionState,
+        header: FrameHeader,
+        jpeg: bytes,
+        *,
+        server_received_epoch_ms: int | None = None,
+    ) -> dict:
         started = time.monotonic()
         detected_started = started
         # Local models and cloud-fallback wrappers retain mutable state. Remote workers opt in
@@ -173,6 +180,16 @@ class VisionService:
         self._remember_pose(state, header)
 
         inference_ms = int((time.monotonic() - started) * 1000)
+        received_epoch_ms = server_received_epoch_ms if server_received_epoch_ms is not None else int(time.time() * 1000)
+        capture_to_receive_ms = None
+        if header.capture_epoch_ms is not None:
+            delta = received_epoch_ms - header.capture_epoch_ms
+            # capture_epoch_ms is phone wall-clock and therefore untrusted. Same bound main.py
+            # already uses for the age histogram; skew falls back to inference-only rather than
+            # suppressing every frame on a phone with a wrong clock.
+            if 0 <= delta <= 60_000:
+                capture_to_receive_ms = delta
+        effective_age_ms = inference_ms + (capture_to_receive_ms or 0)
 
         # Check the freshness budget BEFORE scoring, not after. The scorer mutates per-key and
         # per-device cooldown/rate-limit state as a side effect of producing a hazard (hazards.py
@@ -180,9 +197,16 @@ class VisionService:
         # on a hazard nobody ever heard, so the next genuinely-timely detection of the same
         # object gets suppressed by a cooldown it never benefited from. Under sustained slow
         # inference this compounds into total silence. Skip scoring entirely once already late.
-        late_suppressed = inference_ms > self.alert_max_age_ms
+        late_suppressed = effective_age_ms > self.alert_max_age_ms
+        late_suppressed_reason = None
+        if late_suppressed:
+            if inference_ms > self.alert_max_age_ms:
+                late_suppressed_reason = "inference"
+            else:
+                late_suppressed_reason = "capture_age"
         is_priority = bool(header.priority) or header.mode == "priority"
         hazard = None
+        drop_reason = None
         if not late_suppressed:
             candidate = self.scorer.score(
                 state,
@@ -194,7 +218,9 @@ class VisionService:
                 state.geometry_profile,
                 skip_cooldowns=is_priority,
             )
-            hazard = self.alert_policy.admit(state, candidate, priority=is_priority)
+            hazard, drop_reason = self.alert_policy.admit_with_reason(
+                state, candidate, priority=is_priority
+            )
         track_score_ms = int((time.monotonic() - track_score_started) * 1000)
 
         result = {
@@ -202,7 +228,8 @@ class VisionService:
             "frame_id": header.frame_id,
             "capture_mono_ms": header.capture_mono_ms,
             "server_inference_ms": inference_ms,
-            "server_received_epoch_ms": int(time.time() * 1000),
+            "server_received_epoch_ms": received_epoch_ms,
+            "capture_to_receive_ms": capture_to_receive_ms,
             "hazard": None,
             # Keep bounded detector telemetry in the protocol so a connected phone can be
             # distinguished from a healthy detector that simply saw no supported class.
@@ -211,6 +238,8 @@ class VisionService:
             "priority": is_priority,
             "look_summary": None,
             "late_suppressed": late_suppressed,
+            "late_suppressed_reason": late_suppressed_reason,
+            "alert_suppressed_reason": drop_reason,
             "pipeline_stage_ms": {"detect": detect_ms, "track_score": track_score_ms},
         }
         # Language is a per-device provisioning setting (plan §6.2), not a fleet-wide server
@@ -266,16 +295,21 @@ class VisionService:
 
     def shutdown(self) -> None:
         # cancel_futures is available on the supported Python 3.10+ runtime.
-        # The bounded executor prevents unbounded queued work. Using wait=True ensures
-        # all thread pools join during lifecycle teardowns and test runs.
+        # The admission gate prevents unbounded queued work; tracked async tasks are cancelled.
         for tracker in (self._persist_tracker, self._upload_tracker):
             for task in list(tracker.tasks):
                 task.cancel()
             tracker.tasks.clear()
-        self._local_executor.shutdown(wait=True)
+        # A detector thread may be permanently wedged; graceful shutdown must not wait forever.
+        # cancel_futures drops anything not yet running (normally none because admission slots
+        # prevent queueing). Running threads retain their captured old semaphore until they exit.
+        self._local_executor.shutdown(wait=False, cancel_futures=True)
         # TestClient can start a fresh lifespan over the imported application. Recreate the
         # bounded pool lazily instead of retaining an executor that has already been shut down.
         self._local_executor = self._new_executor("akshrava-local-infer")
+        self._local_inference_slots = BoundedSemaphore(self._inference_executor_workers)
+        self._local_inference_gate_lock = Lock()
+        self._local_inference_keys = set()
 
     async def shutdown_async(self) -> None:
         await self.drain_persists()
@@ -297,13 +331,17 @@ class VisionService:
         cooldown lapsed and reconnects simply starts a fresh streak. Cheap O(expired) sweep,
         only triggered once the dict grows past a threshold.
         """
-        if len(self._circuit_open_until) <= self._CIRCUIT_STATE_MAX:
-            return
         now = time.monotonic()
-        expired = [key for key, until in self._circuit_open_until.items() if until <= now]
-        for key in expired:
-            self._circuit_open_until.pop(key, None)
-            self._timeout_streak.pop(key, None)
+        if len(self._circuit_open_until) > self._CIRCUIT_STATE_MAX:
+            expired = [key for key, until in self._circuit_open_until.items() if until <= now]
+            for key in expired:
+                self._circuit_open_until.pop(key, None)
+                self._timeout_streak.pop(key, None)
+        if len(self._timeout_streak) > self._CIRCUIT_STATE_MAX:
+            active_circuits = set(self._circuit_open_until)
+            stale = [k for k in self._timeout_streak if k not in active_circuits]
+            for k in stale:
+                self._timeout_streak.pop(k, None)
 
     def _circuit_allows(self, device_id: str) -> None:
         """Raise if this device's circuit breaker is currently open."""
@@ -358,12 +396,9 @@ class VisionService:
     async def _detect(self, device_id: str, jpeg: bytes):
         """Run detection with a deadline and the per-device circuit breaker.
 
-        The adapter *declares* how it wants to be driven (`inference_mode`) instead of this
-        method working it out by inspection. Previously this branched on
-        `isinstance(detector, RemoteWorkerDetector)` and probed five optional attributes, which
-        meant the application core knew every adapter by name: adding a detector required editing
-        this method, and getting the probe order wrong silently routed a detector down the wrong
-        path. Now there are exactly two ways to call a detector and the detector picks one.
+        The adapter *declares* how it wants to be driven (`inference_mode`) instead of this method
+        inspecting concrete adapter types or optional methods. There are exactly two ways to call
+        a detector and the detector picks one.
 
         Async adapters are awaited directly, because their deadline is real -- an httpx request
         can actually be abandoned. Sync adapters go to a bounded thread pool, because
@@ -378,10 +413,55 @@ class VisionService:
             )
         else:
             loop = asyncio.get_running_loop()
-            outcome = await self._await_inference(
-                device_id,
-                loop.run_in_executor(self._local_executor, self.detector.infer_sync, device_id, jpeg),
+            slots = self._local_inference_slots
+            gate_lock = self._local_inference_gate_lock
+            in_flight_keys = self._local_inference_keys
+            # A serial detector keeps one global key until its underlying call truly finishes;
+            # stateless parallel detectors keep one key per device so a single timed-out phone
+            # cannot occupy every worker before its circuit breaker opens.
+            inference_key = (
+                ("serial", "")
+                if self.detector.requires_serial_execution()
+                else ("device", device_id)
             )
+            with gate_lock:
+                admitted = inference_key not in in_flight_keys and slots.acquire(blocking=False)
+                if admitted:
+                    in_flight_keys.add(inference_key)
+            if not admitted:
+                self._note_failure(device_id, "local_executor_saturated")
+                raise TransientInferenceError("local inference executor saturated")
+
+            def release_admission() -> None:
+                with gate_lock:
+                    in_flight_keys.discard(inference_key)
+                slots.release()
+
+            try:
+                concurrent_future = self._local_executor.submit(
+                    self.detector.infer_sync, device_id, jpeg
+                )
+            except Exception as exc:
+                release_admission()
+                self._note_failure(device_id, "local_executor_submit_failed")
+                raise TransientInferenceError("local inference submission failed") from exc
+
+            # asyncio cancellation/timeout cannot stop a running thread. Release admission from
+            # the concurrent future itself, not its asyncio wrapper (the wrapper becomes cancelled
+            # immediately on timeout even while the thread is still running).
+            concurrent_future.add_done_callback(lambda _done: release_admission())
+            wrapped = asyncio.wrap_future(concurrent_future, loop=loop)
+
+            def consume_late_exception(done: asyncio.Future) -> None:
+                # If the phone's deadline wins, the wrapper completes later without an awaiter.
+                # Retrieve any exception so asyncio does not report a misleading unhandled future.
+                try:
+                    done.exception()
+                except asyncio.CancelledError:
+                    pass
+
+            wrapped.add_done_callback(consume_late_exception)
+            outcome = await self._await_inference(device_id, asyncio.shield(wrapped))
         return outcome.detections, outcome.cloud_fallback_unavailable
 
     def _pose_discontinuity(self, state: SessionState, header: FrameHeader) -> bool:

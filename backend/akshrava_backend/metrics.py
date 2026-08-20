@@ -18,10 +18,16 @@ class Metrics:
         self._alerts_total = 0
         self._rejected_frames_total = 0
         self._late_suppressed_total = 0
+        self._late_capture_suppressed_total = 0
+        self._alerts_rate_limited_total = 0
+        self._alerts_debounced_total = 0
+        self._control_messages_rejected_total = 0
+        self._session_superseded_total = 0
         self._sessions_active = 0
         self._session_admission_rejected_total = 0
         self._inference_failures_total = 0
         self._worker_saturated_total = 0
+        self._inference_circuit_open_total = 0
         # ---- phone result delivery ----
         # A successful server WebSocket write is not delivery: the peer can disappear before it
         # processes the frame. Keep that transport fact separate from the phone's explicit ack,
@@ -115,6 +121,27 @@ class Metrics:
         with self._lock:
             self._late_suppressed_total += 1
 
+    def late_capture_suppressed(self) -> None:
+        """Late because capture-to-receive age (not detector wall time) exceeded the budget."""
+        with self._lock:
+            self._late_capture_suppressed_total += 1
+
+    def alert_rate_limited(self) -> None:
+        with self._lock:
+            self._alerts_rate_limited_total += 1
+
+    def alert_debounced(self) -> None:
+        with self._lock:
+            self._alerts_debounced_total += 1
+
+    def control_message_rejected(self) -> None:
+        with self._lock:
+            self._control_messages_rejected_total += 1
+
+    def session_superseded(self) -> None:
+        with self._lock:
+            self._session_superseded_total += 1
+
     def session_opened(self) -> None:
         with self._lock:
             self._sessions_active += 1
@@ -135,6 +162,11 @@ class Metrics:
         """Worker returned 503 / queue-full; frame was soft-shed without closing the session."""
         with self._lock:
             self._worker_saturated_total += 1
+
+    def inference_circuit_open(self) -> None:
+        """A per-device breaker rejected a frame after sustained inference failures."""
+        with self._lock:
+            self._inference_circuit_open_total += 1
 
     def result_sent(self, *, acknowledgement_expected: bool) -> None:
         """A result was accepted by the server-side WebSocket transport."""
@@ -200,9 +232,24 @@ class Metrics:
                 "# HELP akshrava_frames_rejected_total Frame messages rejected before inference.",
                 "# TYPE akshrava_frames_rejected_total counter",
                 f"akshrava_frames_rejected_total {self._rejected_frames_total}",
-                "# HELP akshrava_late_suppressed_total Hazards detected too late to speak safely.",
+                "# HELP akshrava_late_suppressed_total Hazards detected outside the speech freshness budget.",
                 "# TYPE akshrava_late_suppressed_total counter",
                 f"akshrava_late_suppressed_total {self._late_suppressed_total}",
+                "# HELP akshrava_late_capture_suppressed_total Frames suppressed because capture-to-receive age exceeded the speech budget.",
+                "# TYPE akshrava_late_capture_suppressed_total counter",
+                f"akshrava_late_capture_suppressed_total {self._late_capture_suppressed_total}",
+                "# HELP akshrava_alerts_rate_limited_total Scored hazards dropped by the 60s global backstop.",
+                "# TYPE akshrava_alerts_rate_limited_total counter",
+                f"akshrava_alerts_rate_limited_total {self._alerts_rate_limited_total}",
+                "# HELP akshrava_alerts_debounced_total Scored hazards dropped by the same-key debounce.",
+                "# TYPE akshrava_alerts_debounced_total counter",
+                f"akshrava_alerts_debounced_total {self._alerts_debounced_total}",
+                "# HELP akshrava_control_messages_rejected_total Malformed control frames soft-shed without closing the socket.",
+                "# TYPE akshrava_control_messages_rejected_total counter",
+                f"akshrava_control_messages_rejected_total {self._control_messages_rejected_total}",
+                "# HELP akshrava_session_superseded_total Live sockets closed because a newer session for the same device took over.",
+                "# TYPE akshrava_session_superseded_total counter",
+                f"akshrava_session_superseded_total {self._session_superseded_total}",
                 "# HELP akshrava_sessions_active Active authenticated WebSocket sessions on this API instance.",
                 "# TYPE akshrava_sessions_active gauge",
                 f"akshrava_sessions_active {self._sessions_active}",
@@ -215,6 +262,9 @@ class Metrics:
                 "# HELP akshrava_worker_saturated_total Frames soft-shed because the worker queue was full.",
                 "# TYPE akshrava_worker_saturated_total counter",
                 f"akshrava_worker_saturated_total {self._worker_saturated_total}",
+                "# HELP akshrava_inference_circuit_open_total Frames shed while a per-device inference circuit was open.",
+                "# TYPE akshrava_inference_circuit_open_total counter",
+                f"akshrava_inference_circuit_open_total {self._inference_circuit_open_total}",
                 "# HELP akshrava_results_sent_total Results accepted by the server-side WebSocket transport; this is not handset delivery.",
                 "# TYPE akshrava_results_sent_total counter",
                 f"akshrava_results_sent_total {self._results_sent_total}",

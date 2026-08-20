@@ -135,8 +135,10 @@ Run applies tracking and alert policy, then returns a compact JSON result over t
 connection. The phone accepts it only when its frame ID and `capture_mono_ms` match a fresh
 frame, before `AlertManager` can use offline speech or haptics.
 
-The current pilot uses a CPU worker (`worker_use_gpu=false`) and an 8.5-second freshness
-budget (`ALERT_MAX_AGE_MS=8500`); it does not depend on GPU quota. The managed GCP stack—Cloud
+The current pilot uses a CPU worker (`worker_use_gpu=false`) but keeps the same 2.5-second
+freshness ceiling (`ALERT_MAX_AGE_MS=2500`) as every other profile. A CPU result that cannot
+arrive inside that window is shed and sustained failure is announced; the deployment never
+widens phone speech freshness to accommodate slow inference. The managed GCP stack—Cloud
 Run, Cloud SQL, Memorystore Redis, Secret Manager, Artifact Registry, diagnostics storage,
 private networking, firewall rules, IAP SSH, monitoring, and alerting—is defined in
 [cloud/gcp/](cloud/gcp/). [cloud/local/](cloud/local/) is the Docker Compose alternative for
@@ -180,10 +182,10 @@ The system is a **freshness pipeline**, never a video recorder or catch-up queue
 - The default capture envelope is roughly 0.2–1 FPS, with short confirmation sampling up to 2 FPS and never above 3 FPS in this cloud design.
 - `capture_mono_ms` records capture time using the phone's monotonic clock. The server echoes it
   so the phone can correlate the response with the original frame.
-- The WebSocket `ready` message supplies the active freshness budget: 8.5 seconds for the
-  current CPU worker and 2.5 seconds for GPU or transport-only profiles. The phone never lowers
-  its local 2.5-second floor. Results outside the negotiated budget remain diagnostic telemetry
-  and are never spoken.
+- The WebSocket `ready` message supplies an active freshness budget no greater than 2.5 seconds.
+  The phone treats that value as a ceiling, applies a tighter 1.5-second urgent-result window,
+  and never lets a server expand its local cap. Results outside the resulting budget remain
+  diagnostic telemetry and are never spoken.
 - The backend accepts bounded input, rate-limits before work, and performs alert persistence outside the WebSocket response path via background tasks drained safely on shutdown.
 - Raw images are processed in memory and discarded. Normal operation never stores video or JPEG frames.
 
@@ -241,6 +243,16 @@ Muting is a deliberate user action (headset double-press) and nothing else may s
 
 Examples of permitted language are `Obstacle ahead`, `Vehicle nearby, left`, `Camera is blurry. Wipe the lens.`, `Environment is dark.`, and `Vision assistance unavailable. Use cane or guide.` The app never converts a detection into distance, approach speed, a safe route, or a crossing recommendation.
 
+### iOS prototype status
+
+The `ios/` tree contains an experimental Swift client and an XcodeGen UIKit host. It shares the
+wire protocol and awareness-only boundary, but it is unsigned and not a participant release
+artifact. iOS has no guaranteed continuous camera operation after the app leaves the foreground;
+camera interruptions are announced and require the user to return to the app. The opportunistic
+background watchdog can prompt recovery, but it cannot guarantee a schedule or silently restart a
+session. Use the iOS simulator gate in CI for framework-backed tests; local Command Line Tools
+can only run the package's macOS-compatible checks and source parsing.
+
 ## Protocol and trust boundaries
 
 ### Phone to control plane
@@ -258,11 +270,13 @@ The server sends `ready` with payload:
   "type": "ready",
   "max_in_flight": 1,
   "vision_enabled": true,
-  "alert_max_age_ms": 8500
+  "alert_max_age_ms": 2500
 }
 ```
 
-The client configures its freshness budget to `max(8500, 2500) = 8500 ms` and then sends one JSON header followed immediately by one binary JPEG; the response is a compact JSON `result`, `quality`, status, or rejection message.
+The client configures its normal/look freshness budget to `min(server_value, 2500)`, with a
+tighter 1500 ms cap for urgent results, and then sends one JSON header followed immediately by
+one binary JPEG. The response is a compact JSON `result`, `quality`, status, or rejection message.
 
 ```json
 {
@@ -468,6 +482,7 @@ Akshrava/
 │   ├── gcp/                          Terraform for the managed pilot infrastructure
 │   └── local/                        Compose, Caddy, Prometheus, Grafana, Alertmanager
 ├── scripts/                          build, provisioning, preflight, migration, E2E tools
+├── ios/                              experimental Swift client and XcodeGen host
 ├── akshrava.yaml                     model-training dataset configuration
 ├── datasets/phase0/                  synthetic policy replay fixtures; not street evidence
 ├── .github/workflows/                CI, Android compatibility, and release pipelines
@@ -821,6 +836,7 @@ Useful operational scripts:
 | `scripts/install_android_debug_full.sh` | End-to-end build, Keystore provisioning, and live WSS verification on a device. |
 | `scripts/run_backend_dev.sh` | Start the local backend; check `/readyz`. |
 | `scripts/test_backend.sh` | Run backend tests directly. |
+| `scripts/test_ios.sh` | Run iOS package tests, version parity, and safety audit; full Xcode is required for Swift tests. |
 | `scripts/gcp_preflight.sh` | Format/validate Terraform and verify remote-detector prerequisites. |
 | `scripts/build_gcp_images.sh` | Build and push API/worker container images. |
 | `scripts/gcp_migrate_then_deploy.sh` | Apply infrastructure then run the Cloud Run migration job. |
@@ -833,7 +849,7 @@ Useful operational scripts:
 
 CI is defined in [.github/workflows/ci.yml](.github/workflows/ci.yml), Android build and compatibility coverage in [.github/workflows/android-pipeline.yml](.github/workflows/android-pipeline.yml) and [.github/workflows/android-compatibility.yml](.github/workflows/android-compatibility.yml), and the release pipeline in [.github/workflows/release.yml](.github/workflows/release.yml).
 
-Pushing a version tag (`vX.Y.Z`) runs the release matrix, signs and publishes one universal Android APK, generates `SHA256SUMS.txt`, and deploys a GitHub Pages download site. The download page lists Android API 26–36 and points every supported version to that same signed APK; API 26/27 are legacy release-smoke-tested compatibility targets that still require device-specific qualification, while API 28–36 are the primary release-validation matrix. Enable **Settings → Pages → Source → GitHub Actions** once to allow the deployment job to publish the site.
+Pushing a version tag (`vX.Y.Z`) runs the release matrix, signs and publishes one universal Android APK, generates `SHA256SUMS.txt`, and deploys a GitHub Pages download site. The download page lists Android API 26–36 and points every supported version to that same signed APK; API 26/27 are legacy release-smoke-tested compatibility targets that still require device-specific qualification, while API 28–36 are the primary release-validation matrix. The iOS job is best-effort and may attach an explicitly labelled unsigned payload only after the simulator test target passes; it never blocks Android publication. Enable **Settings → Pages → Source → GitHub Actions** once to allow the deployment job to publish the site.
 
 The compatibility workflows run API 26–36 emulator smoke tests (Android 8 through the current
 API level), plus JVM tests and debug APK assembly. API 28–36 (Android 9 through Android 16,
@@ -844,7 +860,7 @@ detector recall or mobility safety on a particular donated phone.
 
 ### Release sequence
 
-1. Run backend policy/unit tests, Phase-0 replay, dependency/lint checks, Android tests and APK assembly, Compose validation, and GCP preflight.
+1. Run backend policy/unit tests, Phase-0 replay, dependency/lint checks, Android tests and APK assembly, the iOS simulator target when the full Xcode toolchain is available, Compose validation, and GCP preflight.
 2. Build and push the API and worker images, then record their immutable digest references in Terraform configuration.
 3. Review and apply the Terraform plan, run the `akshrava-migrate` job, and confirm `/livez` and `/readyz` before accepting a phone.
 4. Install only an approved, SHA-verified model on the private worker and verify the intended detector and freshness budget.
@@ -892,7 +908,8 @@ Application code is Apache-2.0. YOLO/Ultralytics weights can carry AGPL-3.0 or c
 ## Scope guard
 
 The following are intentionally not enabled by this architecture: GPS hazard memory, safe-route or
-crossing advice, optical-flow/looming or time-to-collision claims, continuous OCR, facial
-recognition, iOS support, broad language rollout, unreviewed local fallback models, and large-scale
-unsupervised operations. [NOT_NOW.md](NOT_NOW.md) and [Important Architecture.md](Important%20Architecture.md)
-remain the governing deferred-scope and evidence boundary.
+crossing advice, optical-flow/looming or time-to-contact claims, continuous OCR, facial
+recognition, iOS participant/release support, broad language rollout, unreviewed local fallback
+models, and large-scale unsupervised operations. [NOT_NOW.md](NOT_NOW.md) and
+[Important Architecture.md](Important%20Architecture.md) remain the governing deferred-scope and
+evidence boundary.

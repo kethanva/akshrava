@@ -177,9 +177,10 @@ drop.
   real rebind costs 1-2s of frames). Only the handful of `camera_bound ok` lines are real binds.
 - **Overlay permission grant fails over adb.** Expected on many OEM ROMs; see §2. Check for
   `mode=WAKE_LOCK` instead of `mode=OVERLAY` in `svc_started` — both are valid.
-- **`alert_max_age_ms` in the `ready` payload is 8500, not 2500.** Deliberate:
-  `cloud/gcp/app.tf` sets it higher for the CPU remote-YOLO path (`detector=remote` without GPU)
-  to match its slower inference; GPU/noop paths keep the tight 2500ms boundary.
+- **If `alert_max_age_ms` in the `ready` payload is anything other than 2500, treat it as
+  deployment drift.** Every profile now has the same 2500 ms ceiling. The phones independently
+  cap normal/look speech at 2500 ms and urgent results at 1500 ms, so a server value cannot widen
+  freshness.
 
 ## 6. Debugging workflow when a real fault is found
 

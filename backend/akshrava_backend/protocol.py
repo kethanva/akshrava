@@ -58,6 +58,13 @@ def _integer(payload: dict[str, Any], key: str, minimum=0, required=True):
     return value
 
 
+def _boolean(payload: dict[str, Any], key: str, default=False):
+    value = payload.get(key, default)
+    if not isinstance(value, bool):
+        raise ProtocolError(f"{key} must be a boolean")
+    return value
+
+
 # Sensor orientation is reported in centidegrees. Pitch is roughly ±90° (±9000) and roll is
 # ±180° (±18000). An earlier floor of -9000 rejected ordinary walking rolls past -90° and the
 # session handler treated that ProtocolError as fatal — closing the socket, which made the phone
@@ -90,6 +97,10 @@ def parse_frame_header(payload: dict[str, Any]) -> FrameHeader:
         raise ProtocolError("expected frame header")
     width = _integer(payload, "w", 1)
     height = _integer(payload, "h", 1)
+    mode = payload.get("mode", "normal")
+    if not isinstance(mode, str) or mode not in {"normal", "priority"}:
+        raise ProtocolError("mode must be normal or priority")
+    priority = _boolean(payload, "priority") or mode == "priority"
     return FrameHeader(
         frame_id=_integer(payload, "id", 0),
         capture_mono_ms=_integer(payload, "capture_mono_ms", 0),
@@ -101,12 +112,11 @@ def parse_frame_header(payload: dict[str, Any]) -> FrameHeader:
         pitch_cdeg=_optional_pose_cdeg(payload, "pitch_cdeg"),
         roll_cdeg=_optional_pose_cdeg(payload, "roll_cdeg"),
         pose_age_ms=_integer(payload, "pose_age_ms", 0, required=False),
-        mode=str(payload.get("mode", "normal"))[:32],
-        priority=bool(payload.get("priority", False))
-        or str(payload.get("mode", "")) == "priority",
+        mode=mode,
+        priority=priority,
         trace_id=str(payload.get("trace_id", ""))[:64],
         language=str(payload.get("language", ""))[:2].lower(),
-        debug_telemetry=bool(payload.get("debug_telemetry", False)),
+        debug_telemetry=_boolean(payload, "debug_telemetry"),
     )
 
 

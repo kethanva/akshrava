@@ -20,4 +20,14 @@ public struct AgentDebugLog {
         logger.debug("\(message, privacy: .public)")
         #endif
     }
+
+    /// Release operational failures. Event names are stable and public for triage; optional
+    /// platform error text stays private and never includes tokens, endpoints, images, or location.
+    public static func error(event: String, detail: String? = nil) {
+        if let detail = detail {
+            logger.error("event=\(event, privacy: .public) detail=\(detail, privacy: .private)")
+        } else {
+            logger.error("event=\(event, privacy: .public)")
+        }
+    }
 }

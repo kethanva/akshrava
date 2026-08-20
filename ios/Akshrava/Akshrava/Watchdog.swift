@@ -10,6 +10,9 @@ import Foundation
 #if canImport(BackgroundTasks)
 import BackgroundTasks
 #endif
+#if canImport(UserNotifications)
+import UserNotifications
+#endif
 
 public class Watchdog {
     public static let shared = Watchdog()
@@ -24,7 +27,20 @@ public class Watchdog {
     /// earliest fire time, not a promise, unlike Android's AlarmManager equivalent.
     public static let intervalMs: Int64 = 3 * 60_000
 
+    /// Message key for the press-Start prompt. The notification is best-effort; speech is required.
+    public static let stalledRecoverySpeechKey = "watchdog_stalled"
+
     private init() {}
+
+    /// Speak the recovery prompt. Android posts a notification *and* TTS; iOS has no notification
+    /// authorization request, so a notification-only path is silence. Do not auto-start.
+    public static func promptStaleSessionRecovery(language: String = "en") {
+        AlertManager.shared.speak(
+            messageKey: stalledRecoverySpeechKey,
+            language: language,
+            force: true
+        )
+    }
 
     /// Register the handler AND schedule the first request. Registration alone (the previous
     /// behaviour) never re-arms the task: BGTaskScheduler only fires a request that was actually
@@ -47,6 +63,7 @@ public class Watchdog {
                 self?.handle(task: processingTask)
             }
             AgentDebugLog.log(message: "watchdog_register ok=\(registered)")
+            if !registered { AgentDebugLog.error(event: "watchdog_registration_failed") }
             scheduleNext()
         }
         #endif
@@ -54,6 +71,23 @@ public class Watchdog {
     }
 
     #if canImport(BackgroundTasks)
+    @available(iOS 13.0, macOS 13.0, *)
+    private final class TaskCompletionGate {
+        private let lock = NSLock()
+        private var completed = false
+
+        func finish(_ task: BGTask, success: Bool) {
+            lock.lock()
+            guard !completed else {
+                lock.unlock()
+                return
+            }
+            completed = true
+            lock.unlock()
+            task.setTaskCompleted(success: success)
+        }
+    }
+
     @available(iOS 13.0, macOS 13.0, *)
     private func handle(task: BGProcessingTask) {
         // Re-arm before doing anything else: the request is one-shot, and if recovery below were
@@ -65,9 +99,10 @@ public class Watchdog {
         // when the (short, unspecified) budget runs out, and repeatedly overrunning makes the
         // system deprioritise future scheduling for this identifier -- degrading the very
         // recovery path this task exists to provide.
+        let completion = TaskCompletionGate()
         task.expirationHandler = {
-            AgentDebugLog.log(message: "watchdog_task_expired")
-            task.setTaskCompleted(success: false)
+            AgentDebugLog.error(event: "watchdog_task_expired")
+            completion.finish(task, success: false)
         }
 
         // A session marked active whose heartbeat has gone stale was killed by the OS (backgrounded
@@ -76,18 +111,26 @@ public class Watchdog {
         // task runs promptly, or at all, while backgrounded.
         let recovered = SessionFlags.isActive() && SessionFlags.isStale()
         guard recovered else {
-            task.setTaskCompleted(success: true)
+            completion.finish(task, success: true)
             return
         }
         AgentDebugLog.log(message: "watchdog_recovering_stale_session")
-        // This handler runs on an arbitrary background queue (registered with `using: nil`), and
-        // startSession() reaches UIKit (ScreenKeepAlive) and AVFoundation session setup. Hop to
-        // main and only report completion once the restart has actually been issued, so the
-        // system does not suspend the process mid-restart.
-        DispatchQueue.main.async {
-            AssistSessionManager.shared.startSession()
-            task.setTaskCompleted(success: true)
+        SessionFlags.setActive(false)
+        Watchdog.promptStaleSessionRecovery(language: ProvisionStore.load().language)
+        #if canImport(UserNotifications)
+        let content = UNMutableNotificationContent()
+        content.title = "Akshrava Assistance Stopped"
+        content.body = AlertManager.shared.resolvedTemplate(
+            messageKey: Watchdog.stalledRecoverySpeechKey,
+            language: ProvisionStore.load().language
+        )?.text ?? "Open Akshrava and press Start assistance again. Keep using your cane."
+        let request = UNNotificationRequest(identifier: "watchdog.stalled", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request) { _ in
+            completion.finish(task, success: true)
         }
+        #else
+        completion.finish(task, success: true)
+        #endif
     }
 
     @available(iOS 13.0, macOS 13.0, *)
@@ -101,7 +144,7 @@ public class Watchdog {
         } catch {
             // Never a fatal path: BGTaskScheduler.submit can throw (too many pending requests,
             // simulator, disabled background refresh). The foreground session is unaffected.
-            AgentDebugLog.log(message: "watchdog_submit_failed \(error.localizedDescription)")
+            AgentDebugLog.error(event: "watchdog_submit_failed", detail: error.localizedDescription)
         }
     }
     #endif

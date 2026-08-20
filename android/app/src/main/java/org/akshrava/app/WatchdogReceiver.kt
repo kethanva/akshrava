@@ -88,11 +88,11 @@ class WatchdogReceiver : BroadcastReceiver() {
         // Short BLV recovery utterance; watchdog remains prompt-only for restart (never auto-starts).
         // The notification above is already posted, so every path below only decides whether the
         // prompt is also *spoken* — none of them may leave the broadcast unfinished.
-        lateinit var tts: android.speech.tts.TextToSpeech
+        var ttsInstance: android.speech.tts.TextToSpeech? = null
         val settled = AtomicBoolean(false)
         val finish = {
             if (settled.compareAndSet(false, true)) {
-                runCatching { tts.shutdown() }
+                runCatching { ttsInstance?.shutdown() }
                 pendingResult?.finish()
             }
         }
@@ -101,14 +101,15 @@ class WatchdogReceiver : BroadcastReceiver() {
         // receiver is killed by the system instead of finishing on its own terms.
         val timeout = Handler(Looper.getMainLooper())
         timeout.postDelayed({ finish() }, SPEECH_TIMEOUT_MS)
-        tts = android.speech.tts.TextToSpeech(context) { status ->
-            if (status != android.speech.tts.TextToSpeech.SUCCESS) {
+        ttsInstance = android.speech.tts.TextToSpeech(context) { status ->
+            val engine = ttsInstance
+            if (status != android.speech.tts.TextToSpeech.SUCCESS || engine == null) {
                 timeout.removeCallbacksAndMessages(null)
                 finish()
                 return@TextToSpeech
             }
-            tts.language = speechLocale(AppConfigStore.load(context).language)
-            tts.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+            engine.language = speechLocale(AppConfigStore.load(context).language)
+            engine.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
                 override fun onStart(utteranceId: String?) = Unit
                 override fun onDone(utteranceId: String?) {
                     timeout.removeCallbacksAndMessages(null)
@@ -120,7 +121,7 @@ class WatchdogReceiver : BroadcastReceiver() {
                     finish()
                 }
             })
-            val queued = tts.speak(
+            val queued = engine.speak(
                 context.getString(R.string.watchdog_text),
                 android.speech.tts.TextToSpeech.QUEUE_FLUSH,
                 null,

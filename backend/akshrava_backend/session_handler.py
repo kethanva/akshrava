@@ -2,6 +2,7 @@ import json
 import logging
 import time
 from collections import OrderedDict
+from json import JSONDecodeError
 
 from .coordination import use_redis_frame_limiter
 from .detector import jpeg_dimensions
@@ -18,13 +19,14 @@ MAX_CONTROL_MESSAGE_BYTES = 4096
 # that races the next frame is accepted, while an arbitrary stream of old ids cannot grow session
 # memory or fabricate delivery telemetry.
 MAX_PENDING_RESULT_ACKS = 4
-# ping/result_ack are control traffic, not frames: they skip the frame admission limiter and the
-# Redis lease renewal entirely (result_ack never renews the lease at all). Without an independent
-# bound here, one authenticated device could still drive this loop -- and every allocation it
-# makes -- at line rate. Generous relative to real traffic (one ping per app-ping interval, one
-# ack per frame) but never unbounded.
-CONTROL_MESSAGE_RATE_PER_SECOND = 20.0
-CONTROL_MESSAGE_BURST = 40.0
+# Non-frame text messages skip the frame admission limiter. A ping still renews the admission
+# lease in main.py; result_ack deliberately does not. Without an independent bound here, an
+# authenticated client could send ping/status/look/unknown messages at line rate and make the
+# server allocate responses -- and, for ping, hit Redis -- at the same rate. Four per second with
+# an eight-message burst is still comfortably above legitimate traffic (about 1.2 result acks/s
+# plus one ping/minute) while keeping the abuse ceiling meaningfully small.
+CONTROL_MESSAGE_RATE_PER_SECOND = 4.0
+CONTROL_MESSAGE_BURST = 8.0
 
 
 class FrameStreamHandler:
@@ -58,6 +60,9 @@ class FrameStreamHandler:
 
         self.pending_header: FrameHeader | None = None
         self.discard_next_binary = False
+        # Malformed JSON may have been a frame header whose JPEG is still on the wire.
+        # Discard that orphan binary instead of 4400; a following ping/header clears this.
+        self.orphan_binary = False
         self._control_message_limiter = FrameRateLimiter(
             CONTROL_MESSAGE_RATE_PER_SECOND, CONTROL_MESSAGE_BURST
         )
@@ -76,7 +81,12 @@ class FrameStreamHandler:
         result this session intended to send, and this small bounded set also handles a delayed
         ack after the next frame starts.
         """
-        self._pending_result_acks[frame_id] = ack_expected
+        # A legacy phone that did not negotiate acknowledgements must not get a pending slot.
+        # Otherwise an unsolicited result_ack from that phone would be accepted and inflate the
+        # acknowledged numerator even though this result was never part of the expectation set.
+        if not ack_expected:
+            return
+        self._pending_result_acks[frame_id] = True
         self._pending_result_acks.move_to_end(frame_id)
         while len(self._pending_result_acks) > MAX_PENDING_RESULT_ACKS:
             # Evicting a slot is the exact moment a result becomes provably unacknowledged: the
@@ -94,6 +104,19 @@ class FrameStreamHandler:
         """Discard a pre-send acknowledgement slot after its result write failed."""
         self._pending_result_acks.pop(frame_id, None)
 
+    def record_unacknowledged_on_close(self) -> None:
+        """Settle acknowledgement slots that can no longer receive a reply.
+
+        Eviction catches sustained misses, but without this close-time drain the final four
+        results of every session could disappear without an acknowledgement and never reach the
+        delivery-failure metric. At socket teardown they are no longer merely in flight: this
+        authenticated session can never acknowledge them.
+        """
+        pending = len(self._pending_result_acks)
+        self._pending_result_acks.clear()
+        for _ in range(pending):
+            self.metrics.phone_result_unacknowledged()
+
     async def handle_text_frame(self, raw_payload: str) -> dict | None:
         """Verify the header text framing and apply admission rate limits.
 
@@ -101,18 +124,33 @@ class FrameStreamHandler:
         """
         if len(raw_payload.encode("utf-8")) > MAX_CONTROL_MESSAGE_BYTES:
             raise ProtocolError("control message is too large")
-        payload = json.loads(raw_payload)
+        try:
+            payload = json.loads(raw_payload)
+        except JSONDecodeError:
+            # One corrupted control frame is a transport artefact, not a misbehaving client.
+            # Closing the socket for it cost the user a full reconnect and a spoken outage.
+            logger.warning("discarding malformed control message for device=%s", self.device_id)
+            self.metrics.control_message_rejected()
+            self.orphan_binary = True
+            return {"type": "error", "code": "malformed_control_message"}
         if not isinstance(payload, dict):
             raise ProtocolError("control message must be a JSON object")
+        self.orphan_binary = False
         message_type = payload.get("type")
 
-        if message_type in ("ping", "result_ack") and not self._control_message_limiter.allow():
+        if message_type != "frame" and not self._control_message_limiter.allow():
             # Silently shed: a starved control stream on a device that is otherwise misbehaving
             # must not itself become a reason to close a walking session's socket.
             logger.warning("control message rate limit exceeded for device=%s", self.device_id)
             return None
 
         if message_type == "ping":
+            if await self.store.is_device_revoked(self.device_id):
+                return {
+                    "_action": "close",
+                    "code": 4403,
+                    "response": {"type": "error", "code": "device_revoked", "detail": "Device revoked"},
+                }
             return {"type": "pong"}
         elif message_type == "result_ack":
             frame_id = payload.get("frame_id")
@@ -157,9 +195,8 @@ class FrameStreamHandler:
             try:
                 header = parse_frame_header(payload)
             except ProtocolError as exc:
-                # A single malformed frame (e.g. an extreme but physically real pose that used to
-                # fail the old ±90° floor) must not tear down the walking session. Soft-shed and
-                # discard the paired JPEG so the next header can bind cleanly.
+                # A single malformed frame must not tear down the session. Soft-shed and discard
+                # the paired JPEG so the next header can bind cleanly.
                 logger.warning(
                     "rejecting malformed frame header for device=%s: %s",
                     self.device_id,
@@ -232,7 +269,11 @@ class FrameStreamHandler:
 
     async def handle_binary_frame(self, jpeg: bytes) -> dict:
         """Verify binary size, bounds, JPEG dimensions, and match with the pending header."""
+        server_received_epoch_ms = int(time.time() * 1000)
         decode_started = time.monotonic()
+        if self.pending_header is None and self.orphan_binary:
+            self.orphan_binary = False
+            return {"_action": "continue"}
         if not (self.pending_header is not None or self.discard_next_binary):
             logger.error("Protocol violation: received binary bytes without pending header")
             return {
@@ -273,4 +314,5 @@ class FrameStreamHandler:
             "_action": "analyze",
             "header": header,
             "decode_ms": int((time.monotonic() - decode_started) * 1000),
+            "server_received_epoch_ms": server_received_epoch_ms,
         }

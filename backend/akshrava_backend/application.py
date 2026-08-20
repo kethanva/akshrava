@@ -18,7 +18,14 @@ class SessionApplicationService:
         self.store = store
         self.vision = vision
 
-    async def analyze_frame(self, state: SessionState, header: FrameHeader, jpeg: bytes):
+    async def analyze_frame(
+        self,
+        state: SessionState,
+        header: FrameHeader,
+        jpeg: bytes,
+        *,
+        server_received_epoch_ms: int | None = None,
+    ):
         if state.calibration_id != header.calibration_id:
             state.calibration_id = header.calibration_id
             await self.store.upsert_device(state.device_id, header.calibration_id)
@@ -34,7 +41,9 @@ class SessionApplicationService:
                         header.frame_id, header.priority, state.device_id)
 
         state.last_capture_mono_ms = header.capture_mono_ms
-        result = await self.vision.analyze(state, header, jpeg)
+        result = await self.vision.analyze(
+            state, header, jpeg, server_received_epoch_ms=server_received_epoch_ms
+        )
         # Correlates phone/API/GPU logs without exposing a device ID in telemetry or results.
         material = f"{state.trace_prefix}:{header.frame_id}:{header.capture_mono_ms}"
         result["trace_id"] = header.trace_id or hashlib.sha256(material.encode("utf-8")).hexdigest()[:20]
